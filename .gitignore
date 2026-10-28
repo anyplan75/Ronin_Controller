@@ -1,0 +1,19 @@
+.pio
+.cache
+compile_commands.json
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# 다른 프로젝트와 같은 비밀·찌꺼기 차단
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+*credentials*
+*credential*
+*비밀*
+.DS_Store
