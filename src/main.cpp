@@ -5,6 +5,7 @@
 #include "dji_rs.h"
 #include "shot_player.h"
 #include "sony_remote.h"
+#include "sync_schedule.h"
 
 /*
  * 배선 (중요)
@@ -21,6 +22,9 @@
  *
  * USB-C 케이블을 "연장선"으로만 쓸 경우에도 반대쪽은 RSA CAN 핀이어야 합니다.
  * 검정(GND)도 반드시 같이 연결하세요. 빨강(VBUS)은 트랜시버 3.3V에 넣지 마세요.
+ *
+ * 이 펌웨어는 로닌 CAN 전용입니다. 고프로 블루투스를 여기 올리지 않습니다.
+ * 액션 5 프로 중계는 다른 기판, PlatformIO 환경 gopro-relay 입니다.
  */
 
 #define CAN_TX_PIN 13
@@ -38,6 +42,41 @@ DjiRs gimbal;
 ShotPlayer shots(gimbal);
 SonyRemote sony;
 bool ethGotIP = false;
+
+// 로닌 카메라 제어 포트로 마지막에 보낸 녹화 상태.
+// 짐벌이 실제 녹화 중인지 되돌려 주지는 않습니다.
+bool camRecording = false;
+bool syncArmed = false;
+uint32_t syncFireAtMs = 0;
+uint16_t syncAction = CAM_REC_START;
+String syncResult = "idle";
+
+uint32_t parseU32(const String& text) {
+  return strtoul(text.c_str(), nullptr, 10);
+}
+
+void noteCamResult(uint16_t action, bool okSend) {
+  if (!okSend) {
+    syncResult = "CAN_TX_FAIL";
+    return;
+  }
+  camRecording = action == CAM_REC_START;
+  syncResult = camRecording ? "recording" : "stopped";
+}
+
+void fireCamNow(uint16_t action) {
+  syncArmed = false;
+  noteCamResult(action, gimbal.cameraAction(action));
+}
+
+void serviceSync() {
+  if (!syncArmed) {
+    return;
+  }
+  if (static_cast<int32_t>(millis() - syncFireAtMs) >= 0) {
+    fireCamNow(syncAction);
+  }
+}
 
 void cancelShot() {
   shots.cancel();
@@ -137,6 +176,11 @@ void handleRoot() {
       "GET /stop                      (떼기)\n"
       "GET /speed?yaw=0&roll=0&pitch=0\n"
       "GET /record?action=toggle|start|stop\n"
+      "GET /sync/clock\n"
+      "GET /sync/record?action=start|stop&at_ms=기판millis\n"
+      "GET /sync/record?action=start|stop&delay_ms=250\n"
+      "  여러 기판은 at_ms 를 같은 벽시계에 맞춰 부르세요. delay_ms 는 그 기판이 요청을 받은 뒤의 시간입니다.\n"
+      "  이 기판은 고프로·오즈모 블루투스 중계를 하지 않습니다.\n"
       "GET /photo\n"
       "GET /sony/connect?ssid=DIRECT-xxxx&pass=비밀번호\n"
       "GET /sony/status\n"
@@ -186,6 +230,18 @@ void handleStatus() {
   String sonyErr = sony.lastError();
   sonyErr.replace("\"", "'");
   json += "\"sony_error\":\"" + sonyErr + "\",";
+  json += "\"millis\":" + String(millis()) + ",";
+  json += "\"cam_recording\":" + String(camRecording ? "true" : "false") + ",";
+  json += "\"sync_armed\":" + String(syncArmed ? "true" : "false") + ",";
+  int32_t syncWait = 0;
+  if (syncArmed) {
+    syncWait = static_cast<int32_t>(syncFireAtMs - millis());
+    if (syncWait < 0) {
+      syncWait = 0;
+    }
+  }
+  json += "\"sync_wait_ms\":" + String(syncWait) + ",";
+  json += "\"sync_result\":\"" + syncResult + "\",";
   json += "\"shot\":\"" + String(shots.name()) + "\",";
   json += "\"shot_busy\":" + String(shots.busy() ? "true" : "false");
   json += "}";
@@ -263,16 +319,64 @@ void handleJog() {
 
 void handleRecord() {
   const String action = server.hasArg("action") ? server.arg("action") : "toggle";
-  static bool rec = false;
   uint16_t cam = CAM_REC_START;
-  if (action == "stop" || (action == "toggle" && rec)) {
+  if (action == "stop" || (action == "toggle" && camRecording)) {
     cam = CAM_REC_STOP;
-    rec = false;
-  } else {
-    rec = true;
+  } else if (action != "start" && action != "toggle") {
+    sendText(400, "action=start|stop|toggle");
+    return;
   }
-  const bool okSend = gimbal.cameraAction(cam);
-  sendText(okSend ? 200 : 503, okSend ? (rec ? "recording" : "stopped") : "CAM_TX_FAIL");
+  fireCamNow(cam);
+  const bool failed = syncResult == "CAN_TX_FAIL";
+  sendText(failed ? 503 : 200, failed ? "CAM_TX_FAIL" : (camRecording ? "recording" : "stopped"));
+}
+
+void handleSyncClock() {
+  sendJson(200, "{\"millis\":" + String(millis()) + "}");
+}
+
+void handleSyncRecord() {
+  const String action = server.hasArg("action") ? server.arg("action") : "";
+  uint16_t cam = CAM_REC_START;
+  if (action == "start") {
+    cam = CAM_REC_START;
+  } else if (action == "stop") {
+    cam = CAM_REC_STOP;
+  } else {
+    sendText(400, "action=start or action=stop");
+    return;
+  }
+
+  const uint32_t now = millis();
+  uint32_t fireAt = now;
+  bool fireNow = true;
+  const bool hasAt = server.hasArg("at_ms");
+  const int32_t delayArg = server.hasArg("delay_ms") ? server.arg("delay_ms").toInt() : 0;
+  if (!planSyncFire(hasAt, hasAt ? parseU32(server.arg("at_ms")) : 0, server.hasArg("delay_ms"),
+                    delayArg, now, &fireAt, &fireNow)) {
+    sendText(400, "at_ms too far");
+    return;
+  }
+
+  if (fireNow) {
+    fireCamNow(cam);
+  } else {
+    syncAction = cam;
+    syncFireAtMs = fireAt;
+    syncArmed = true;
+    syncResult = "armed";
+  }
+
+  const int32_t wait = fireNow ? 0 : static_cast<int32_t>(fireAt - now);
+  String json = "{";
+  json += "\"armed\":" + String(syncArmed ? "true" : "false") + ",";
+  json += "\"action\":\"" + action + "\",";
+  json += "\"now_ms\":" + String(now) + ",";
+  json += "\"fire_at_ms\":" + String(fireAt) + ",";
+  json += "\"wait_ms\":" + String(wait) + ",";
+  json += "\"result\":\"" + syncResult + "\"";
+  json += "}";
+  sendJson(200, json);
 }
 
 void handlePhoto() {
@@ -422,6 +526,8 @@ void setup() {
   server.on("/jog/roll/left", handleJog);
   server.on("/jog/roll/right", handleJog);
   server.on("/record", handleRecord);
+  server.on("/sync/clock", handleSyncClock);
+  server.on("/sync/record", handleSyncRecord);
   server.on("/photo", handlePhoto);
   server.on("/zoom/in", handleMotor);
   server.on("/zoom/out", handleMotor);
@@ -467,6 +573,7 @@ void setup() {
 }
 
 void loop() {
+  serviceSync();
   server.handleClient();
   gimbal.loop();
   shots.loop();
