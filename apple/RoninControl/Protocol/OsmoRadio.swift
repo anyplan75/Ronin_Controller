@@ -388,7 +388,7 @@ final class OsmoRadio: NSObject, ObservableObject {
         link.notified = true
     }
 
-    private func publish(_ id: UUID, _ change: (inout OsmoLive) -> Void) {
+    private func publish(_ id: UUID, _ change: @escaping (inout OsmoLive) -> Void) {
         DispatchQueue.main.async {
             var item = self.live[id] ?? OsmoLive()
             change(&item)

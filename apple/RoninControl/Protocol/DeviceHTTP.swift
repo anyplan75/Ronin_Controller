@@ -202,6 +202,14 @@ enum GoProClient {
         try await get(device, path: "/gopro/webcam/\(start ? "start" : "stop")")
     }
 
+    /// 카메라 자신의 미리보기 스트림을 켜거나 끕니다. 그림 파일을 받아 오지는 않습니다.
+    static func previewStream(_ device: DeviceRecord, start: Bool) async throws -> String {
+        guard device.kind.supportsLiveView else {
+            throw CallError.unavailable("이 장치는 미리보기 그림을 주지 않습니다.")
+        }
+        return try await get(device, path: "/gopro/camera/stream/\(start ? "start" : "stop")", timeout: 6)
+    }
+
     private static func get(
         _ device: DeviceRecord,
         path: String,

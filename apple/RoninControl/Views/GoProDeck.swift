@@ -23,8 +23,8 @@ struct GoProDeck: View {
 
     @ViewBuilder private func content(_ device: DeviceRecord) -> some View {
         let relay = device.kind == .goproAction5
-        Section(relay ? "액션 5 프로 중계" : "고프로 직접 연결") {
-            ApiBadge(title: relay ? "중계 기판 HTTP" : "실사용 · 카메라 HTTP", tint: relay ? .blue : .green)
+        Section(relay ? "오즈모 액션 5 프로 · 블루투스" : "고프로 · 와이파이") {
+            ApiBadge(title: relay ? "C3 블루투스 중계" : "와이파이", tint: relay ? .blue : .green)
             Text(studio.goproSession[device.id] ?? "세션을 아직 확인하지 않았습니다.")
             if relay {
                 Text(studio.goproLive[device.id]?.relayBle ?? "")

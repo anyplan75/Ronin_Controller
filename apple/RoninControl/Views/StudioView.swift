@@ -16,13 +16,17 @@ struct StudioView: View {
     @State private var showCompanionNote = false
     @State private var companionNote = ""
     @State private var importProfile = false
+    @State private var showFinder = false
+    @State private var showQR = false
+    /// 무대 아래 휠에 올릴 로닌입니다. 고른 순서가 왼쪽부터이고, 최대 4대입니다.
+    @State private var stageWheels: [UUID] = []
 
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
                 Section("장치 \(studio.profile.devices.count)/\(StudioProfile.maxDevices)") {
                     ForEach(studio.profile.devices) { device in
-                        Label(device.name, systemImage: icon(device.kind))
+                        Label(device.name, systemImage: icon(device))
                             .tag(StudioPick.device(device.id))
                     }
                 }
@@ -37,6 +41,8 @@ struct StudioView: View {
         } detail: {
             detail
         }
+        .background(StagePalette.paper)
+        .preferredColorScheme(.light)
         .safeAreaInset(edge: .bottom) {
             GroupBar(compact: false)
                 .padding()
@@ -53,6 +59,12 @@ struct StudioView: View {
         }
         .fileExporter(isPresented: $showProfile, document: profileFile, contentType: .json, defaultFilename: "로닌컨트롤-프로필") { result in
             if case .failure = result { studio.note("프로필 파일을 저장하지 못했습니다.") }
+        }
+        .sheet(isPresented: $showFinder) {
+            GoProFindSheet()
+        }
+        .sheet(isPresented: $showQR) {
+            GoProQRConnectSheet()
         }
         .fileImporter(isPresented: $importProfile, allowedContentTypes: [.json]) { result in
             if case .success(let url) = result, let data = readSecurityScoped(url) {
@@ -94,15 +106,24 @@ struct StudioView: View {
                     }
                 }
         case nil:
-            ContentUnavailableView("장치를 고르세요", systemImage: "video", description: Text("맥과 아이패드에서 장치를 만들고, 프리셋을 고치고, 컴패니언 페이지를 내보냅니다."))
+            StageConsole(initialId: nil, wheelIds: $stageWheels, showsWheels: true)
         }
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem {
+            Button("무대") { selection = nil }
+        }
+        ToolbarItem {
+            Button("찾기") { showFinder = true }
+        }
+        ToolbarItem {
+            Button("QR") { showQR = true }
+        }
+        ToolbarItem {
             Menu("장치 추가") {
-                ForEach(DeviceKind.allCases) { kind in
-                    Button(kind.title) { studio.addDevice(kind: kind) }
+                ForEach(DeviceProduct.allCases) { product in
+                    Button(product.label) { studio.addDevice(product) }
                 }
             }
             .disabled(studio.profile.devices.count >= StudioProfile.maxDevices)
@@ -139,12 +160,13 @@ struct StudioView: View {
         }
     }
 
-    private func icon(_ kind: DeviceKind) -> String {
-        switch kind {
+    private func icon(_ device: DeviceRecord) -> String {
+        switch device.kind {
         case .ronin: return "rotate.3d"
-        case .gopro: return "camera"
-        case .goproAction5: return "wifi.router"
-        case .osmoAction: return "camera.metering.spot"
+        case .gopro: return "wifi"
+        case .goproAction5: return "dot.radiowaves.left.and.right"
+        case .osmoAction:
+            return device.osmoModel == .osmo360 ? "camera.metering.center.weighted" : "camera.metering.spot"
         case .osmoNoAPI: return "questionmark.circle"
         }
     }

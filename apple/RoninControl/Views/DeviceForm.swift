@@ -8,11 +8,17 @@ struct DeviceForm: View {
     private var device: Binding<DeviceRecord> { studio.deviceBinding(deviceId) }
 
     var body: some View {
-        Section("직접 연결") {
+        Section("장치") {
             TextField("이름", text: device.name)
-            Picker("종류", selection: kindChoice) {
-                ForEach(DeviceKind.allCases) { kind in
-                    Text(kind.title).tag(kind)
+            if device.wrappedValue.kind == .osmoNoAPI {
+                Text("오즈모 포켓·모바일·나노는 제어 API가 없어 새로 추가할 수 없습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("종류", selection: productChoice) {
+                    ForEach(DeviceProduct.allCases) { product in
+                        Text(product.label).tag(product)
+                    }
                 }
             }
             Toggle("사용", isOn: device.enabled)
@@ -39,17 +45,17 @@ struct DeviceForm: View {
         device.wrappedValue.kind == .goproAction5 ? "중계 기판 주소" : "주소"
     }
 
-    private var kindChoice: Binding<DeviceKind> {
+    private var productChoice: Binding<DeviceProduct> {
         Binding(
-            get: { device.wrappedValue.kind },
-            set: { kind in
-                device.wrappedValue.kind = kind
-                device.wrappedValue.osmoModel = OsmoModel.choices(for: kind).first ?? .unknown
-                device.wrappedValue.port = kind.defaultPort
-                if kind == .gopro, device.wrappedValue.host.isEmpty {
+            get: { DeviceProduct.matching(device.wrappedValue) ?? .ronin },
+            set: { product in
+                device.wrappedValue.kind = product.kind
+                device.wrappedValue.osmoModel = product.osmoModel
+                device.wrappedValue.port = product.kind.defaultPort
+                if product.kind == .gopro, device.wrappedValue.host.isEmpty {
                     device.wrappedValue.host = "10.5.5.9"
                 }
-                if kind == .goproAction5, device.wrappedValue.host == "10.5.5.9" {
+                if product.kind == .goproAction5, device.wrappedValue.host == "10.5.5.9" {
                     device.wrappedValue.host = ""
                 }
             }
@@ -65,7 +71,9 @@ struct DeviceForm: View {
         case .goproAction5:
             Text(Honest.action5).font(.caption).foregroundStyle(.secondary)
         case .osmoAction:
-            Text(Honest.osmo).font(.caption).foregroundStyle(.secondary)
+            Text(device.wrappedValue.osmoModel == .osmo360 ? Honest.osmo360 : Honest.osmo)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         case .osmoNoAPI:
             Text(Honest.noAPI).font(.caption).foregroundStyle(.secondary)
         }
@@ -74,7 +82,7 @@ struct DeviceForm: View {
     @ViewBuilder private var osmoIdentity: some View {
         Section("오즈모 기종") {
             Picker("기종", selection: device.osmoModel) {
-                ForEach(OsmoModel.choices(for: device.wrappedValue.kind)) { model in
+                ForEach(OsmoModel.choices(for: device.wrappedValue.kind, model: device.wrappedValue.osmoModel)) { model in
                     Text(model.title).tag(model)
                 }
             }

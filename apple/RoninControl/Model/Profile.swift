@@ -6,7 +6,7 @@ import Foundation
 enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case ronin
     case gopro
-    /// 고프로 액션 5 프로. 앱은 별도 중계 기판의 HTTP만 부릅니다. 로닌 PoE가 아닙니다.
+    /// 오즈모 액션 5 프로. 앱은 이미 둔 C3 중계 기판으로만 붙습니다. 고프로가 아닙니다.
     case goproAction5
     case osmoAction
     case osmoNoAPI
@@ -15,21 +15,25 @@ enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .ronin: return "로닌 기판"
-        case .gopro: return "고프로 직접 연결"
-        case .goproAction5: return "고프로 액션 5 프로"
-        case .osmoAction: return "오즈모 액션·360"
-        case .osmoNoAPI: return "오즈모 포켓·모바일·나노"
+        case .ronin: return "로닌 기판 · CAN"
+        case .gopro: return "고프로 · 와이파이"
+        case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
+        case .osmoAction: return "오즈모 액션 · 블루투스"
+        case .osmoNoAPI: return "제어 API 없음"
         }
     }
 
     var usesHTTP: Bool { self == .ronin || isGoProFamily }
 
-    /// 액션 5 프로를 뺀 고프로는 카메라 와이파이로 직접 붙습니다.
+    /// 고프로 HERO는 카메라 와이파이입니다. 오즈모 액션 5 프로는 여기 넣지 않습니다.
     var isDirectGoPro: Bool { self == .gopro }
 
     /// 둘 다 Open GoPro HTTP 경로를 쓰지만, 붙는 장치가 다릅니다.
     var isGoProFamily: Bool { self == .gopro || self == .goproAction5 }
+
+    /// 고프로 HERO 와이파이만 미리보기 스트림이 있습니다.
+    /// 오즈모 액션 5 프로의 C3 중계, 다른 오즈모, 로닌 기판은 그림 미리보기를 주지 않습니다.
+    var supportsLiveView: Bool { self == .gopro }
 
     var defaultPort: Int {
         switch self {
@@ -85,11 +89,67 @@ enum OsmoModel: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    static func choices(for kind: DeviceKind) -> [OsmoModel] {
+    /// 폰 블루투스의 오즈모 액션입니다. 액션 5 프로는 C3 중계 줄이라 여기 넣지 않습니다.
+    static let actionModels: [OsmoModel] = [.action4, .action6]
+
+    static func choices(for kind: DeviceKind, model: OsmoModel) -> [OsmoModel] {
         switch kind {
-        case .osmoAction: return [.action5Pro, .action4, .action6, .osmo360]
-        case .osmoNoAPI: return [.pocket, .mobile, .nano, .unknown]
-        default: return []
+        case .osmoAction:
+            if model == .osmo360 { return [.osmo360] }
+            if model == .action5Pro { return [.action5Pro] + actionModels }
+            return actionModels
+        case .osmoNoAPI:
+            return [.pocket, .mobile, .nano, .unknown]
+        default:
+            return []
+        }
+    }
+}
+
+/// 장치 추가 메뉴에 나오는 항목입니다. 제어 API가 없는 기종은 넣지 않습니다.
+enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
+    case ronin
+    case goproWifi
+    case action5Bluetooth
+    case osmoActionBluetooth
+    case osmo360Bluetooth
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .ronin: return "로닌 기판 · CAN"
+        case .goproWifi: return "고프로 · 와이파이"
+        case .action5Bluetooth: return "오즈모 액션 5 프로 · 블루투스"
+        case .osmoActionBluetooth: return "오즈모 액션 · 블루투스"
+        case .osmo360Bluetooth: return "오즈모 360 · 블루투스"
+        }
+    }
+
+    var kind: DeviceKind {
+        switch self {
+        case .ronin: return .ronin
+        case .goproWifi: return .gopro
+        case .action5Bluetooth: return .goproAction5
+        case .osmoActionBluetooth, .osmo360Bluetooth: return .osmoAction
+        }
+    }
+
+    var osmoModel: OsmoModel {
+        switch self {
+        case .osmo360Bluetooth: return .osmo360
+        case .osmoActionBluetooth: return .action4
+        default: return .unknown
+        }
+    }
+
+    static func matching(_ device: DeviceRecord) -> DeviceProduct? {
+        switch device.kind {
+        case .ronin: return .ronin
+        case .gopro: return .goproWifi
+        case .goproAction5: return .action5Bluetooth
+        case .osmoAction: return device.osmoModel == .osmo360 ? .osmo360Bluetooth : .osmoActionBluetooth
+        case .osmoNoAPI: return nil
         }
     }
 }
@@ -104,6 +164,19 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     var bleIdentifier: String
     var enabled: Bool
     var pairedOnce: Bool
+
+    /// 목록과 메뉴에 쓰는 이름입니다. 제품과 연결을 같이 적습니다.
+    var linkLabel: String {
+        switch kind {
+        case .ronin: return "로닌 기판 · CAN"
+        case .gopro: return "고프로 · 와이파이"
+        case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
+        case .osmoAction:
+            return osmoModel == .osmo360 ? "오즈모 360 · 블루투스" : "오즈모 액션 · 블루투스"
+        case .osmoNoAPI:
+            return "제어 API 없음"
+        }
+    }
 
     var baseURLText: String {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -152,6 +225,57 @@ struct ShootPreset: Codable, Identifiable, Equatable, Sendable {
     var connections: [DeviceRecord]
 }
 
+/// 무대 위 한 장치의 자리입니다. 단위는 미터, 방향은 도입니다.
+/// 예전 프로필에는 이 목록이 없어도 읽힙니다.
+struct StageSpot: Codable, Equatable, Sendable, Identifiable {
+    var id: UUID { deviceId }
+    var deviceId: UUID
+    var x: Double
+    var y: Double
+    var z: Double
+    /// 방에 둔 제자리 방향입니다. 도는 기준은 이 각도입니다.
+    var aimYaw: Double
+    /// 짐벌에 보내는 제자리 요·피치입니다. 없으면 0입니다.
+    var homeYaw: Double
+    var homePitch: Double
+
+    init(deviceId: UUID, x: Double, y: Double, z: Double, aimYaw: Double, homeYaw: Double = 0, homePitch: Double = 0) {
+        self.deviceId = deviceId
+        self.x = x
+        self.y = y
+        self.z = z
+        self.aimYaw = aimYaw
+        self.homeYaw = homeYaw
+        self.homePitch = homePitch
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case deviceId, x, y, z, aimYaw, homeYaw, homePitch
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        deviceId = try box.decode(UUID.self, forKey: .deviceId)
+        x = try box.decode(Double.self, forKey: .x)
+        y = try box.decode(Double.self, forKey: .y)
+        z = try box.decode(Double.self, forKey: .z)
+        aimYaw = try box.decode(Double.self, forKey: .aimYaw)
+        homeYaw = try box.decodeIfPresent(Double.self, forKey: .homeYaw) ?? 0
+        homePitch = try box.decodeIfPresent(Double.self, forKey: .homePitch) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(deviceId, forKey: .deviceId)
+        try box.encode(x, forKey: .x)
+        try box.encode(y, forKey: .y)
+        try box.encode(z, forKey: .z)
+        try box.encode(aimYaw, forKey: .aimYaw)
+        try box.encode(homeYaw, forKey: .homeYaw)
+        try box.encode(homePitch, forKey: .homePitch)
+    }
+}
+
 struct StudioProfile: Codable, Equatable, Sendable {
     static let maxDevices = 8
     static let storageKey = "[로닌컨트롤]_profile"
@@ -164,6 +288,59 @@ struct StudioProfile: Codable, Equatable, Sendable {
     var practice: Bool
     var senderId: UInt32
     var senderMac: [UInt8]
+    var stageSpots: [StageSpot]
+
+    init(
+        version: Int,
+        devices: [DeviceRecord],
+        presets: [ShootPreset],
+        groupIds: [UUID],
+        leadMs: Int,
+        practice: Bool,
+        senderId: UInt32,
+        senderMac: [UInt8],
+        stageSpots: [StageSpot] = []
+    ) {
+        self.version = version
+        self.devices = devices
+        self.presets = presets
+        self.groupIds = groupIds
+        self.leadMs = leadMs
+        self.practice = practice
+        self.senderId = senderId
+        self.senderMac = senderMac
+        self.stageSpots = stageSpots
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        version = try box.decode(Int.self, forKey: .version)
+        devices = try box.decode([DeviceRecord].self, forKey: .devices)
+        presets = try box.decode([ShootPreset].self, forKey: .presets)
+        groupIds = try box.decode([UUID].self, forKey: .groupIds)
+        leadMs = try box.decode(Int.self, forKey: .leadMs)
+        practice = try box.decode(Bool.self, forKey: .practice)
+        senderId = try box.decode(UInt32.self, forKey: .senderId)
+        senderMac = try box.decode([UInt8].self, forKey: .senderMac)
+        stageSpots = try box.decodeIfPresent([StageSpot].self, forKey: .stageSpots) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(version, forKey: .version)
+        try box.encode(devices, forKey: .devices)
+        try box.encode(presets, forKey: .presets)
+        try box.encode(groupIds, forKey: .groupIds)
+        try box.encode(leadMs, forKey: .leadMs)
+        try box.encode(practice, forKey: .practice)
+        try box.encode(senderId, forKey: .senderId)
+        try box.encode(senderMac, forKey: .senderMac)
+        try box.encode(stageSpots, forKey: .stageSpots)
+    }
 
     static func makeNew() -> StudioProfile {
         StudioProfile(

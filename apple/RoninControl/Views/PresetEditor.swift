@@ -49,7 +49,7 @@ struct PresetEditor: View {
                 number("초", preset.ronin.seconds)
             }
             Section("고프로") {
-                Text("체크한 설정만 보냅니다. 액션 5 프로 중계에는 줌과 카메라 프리셋 번호를 보내지 않습니다.")
+                Text("체크한 설정만 보냅니다. 오즈모 액션 5 프로 중계에는 줌과 카메라 프리셋 번호를 보내지 않습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 ForEach(GoProCatalog.settings) { spec in
@@ -62,11 +62,11 @@ struct PresetEditor: View {
                     }
                     .disabled(!choice.wrappedValue.enabled)
                 }
-                Toggle("디지털 줌 (직접 연결만)", isOn: zoomOn)
+                Toggle("디지털 줌 (고프로 와이파이)", isOn: zoomOn)
                 if preset.wrappedValue.gopro.digitalZoomPercent != nil {
                     Stepper("\(preset.wrappedValue.gopro.digitalZoomPercent ?? 0)%", value: zoomValue, in: 0...100)
                 }
-                Toggle("카메라 프리셋 번호 (직접 연결만)", isOn: presetIdOn)
+                Toggle("카메라 프리셋 번호 (고프로 와이파이)", isOn: presetIdOn)
                 if preset.wrappedValue.gopro.loadPresetId != nil {
                     Stepper("번호 \(preset.wrappedValue.gopro.loadPresetId ?? 0)", value: presetIdValue, in: 0...200)
                 }
@@ -87,7 +87,7 @@ struct PresetEditor: View {
                     Text("아직 주소를 저장하지 않았습니다.")
                 }
                 ForEach(preset.wrappedValue.connections) { device in
-                    Text("\(device.name)  \(device.kind.title)  \(device.baseURLText)")
+                    Text("\(device.name)  \(device.linkLabel)  \(device.baseURLText)")
                         .font(.caption)
                 }
             }

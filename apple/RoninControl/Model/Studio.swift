@@ -98,7 +98,7 @@ final class Studio: ObservableObject {
         }
     }
 
-    func addDevice(kind: DeviceKind) {
+    func addDevice(_ product: DeviceProduct) {
         guard profile.devices.count < StudioProfile.maxDevices else {
             note("장치는 8대까지입니다.")
             return
@@ -106,11 +106,11 @@ final class Studio: ObservableObject {
         let index = profile.devices.count + 1
         let device = DeviceRecord(
             id: UUID(),
-            name: "\(kind.title) \(index)",
-            kind: kind,
-            osmoModel: OsmoModel.choices(for: kind).first ?? .unknown,
-            host: kind == .gopro ? "10.5.5.9" : "",
-            port: kind.defaultPort,
+            name: "\(product.label) \(index)",
+            kind: product.kind,
+            osmoModel: product.osmoModel,
+            host: product.kind == .gopro ? "10.5.5.9" : "",
+            port: product.kind.defaultPort,
             bleIdentifier: "",
             enabled: true,
             pairedOnce: false
@@ -119,9 +119,39 @@ final class Studio: ObservableObject {
         profile.groupIds.append(device.id)
     }
 
+    /// 찾기에서 실제로 확인한 고프로만 고프로 · 와이파이로 넣습니다.
+    func addDiscoveredGoPro(name: String, host: String, port: Int) {
+        guard profile.devices.count < StudioProfile.maxDevices else {
+            note("장치는 8대까지입니다.")
+            return
+        }
+        let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanHost.isEmpty, port > 0 else { return }
+        if profile.devices.contains(where: { $0.kind == .gopro && $0.host == cleanHost && $0.port == port }) {
+            note("이미 등록된 고프로입니다.")
+            return
+        }
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let device = DeviceRecord(
+            id: UUID(),
+            name: cleanName.isEmpty ? "고프로 · 와이파이" : cleanName,
+            kind: .gopro,
+            osmoModel: .unknown,
+            host: cleanHost,
+            port: port,
+            bleIdentifier: "",
+            enabled: true,
+            pairedOnce: false
+        )
+        profile.devices.append(device)
+        profile.groupIds.append(device.id)
+        note("\(device.name) 을 고프로 · 와이파이로 등록했습니다.")
+    }
+
     func deleteDevice(_ id: UUID) {
         profile.devices.removeAll { $0.id == id }
         profile.groupIds.removeAll { $0 == id }
+        profile.stageSpots.removeAll { $0.deviceId == id }
         for index in profile.presets.indices {
             profile.presets[index].deviceIds.removeAll { $0 == id }
         }
@@ -170,6 +200,75 @@ final class Studio: ObservableObject {
 
     var grouped: [DeviceRecord] {
         profile.devices.filter { $0.enabled && profile.groupIds.contains($0.id) }
+    }
+
+    /// 아직 자리가 없는 장치를 무대 앞쪽에 나눠 둡니다. 이미 둔 자리는 건드리지 않습니다.
+    func ensureStageSpots() {
+        var spots = profile.stageSpots
+        var changed = spots.contains { spot in
+            !profile.devices.contains { $0.id == spot.deviceId }
+        }
+        spots.removeAll { spot in !profile.devices.contains { $0.id == spot.deviceId } }
+        let count = max(profile.devices.count, 1)
+        for (index, device) in profile.devices.enumerated() where !spots.contains(where: { $0.deviceId == device.id }) {
+            let placed = StageRoom.place(index: index, count: count)
+            spots.append(StageSpot(deviceId: device.id, x: placed.x, y: placed.y, z: placed.z, aimYaw: 0))
+            changed = true
+        }
+        if changed {
+            profile.stageSpots = spots
+        }
+    }
+
+    func stageSpot(for deviceId: UUID) -> StageSpot {
+        if let found = profile.stageSpots.first(where: { $0.deviceId == deviceId }) {
+            return found
+        }
+        let index = profile.devices.firstIndex { $0.id == deviceId } ?? 0
+        let placed = StageRoom.place(index: index, count: max(profile.devices.count, 1))
+        return StageSpot(deviceId: deviceId, x: placed.x, y: placed.y, z: placed.z, aimYaw: 0)
+    }
+
+    func moveStage(
+        deviceId: UUID,
+        x: Double? = nil,
+        y: Double? = nil,
+        z: Double? = nil,
+        aimYaw: Double? = nil,
+        homeYaw: Double? = nil,
+        homePitch: Double? = nil
+    ) {
+        var spot = stageSpot(for: deviceId)
+        if let x { spot.x = min(StageRoom.width * 0.48, max(-StageRoom.width * 0.48, x)) }
+        if let y { spot.y = min(StageRoom.length - 0.4, max(0.4, y)) }
+        if let z { spot.z = min(StageRoom.height - 0.3, max(0.2, z)) }
+        if let aimYaw { spot.aimYaw = min(180, max(-180, aimYaw)) }
+        if let homeYaw { spot.homeYaw = min(180, max(-180, homeYaw)) }
+        if let homePitch { spot.homePitch = min(180, max(-180, homePitch)) }
+        if let index = profile.stageSpots.firstIndex(where: { $0.deviceId == deviceId }) {
+            profile.stageSpots[index] = spot
+        } else {
+            profile.stageSpots.append(spot)
+        }
+    }
+
+    /// 무대에 적는 녹화 표시만 갱신합니다. 샷 목록은 다시 받지 않습니다.
+    func refreshMarks() async {
+        guard !profile.practice else { return }
+        for device in profile.devices where device.enabled && !device.baseURLText.isEmpty {
+            switch device.kind {
+            case .ronin:
+                if let status = try? await RoninClient.status(device) {
+                    roninLive[device.id] = status
+                }
+            case .gopro, .goproAction5:
+                if let live = try? await GoProClient.state(device) {
+                    goproLive[device.id] = live
+                }
+            case .osmoAction, .osmoNoAPI:
+                break
+            }
+        }
     }
 
     func refresh() async {
@@ -273,6 +372,34 @@ final class Studio: ObservableObject {
             }
         }
         await refresh()
+    }
+
+    /// 휠을 누르는 동안만 보냅니다. 성공 기록은 남기지 않아 로그가 넘치지 않습니다.
+    func roninHold(_ device: DeviceRecord, path: String?) async {
+        if profile.practice { return }
+        do {
+            if let path {
+                _ = try await RoninClient.command(device, path: path, query: ["speed": "30"])
+            } else {
+                _ = try await RoninClient.command(device, path: "/stop")
+            }
+        } catch {
+            note("\(device.name) \(error.localizedDescription)")
+        }
+    }
+
+    /// 고른 로닌 한 대에만 이 프리셋의 짐벌 동작을 보냅니다.
+    func applyRoninLook(_ preset: ShootPreset, to device: DeviceRecord) async {
+        if profile.practice {
+            note("연습: \(device.name) \(preset.name)")
+            return
+        }
+        let line = await GroupFire.apply(preset, to: device)
+        if line.isEmpty {
+            note("\(preset.name): 이 로닌에 보낼 짐벌 설정이 없습니다.")
+        } else {
+            note(line)
+        }
     }
 
     func ronin(_ device: DeviceRecord, path: String, query: [String: String] = [:]) async {
@@ -420,7 +547,7 @@ extension GroupFire {
                     parts.append(text == nil ? "줌 실패" : "디지털 줌")
                 }
             } else if preset.gopro.loadPresetId != nil || preset.gopro.digitalZoomPercent != nil {
-                parts.append("줌과 카메라 프리셋은 액션 5 중계에 없습니다")
+                parts.append("줌과 카메라 프리셋은 오즈모 액션 5 프로 중계에 없습니다")
             }
             return parts.isEmpty ? "" : "\(device.name) \(parts.joined(separator: ", "))"
         case .osmoAction, .osmoNoAPI:
