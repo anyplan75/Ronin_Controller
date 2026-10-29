@@ -10,6 +10,9 @@ compile_commands.json
 .env
 .env.*
 !.env.example
+
+# 액션5 C3 브리지 와이파이. 비밀번호가 들어 있으므로 깃허브에 올리지 않습니다.
+esp32-c3/include/wifi_local.h
 *.pem
 *.p12
 *.key
