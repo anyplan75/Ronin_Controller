@@ -117,6 +117,41 @@ enum C3Client {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "보냄" : trimmed
     }
+
+    /// 기판이 주변에서 들은 고프로 맥 주소입니다. 아이폰은 이 번호를 직접 읽지 못합니다.
+    static func nearbyGoPros(_ device: DeviceRecord) async throws -> [NearbyGoPro] {
+        guard let startURL = LocalHTTP.url(host: device.host, port: device.port, path: "/scan", query: ["start": "1"]),
+              let url = LocalHTTP.url(host: device.host, port: device.port, path: "/scan") else {
+            throw CallError.noAddress
+        }
+        _ = try await LocalHTTP.get(startURL, timeout: 2)
+        struct Body: Decodable {
+            var pending: Bool?
+            var cameras: [NearbyGoPro]?
+            var detail: String?
+        }
+        for _ in 0..<10 {
+            let (_, text) = try await LocalHTTP.get(url, timeout: 2)
+            guard let data = text.data(using: .utf8),
+                  let body = try? JSONDecoder().decode(Body.self, from: data) else {
+                throw CallError.unavailable("기판이 카메라 목록을 주지 않았습니다.")
+            }
+            if body.pending == true {
+                try await Task.sleep(nanoseconds: 500_000_000)
+                continue
+            }
+            if let detail = body.detail, !detail.isEmpty, (body.cameras ?? []).isEmpty {
+                throw CallError.unavailable(detail)
+            }
+            return body.cameras ?? []
+        }
+        throw CallError.unavailable("주변 고프로 찾기가 끝나지 않았습니다.")
+    }
+}
+
+struct NearbyGoPro: Decodable, Sendable {
+    var mac: String
+    var name: String?
 }
 
 /// 기판이 알리는 이름을 듣고, 맥 주소가 맞으면 바로 숫자 주소를 받습니다.
@@ -127,6 +162,8 @@ final class C3Link {
 
     private var browser: NWBrowser?
     private var resolvers: [String: C3Resolver] = [:]
+    /// 이름 알림으로 들은 기판입니다. 상태 페이지가 대답하기 전에는 맥 주소를 확정하지 않습니다.
+    private var heard: [String: (host: String, port: Int)] = [:]
 
     func start() {
         guard browser == nil else { return }
@@ -144,6 +181,15 @@ final class C3Link {
         }
         browser.start(queue: .main)
         self.browser = browser
+    }
+
+    /// 이미 들은 기판이 있으면 바로 돌려주고, 없으면 알림이 올 때까지 잠깐 듣습니다.
+    func listen() async -> [(mac: String, host: String, port: Int)] {
+        let started = Date()
+        while heard.isEmpty && Date().timeIntervalSince(started) < 4 {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return heard.map { (mac: $0.key, host: $0.value.host, port: $0.value.port) }
     }
 
     private func apply(_ state: NWBrowser.State) {
@@ -176,7 +222,9 @@ final class C3Link {
                 Task { @MainActor in
                     self?.resolvers[trimmed] = nil
                     guard BoardMac.isFull(mac), !host.isEmpty, port > 0 else { return }
-                    self?.onFound?(BoardMac.normalize(mac), host, port)
+                    let clean = BoardMac.normalize(mac)
+                    self?.heard[clean] = (host, port)
+                    self?.onFound?(clean, host, port)
                 }
             }
             resolver.onFail = { [weak self] in

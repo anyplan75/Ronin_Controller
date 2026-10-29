@@ -4,6 +4,8 @@ struct DeviceForm: View {
     @EnvironmentObject private var studio: Studio
     @ObservedObject var radio: OsmoRadio
     let deviceId: UUID
+    @State private var findingBoard = false
+    @State private var findingCameras = false
 
     private var device: Binding<DeviceRecord> { studio.deviceBinding(deviceId) }
 
@@ -86,6 +88,17 @@ struct DeviceForm: View {
     @ViewBuilder private var bridgeBoard: some View {
         TextField("기판 맥 주소", text: boardMacText)
             .autocorrectionDisabled()
+        Button(findingBoard ? "기판 찾는 중" : "기판 찾기") {
+            findingBoard = true
+            Task {
+                await studio.scanBoard(deviceId)
+                findingBoard = false
+            }
+        }
+        .disabled(findingBoard)
+        Text("같은 망에서 기판을 찾습니다. 그 기판이 대답하면 맥 주소가 채워집니다.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         let phase = studio.bridgePhase[deviceId] ?? "기판을 찾는 중입니다."
         Text(phase)
             .font(.caption)
@@ -111,6 +124,17 @@ struct DeviceForm: View {
                     .foregroundStyle(.secondary)
             }
         }
+        Button(findingCameras ? "고프로 찾는 중" : "주변 고프로 찾기") {
+            findingCameras = true
+            Task {
+                await studio.scanCameras(deviceId)
+                findingCameras = false
+            }
+        }
+        .disabled(findingCameras || device.wrappedValue.host.isEmpty)
+        Text("기판이 주변 고프로의 블루투스 맥 주소를 읽어 위 칸에 넣습니다.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
         Button("촬영 시작") {
             Task { await studio.bridgeRecord(device.wrappedValue, start: true) }
         }

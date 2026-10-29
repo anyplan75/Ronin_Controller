@@ -608,6 +608,62 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// 같은 망에서 기판을 찾고, 그 기판이 대답한 맥 주소만 넣습니다.
+    func scanBoard(_ id: UUID) async {
+        guard profile.devices.contains(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
+        bridgePhase[id] = "기판을 찾는 중입니다."
+        let found = await c3.listen()
+        for item in found {
+            guard var probe = profile.devices.first(where: { $0.id == id }) else { return }
+            probe.host = item.host
+            probe.port = item.port
+            guard let live = try? await C3Client.status(probe), BoardMac.same(live.boardMac, BoardMac.pluggedIn) else {
+                continue
+            }
+            guard let index = profile.devices.firstIndex(where: { $0.id == id }) else { return }
+            profile.devices[index].boardMac = BoardMac.pluggedIn
+            profile.devices[index].host = item.host
+            profile.devices[index].port = item.port
+            bridgeLive[id] = live
+            bridgePhase[id] = "기판이 대답했습니다."
+            note("기판이 대답해서 맥 주소 \(BoardMac.pluggedIn) 를 넣었습니다.")
+            return
+        }
+        bridgePhase[id] = "기판이 대답하지 않았습니다."
+        note("같은 망에서 그 기판의 대답을 듣지 못했습니다.")
+    }
+
+    /// 기판이 주변 고프로의 블루투스 맥 주소를 읽어 빈 칸부터 채웁니다.
+    func scanCameras(_ id: UUID) async {
+        guard let index = profile.devices.firstIndex(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
+        let device = profile.devices[index]
+        guard !device.host.isEmpty else {
+            bridgePhase[id] = "기판이 아직 대답하지 않았습니다."
+            note("기판이 아직 대답하지 않았습니다.")
+            return
+        }
+        do {
+            let found = try await C3Client.nearbyGoPros(device).filter { BoardMac.isFull($0.mac) }
+            guard !found.isEmpty else {
+                note("주변에서 고프로를 찾지 못했습니다.")
+                return
+            }
+            var slots = BridgeCameraSlot.padded(device.cameras)
+            let take = min(4, found.count)
+            for slotIndex in 0..<take {
+                let item = found[slotIndex]
+                slots[slotIndex].mac = BoardMac.normalize(item.mac)
+                let name = (item.name ?? "").lowercased()
+                slots[slotIndex].role = (name.contains("action") || name.contains("osmo")) ? .action5 : .gopro
+            }
+            profile.devices[index].cameras = slots
+            note("주변 고프로 \(take)대의 맥 주소를 칸에 넣었습니다.")
+            await pullBoard(profile.devices[index])
+        } catch {
+            note("\(device.name) \(error.localizedDescription)")
+        }
+    }
+
     func refreshBoard(_ id: UUID) async {
         guard let device = profile.devices.first(where: { $0.id == id }), device.kind == .goproBridge else { return }
         if device.host.isEmpty {
