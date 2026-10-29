@@ -17,3 +17,8 @@ compile_commands.json
 *credential*
 *비밀*
 .DS_Store
+__pycache__/
+*.pyc
+apple/**/xcuserdata/
+apple/**/DerivedData/
+*.xcuserstate
