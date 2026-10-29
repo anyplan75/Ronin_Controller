@@ -23,7 +23,7 @@ enum GoProLabsJoin {
 
     /// 주소 코드입니다. 접속 글자가 끝난 뒤에 바로 보여 줍니다. 초를 세지 않습니다.
     /// `$ADDR=9`는 지금 주소를 9초 보여 주고, `$DSPL=9`는 그 글자가 1초 만에 사라지지 않게 합니다.
-    static let addressCommand = "$DSPL=9$ADDR=9 ".trimmingCharacters(in: .whitespaces)
+    static let addressCommand = "$DSPL=9$DSPL=9$ADDR=9"
 
     /// 비밀번호 형식이 아니면 바로 이 문장을 씁니다. 와이파이 비밀번호는 8자에서 63자입니다.
     static func passwordMessage(_ password: String) -> String? {
