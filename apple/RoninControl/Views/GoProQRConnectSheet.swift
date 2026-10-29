@@ -217,7 +217,7 @@ struct GoProQRConnectSheet: View {
         }
         for port in [8080, 80] {
             guard let url = LocalHTTP.url(host: host, port: port, path: "/gopro/version") else { continue }
-            if let (_, text) = try? await LocalHTTP.get(url, timeout: 4), text.contains("\"version\"") {
+            if let (_, text) = try? await LocalHTTP.get(url, timeout: 2), text.contains("\"version\"") {
                 studio.addDiscoveredGoPro(name: host, host: host, port: port)
                 problem = ""
                 return
