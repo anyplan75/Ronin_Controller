@@ -12,8 +12,6 @@ struct PhoneRunView: View {
     @State private var liveID: UUID?
     @State private var detailID: UUID?
     @State private var showStage = false
-    @State private var showFinder = false
-    @State private var showQR = false
     /// 휠에 올릴 로닌입니다. 고른 순서가 왼쪽부터입니다. 비어 있으면 휠이 없습니다.
     @State private var wheelIds: [UUID] = []
 
@@ -63,12 +61,6 @@ struct PhoneRunView: View {
             .navigationDestination(item: $detailID) { id in
                 PhoneDeviceDetail(deviceId: id)
             }
-            .sheet(isPresented: $showFinder) {
-                GoProFindSheet()
-            }
-            .sheet(isPresented: $showQR) {
-                GoProQRConnectSheet()
-            }
             .fileImporter(isPresented: $importProfile, allowedContentTypes: [.json]) { result in
                 if case .success(let url) = result, let data = readSecurityScoped(url) {
                     studio.importProfile(data)
@@ -90,7 +82,7 @@ struct PhoneRunView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("고른 로닌 \(wheelIds.count)대")
                 .font(.subheadline.weight(.semibold))
-            Text("무대는 가운데를 위아래로 반씩 나눕니다. 위는 방, 아래는 여기서 고른 로닌 휠 0개에서 4개까지입니다. 실시간 그림은 고프로 · 와이파이의 오른쪽 칸에만 나옵니다.")
+            Text("무대는 가운데를 위아래로 반씩 나눕니다. 위는 방, 아래는 여기서 고른 로닌 휠 0개에서 4개까지입니다. 고프로와 액션 5 프로는 C3 기판으로 붙습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button("무대") { showStage = true }
@@ -140,7 +132,7 @@ struct PhoneRunView: View {
                 }
             }
             .buttonStyle(.plain)
-            Button("주소") { editing = device.id }
+            Button(device.kind == .goproBridge ? "설정" : "주소") { editing = device.id }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.bordered)
         }
@@ -172,14 +164,8 @@ struct PhoneRunView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Button("찾기") { showFinder = true }
-        }
-        ToolbarItem(placement: .topBarLeading) {
-            Button("QR") { showQR = true }
-        }
-        ToolbarItem(placement: .topBarLeading) {
             Menu("장치") {
-                ForEach(DeviceProduct.allCases) { product in
+                ForEach(DeviceProduct.addMenu) { product in
                     Button(product.label) { studio.addDevice(product) }
                 }
             }
@@ -208,7 +194,7 @@ struct PhoneRunView: View {
                         }
                     }
                 }
-                .navigationTitle("주소")
+                .navigationTitle(sheetTitle(id))
                 .toolbar {
                     Button("닫기") { editing = nil }
                 }
@@ -249,6 +235,11 @@ struct PhoneRunView: View {
             return "\(device.linkLabel)  \(studio.goproSession[device.id] ?? "세션 미확인")  \(device.baseURLText)"
         case .goproAction5:
             return "\(device.linkLabel)  미리보기 없음  \(studio.goproSession[device.id] ?? "세션 미확인")"
+        case .goproBridge:
+            let live = studio.bridgeLive[device.id]
+            let attached = device.cameras.filter { live?.attachment(for: $0) == "붙음" }.count
+            let phase = studio.bridgePhase[device.id] ?? "기판을 찾는 중입니다."
+            return "\(device.linkLabel)  \(phase)  붙음 \(attached)/4"
         case .osmoAction:
             let battery = studio.radio.live[device.id]?.battery
             let power = battery.map { "배터리 \($0)" } ?? "배터리 없음"
@@ -267,11 +258,20 @@ struct PhoneRunView: View {
             if text.contains("유지") { return .green }
             if text.contains("붙지") { return .red }
             return .gray
+        case .goproBridge:
+            let phase = studio.bridgePhase[device.id] ?? ""
+            if phase.contains("붙었습니다") { return .green }
+            if phase.contains("닿지") || phase.contains("다른") { return .red }
+            return .gray
         case .osmoAction:
             return studio.radio.isReady(device.id) ? .green : .gray
         case .osmoNoAPI:
             return .orange
         }
+    }
+
+    private func sheetTitle(_ id: UUID) -> String {
+        studio.profile.devices.first(where: { $0.id == id })?.kind == .goproBridge ? "장치 설정" : "주소"
     }
 
     private func exportProfile() {
@@ -325,6 +325,12 @@ struct PhoneDeviceDetail: View {
                 Text("오즈모 액션 5 프로 중계는 미리보기 그림을 주지 않습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+        case .goproBridge:
+            Section("기판에 붙은 카메라") {
+                BridgeAttachmentList(device: device)
+                Button("촬영 시작") { Task { await studio.bridgeRecord(device, start: true) } }
+                Button("촬영 정지") { Task { await studio.bridgeRecord(device, start: false) } }
             }
         case .gopro:
             EmptyView()

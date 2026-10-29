@@ -11,6 +11,7 @@ enum CompanionExport {
             switch device.kind {
             case .gopro: label = "gopro\(index + 1)"
             case .goproAction5: label = "action5\(index + 1)"
+            case .goproBridge: label = "c3\(index + 1)"
             default: label = "ronin\(index + 1)"
             }
             labels[device.id] = id
@@ -79,8 +80,8 @@ enum CompanionExport {
         버튼 주소는 지금 프로필에 저장된 직접 주소입니다.
         함께 시작 버튼은 기판에 /sync/record?delay_ms=\(lead) 를 순서대로 보냅니다. 기판은 요청을 받은 뒤부터 셉니다.
         애플 앱의 함께 시작은 /sync/clock 으로 기판 시계를 읽어 at_ms 를 맞춥니다. 그게 더 정확합니다.
-        고프로 · 와이파이 버튼은 카메라 주소(보통 10.5.5.9:8080)입니다.
-        오즈모 액션 5 프로 · 블루투스 버튼은 C3 중계 기판 주소입니다. 로닌 기판 주소가 아니고, 고프로도 아닙니다.
+        C3 중계 버튼은 기판 주소의 /shutter 로, 적어 둔 카메라 맥 주소에 한 대씩 보냅니다.
+        예전에 넣은 고프로 와이파이만 카메라 주소(보통 10.5.5.9:8080)를 그대로 둡니다.
         오즈모 블루투스는 컴패니언 HTTP 버튼으로 보낼 수 없어 페이지에 넣지 않았습니다.
         """
         return (data, note)
@@ -101,6 +102,13 @@ enum CompanionExport {
             } else if device.kind.isGoProFamily {
                 let url = "\(device.baseURLText)/gopro/camera/shutter/\(start ? "start" : "stop")"
                 actions.append(httpGet(connection, url))
+            } else if device.kind == .goproBridge {
+                let action = start ? "start" : "stop"
+                for slot in device.cameras where BoardMac.isFull(slot.mac) {
+                    let mac = BoardMac.normalize(slot.mac).addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                    let url = "\(device.baseURLText)/shutter?mac=\(mac)&action=\(action)"
+                    actions.append(httpGet(connection, url))
+                }
             }
         }
         return actions
@@ -128,6 +136,8 @@ enum CompanionExport {
                     )
                     actions.append(httpGet(connection, "\(device.baseURLText)/\(path)?\(query)"))
                 }
+            case .goproBridge:
+                break
             case .gopro, .goproAction5:
                 for choice in preset.gopro.settings where choice.enabled {
                     let url = "\(device.baseURLText)/gopro/camera/setting?setting=\(choice.settingId)&option=\(choice.option)"

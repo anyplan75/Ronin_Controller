@@ -41,6 +41,27 @@ enum GroupFire {
         }
     }
 
+    static func bridge(_ device: DeviceRecord, startRecording: Bool) async -> [String] {
+        let slots = device.cameras.filter { BoardMac.isFull($0.mac) }
+        if slots.isEmpty {
+            return ["\(device.name) 카메라 맥 주소가 없습니다."]
+        }
+        if device.baseURLText.isEmpty {
+            return ["\(device.name) 기판에 아직 붙지 않았습니다."]
+        }
+        var lines: [String] = []
+        for slot in slots {
+            let who = "\(slot.role.title) \(BoardMac.normalize(slot.mac))"
+            do {
+                let text = try await C3Client.shutter(device, mac: slot.mac, start: startRecording)
+                lines.append("\(device.name) \(who) \(text)")
+            } catch {
+                lines.append("\(device.name) \(who) \(error.localizedDescription)")
+            }
+        }
+        return lines
+    }
+
     static func gopro(_ device: DeviceRecord, startRecording: Bool, when: Date) async -> String {
         await wait(until: when)
         do {
@@ -69,7 +90,10 @@ final class Studio: ObservableObject {
     @Published var roninLive: [UUID: RoninStatus] = [:]
     @Published var goproLive: [UUID: GoProLive] = [:]
     @Published var goproSession: [UUID: String] = [:]
+    @Published var bridgeLive: [UUID: BridgeBoardLive] = [:]
+    @Published var bridgePhase: [UUID: String] = [:]
     let radio = OsmoRadio()
+    private let c3 = C3Link()
     let frameOK = DjiRFrame.selfCheck()
 
     private static let stamp: DateFormatter = {
@@ -88,6 +112,7 @@ final class Studio: ObservableObject {
         if !frameOK {
             note("프레임 검사가 실패했습니다. 오즈모 명령 형식이 공식 예시와 다릅니다.")
         }
+        Task { await bootBoards() }
         Task { await maintainGoProSessions() }
     }
 
@@ -104,48 +129,23 @@ final class Studio: ObservableObject {
             return
         }
         let index = profile.devices.count + 1
+        let knownMac = BoardMac.pluggedIn
+        let boardAlready = profile.devices.contains { $0.kind == .goproBridge && BoardMac.same($0.boardMac, knownMac) }
         let device = DeviceRecord(
             id: UUID(),
-            name: "\(product.label) \(index)",
+            name: product.kind == .goproBridge ? "C3 중계 \(index)" : "\(product.label) \(index)",
             kind: product.kind,
             osmoModel: product.osmoModel,
             host: product.kind == .gopro ? "10.5.5.9" : "",
             port: product.kind.defaultPort,
             bleIdentifier: "",
             enabled: true,
-            pairedOnce: false
+            pairedOnce: false,
+            boardMac: product.kind == .goproBridge && !boardAlready ? knownMac : "",
+            cameras: product.kind == .goproBridge ? BridgeCameraSlot.emptyFour() : []
         )
         profile.devices.append(device)
         profile.groupIds.append(device.id)
-    }
-
-    /// 찾기에서 실제로 확인한 고프로만 고프로 · 와이파이로 넣습니다.
-    func addDiscoveredGoPro(name: String, host: String, port: Int) {
-        guard profile.devices.count < StudioProfile.maxDevices else {
-            note("장치는 8대까지입니다.")
-            return
-        }
-        let cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanHost.isEmpty, port > 0 else { return }
-        if profile.devices.contains(where: { $0.kind == .gopro && $0.host == cleanHost && $0.port == port }) {
-            note("이미 등록된 고프로입니다.")
-            return
-        }
-        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let device = DeviceRecord(
-            id: UUID(),
-            name: cleanName.isEmpty ? "고프로 · 와이파이" : cleanName,
-            kind: .gopro,
-            osmoModel: .unknown,
-            host: cleanHost,
-            port: port,
-            bleIdentifier: "",
-            enabled: true,
-            pairedOnce: false
-        )
-        profile.devices.append(device)
-        profile.groupIds.append(device.id)
-        note("\(device.name) 을 고프로 · 와이파이로 등록했습니다.")
     }
 
     func deleteDevice(_ id: UUID) {
@@ -265,6 +265,10 @@ final class Studio: ObservableObject {
                 if let live = try? await GoProClient.state(device) {
                     goproLive[device.id] = live
                 }
+            case .goproBridge:
+                if !device.host.isEmpty {
+                    await pullBoard(device)
+                }
             case .osmoAction, .osmoNoAPI:
                 break
             }
@@ -286,6 +290,8 @@ final class Studio: ObservableObject {
                 if let live = try? await GoProClient.state(device) {
                     goproLive[device.id] = live
                 }
+            case .goproBridge:
+                await refreshBoard(device.id)
             case .osmoAction, .osmoNoAPI:
                 break
             }
@@ -336,8 +342,30 @@ final class Studio: ObservableObject {
             await GroupFire.wait(until: when)
             note((await radio.record(device, start: start)).text)
         }
+        let bridges = devices.filter { $0.kind == .goproBridge }
+        if bridges.contains(where: { $0.cameras.filter { BoardMac.isFull($0.mac) }.count > 1 }) {
+            note("C3 기판은 블루투스를 한 대씩만 쓰므로 카메라가 순서대로 출발합니다.")
+        }
+        for device in bridges {
+            await GroupFire.wait(until: when)
+            let lines = await GroupFire.bridge(device, startRecording: start)
+            lines.forEach(note)
+            await pullBoard(device)
+        }
         for device in devices where device.kind == .osmoNoAPI {
             note("\(device.name): 공개된 제어 API가 없어 함께 \(start ? "시작" : "정지")에서 빠졌습니다.")
+        }
+    }
+
+    func bridgeRecord(_ device: DeviceRecord, start: Bool) async {
+        if profile.practice {
+            note("연습: \(device.name) \(start ? "시작" : "정지")")
+            return
+        }
+        let lines = await GroupFire.bridge(device, startRecording: start)
+        lines.forEach(note)
+        if !device.host.isEmpty {
+            await pullBoard(device)
         }
     }
 
@@ -460,6 +488,7 @@ final class Studio: ObservableObject {
     func importProfile(_ data: Data) {
         do {
             profile = try JSONDecoder().decode(StudioProfile.self, from: data)
+            ensureKnownBoard()
             note("프로필을 가져왔습니다. 장치 \(profile.devices.count)대, 프리셋 \(profile.presets.count)개.")
         } catch {
             note("프로필을 읽지 못했습니다.")
@@ -501,6 +530,122 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// 꽂힌 기판이 목록에 없으면 맥 주소로 넣고, 찾는 즉시 붙습니다.
+    private func bootBoards() async {
+        ensureKnownBoard()
+        c3.onFound = { [weak self] mac, host, port in
+            Task { @MainActor in
+                self?.adoptBoard(mac: mac, host: host, port: port)
+            }
+        }
+        c3.onPhase = { [weak self] text in
+            Task { @MainActor in
+                self?.setBridgePhase(text)
+            }
+        }
+        c3.start()
+        await watchBoards()
+    }
+
+    private func ensureKnownBoard() {
+        let mac = BoardMac.pluggedIn
+        if profile.devices.contains(where: { $0.kind == .goproBridge && BoardMac.same($0.boardMac, mac) }) {
+            return
+        }
+        if let index = profile.devices.firstIndex(where: { $0.kind == .goproBridge && !BoardMac.isFull($0.boardMac) }) {
+            profile.devices[index].boardMac = mac
+            profile.devices[index].port = 80
+            profile.devices[index].cameras = BridgeCameraSlot.padded(profile.devices[index].cameras)
+            bridgePhase[profile.devices[index].id] = "기판을 찾는 중입니다."
+            note("꽂힌 C3 기판 \(mac) 을 등록하고 바로 연결합니다.")
+            return
+        }
+        guard profile.devices.count < StudioProfile.maxDevices else {
+            note("C3 기판을 넣을 자리가 없습니다. 장치는 8대까지입니다.")
+            return
+        }
+        let device = DeviceRecord(
+            id: UUID(),
+            name: "C3 중계",
+            kind: .goproBridge,
+            osmoModel: .unknown,
+            host: "",
+            port: 80,
+            bleIdentifier: "",
+            enabled: true,
+            pairedOnce: false,
+            boardMac: mac,
+            cameras: BridgeCameraSlot.emptyFour()
+        )
+        profile.devices.append(device)
+        if !profile.groupIds.contains(device.id) {
+            profile.groupIds.append(device.id)
+        }
+        bridgePhase[device.id] = "기판을 찾는 중입니다."
+        note("꽂힌 C3 기판 \(mac) 을 등록하고 바로 연결합니다.")
+    }
+
+    private func adoptBoard(mac: String, host: String, port: Int) {
+        guard let index = profile.devices.firstIndex(where: { $0.kind == .goproBridge && BoardMac.same($0.boardMac, mac) }) else {
+            return
+        }
+        let id = profile.devices[index].id
+        let changed = profile.devices[index].host != host || profile.devices[index].port != port
+        if changed {
+            profile.devices[index].host = host
+            profile.devices[index].port = port
+            note("\(profile.devices[index].name) \(BoardMac.normalize(mac)) 에 바로 붙었습니다.")
+        }
+        bridgePhase[id] = "기판에 붙었습니다."
+        let device = profile.devices[index]
+        Task { await pullBoard(device) }
+    }
+
+    private func setBridgePhase(_ text: String) {
+        for device in profile.devices where device.kind == .goproBridge {
+            if bridgePhase[device.id] == "기판에 붙었습니다." { continue }
+            bridgePhase[device.id] = text
+        }
+    }
+
+    func refreshBoard(_ id: UUID) async {
+        guard let device = profile.devices.first(where: { $0.id == id }), device.kind == .goproBridge else { return }
+        if device.host.isEmpty {
+            if bridgePhase[id] != "기판에 붙었습니다." {
+                bridgePhase[id] = bridgePhase[id] ?? "기판을 찾는 중입니다."
+            }
+            return
+        }
+        await pullBoard(device)
+    }
+
+    private func pullBoard(_ device: DeviceRecord) async {
+        guard !device.host.isEmpty else { return }
+        do {
+            let live = try await C3Client.status(device)
+            bridgeLive[device.id] = live
+            if BoardMac.isFull(live.boardMac), BoardMac.isFull(device.boardMac), !BoardMac.same(live.boardMac, device.boardMac) {
+                bridgePhase[device.id] = "다른 기판이 대답했습니다."
+            } else {
+                bridgePhase[device.id] = "기판에 붙었습니다."
+            }
+        } catch {
+            bridgePhase[device.id] = "기판에 닿지 않았습니다."
+        }
+    }
+
+    private func watchBoards() async {
+        while !Task.isCancelled {
+            if !profile.practice {
+                let boards = profile.devices.filter { $0.enabled && $0.kind == .goproBridge && !$0.host.isEmpty }
+                for device in boards {
+                    await pullBoard(device)
+                }
+            }
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+        }
+    }
+
     private func save() {
         if let data = try? JSONEncoder().encode(profile) {
             UserDefaults.standard.set(data, forKey: StudioProfile.storageKey)
@@ -531,6 +676,8 @@ extension GroupFire {
                 parts.append(text ?? "이동 실패")
             }
             return parts.isEmpty ? "" : "\(device.name) \(parts.joined(separator: " "))"
+        case .goproBridge:
+            return ""
         case .gopro, .goproAction5:
             var parts: [String] = []
             for choice in preset.gopro.settings where choice.enabled {

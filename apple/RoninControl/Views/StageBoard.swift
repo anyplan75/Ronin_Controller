@@ -442,8 +442,20 @@ struct StageBoard: View {
             paintGoPro(mark, line: line)
         case .ronin:
             paintGimbal(mark, line: line)
+        case .goproBridge:
+            paintBridge(mark, line: line)
         case .goproAction5, .osmoAction, .osmoNoAPI:
             paintOsmo(mark, line: line, round: device.osmoModel == .osmo360)
+        }
+    }
+
+    private func paintBridge(_ mark: GraphicsContext, line: Color) {
+        let body = Path(roundedRect: CGRect(x: -16, y: -10, width: 28, height: 20), cornerRadius: 2)
+        mark.fill(body, with: .color(StagePalette.oxblood.opacity(0.85)))
+        mark.stroke(body, with: .color(line), lineWidth: 1.6)
+        for index in 0..<4 {
+            let dot = Path(ellipseIn: CGRect(x: CGFloat(-10 + index * 6), y: -3, width: 4, height: 4))
+            mark.fill(dot, with: .color(StagePalette.paper))
         }
     }
 
@@ -503,6 +515,8 @@ struct StageBoard: View {
             return nil
         case .gopro, .goproAction5:
             return studio.goproLive[device.id]?.encoding == true ? "녹화" : nil
+        case .goproBridge:
+            return nil
         case .osmoAction:
             guard let status = studio.radio.live[device.id]?.status else { return nil }
             if status == 3 || status == 5 { return OsmoCatalog.statusName(status) }

@@ -16,14 +16,16 @@ struct DeviceForm: View {
                     .foregroundStyle(.secondary)
             } else {
                 Picker("종류", selection: productChoice) {
-                    ForEach(DeviceProduct.allCases) { product in
+                    ForEach(productChoices) { product in
                         Text(product.label).tag(product)
                     }
                 }
             }
             Toggle("사용", isOn: device.enabled)
             Toggle("함께 촬영에 포함", isOn: studio.groupBinding(deviceId))
-            if device.wrappedValue.kind.usesHTTP {
+            if device.wrappedValue.kind == .goproBridge {
+                bridgeBoard
+            } else if device.wrappedValue.kind.usesHTTP {
                 TextField(addressPrompt, text: device.host)
                     .autocorrectionDisabled()
                 Stepper("포트 \(device.wrappedValue.port)", value: device.port, in: 1...65535)
@@ -32,6 +34,10 @@ struct DeviceForm: View {
                     .foregroundStyle(.secondary)
             }
             note
+        }
+        .task(id: deviceId) {
+            guard device.wrappedValue.kind == .goproBridge else { return }
+            await studio.refreshBoard(deviceId)
         }
         if device.wrappedValue.kind == .osmoAction || device.wrappedValue.kind == .osmoNoAPI {
             osmoIdentity
@@ -58,8 +64,110 @@ struct DeviceForm: View {
                 if product.kind == .goproAction5, device.wrappedValue.host == "10.5.5.9" {
                     device.wrappedValue.host = ""
                 }
+                if product.kind == .goproBridge {
+                    device.wrappedValue.port = 80
+                    if !BoardMac.isFull(device.wrappedValue.boardMac) {
+                        device.wrappedValue.boardMac = BoardMac.pluggedIn
+                    }
+                    device.wrappedValue.cameras = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+                }
             }
         )
+    }
+
+    private var productChoices: [DeviceProduct] {
+        var list = DeviceProduct.addMenu
+        if let current = DeviceProduct.matching(device.wrappedValue), !list.contains(current) {
+            list.insert(current, at: 0)
+        }
+        return list
+    }
+
+    @ViewBuilder private var bridgeBoard: some View {
+        TextField("기판 맥 주소", text: boardMacText)
+            .autocorrectionDisabled()
+        let phase = studio.bridgePhase[deviceId] ?? "기판을 찾는 중입니다."
+        Text(phase)
+            .font(.caption)
+        Text(device.wrappedValue.baseURLText.isEmpty ? "숫자 주소는 기판을 찾는 즉시 채워집니다." : device.wrappedValue.baseURLText)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("기판은 JMEDIA 에 먼저 붙고, 안 되면 JMEDIA_Cam 에 붙습니다. 와이파이 비밀번호는 앱에 없습니다.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        ForEach(0..<4, id: \.self) { index in
+            VStack(alignment: .leading, spacing: 6) {
+                Text("카메라 \(index + 1)")
+                    .font(.caption.weight(.semibold))
+                Picker("종류", selection: cameraRole(index)) {
+                    ForEach(BridgeCameraRole.allCases) { role in
+                        Text(role.title).tag(role)
+                    }
+                }
+                TextField("카메라 블루투스 맥 주소", text: cameraMac(index))
+                    .autocorrectionDisabled()
+                Text(slotLine(index))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        Button("촬영 시작") {
+            Task { await studio.bridgeRecord(device.wrappedValue, start: true) }
+        }
+        Button("촬영 정지") {
+            Task { await studio.bridgeRecord(device.wrappedValue, start: false) }
+        }
+        Button("붙음 다시 읽기") {
+            Task { await studio.refreshBoard(deviceId) }
+        }
+    }
+
+    private var boardMacText: Binding<String> {
+        Binding(
+            get: { device.wrappedValue.boardMac },
+            set: { newValue in
+                device.wrappedValue.boardMac = BoardMac.isFull(newValue) ? BoardMac.normalize(newValue) : newValue.uppercased()
+            }
+        )
+    }
+
+    private func cameraRole(_ index: Int) -> Binding<BridgeCameraRole> {
+        Binding(
+            get: {
+                let slots = device.wrappedValue.cameras
+                guard slots.indices.contains(index) else { return .gopro }
+                return slots[index].role
+            },
+            set: { newValue in
+                var slots = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+                slots[index].role = newValue
+                device.wrappedValue.cameras = slots
+            }
+        )
+    }
+
+    private func cameraMac(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                let slots = device.wrappedValue.cameras
+                guard slots.indices.contains(index) else { return "" }
+                return slots[index].mac
+            },
+            set: { newValue in
+                var slots = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+                slots[index].mac = BoardMac.isFull(newValue) ? BoardMac.normalize(newValue) : newValue.uppercased()
+                device.wrappedValue.cameras = slots
+            }
+        )
+    }
+
+    private func slotLine(_ index: Int) -> String {
+        let slots = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+        guard slots.indices.contains(index) else { return "맥 주소를 적지 않았습니다." }
+        if let live = studio.bridgeLive[deviceId] {
+            return live.attachment(for: slots[index])
+        }
+        return BoardMac.isFull(slots[index].mac) ? "아직 읽지 못했습니다." : "맥 주소를 적지 않았습니다."
     }
 
     @ViewBuilder private var note: some View {
@@ -70,6 +178,8 @@ struct DeviceForm: View {
             Text(Honest.gopro).font(.caption).foregroundStyle(.secondary)
         case .goproAction5:
             Text(Honest.action5).font(.caption).foregroundStyle(.secondary)
+        case .goproBridge:
+            Text(Honest.bridge).font(.caption).foregroundStyle(.secondary)
         case .osmoAction:
             Text(device.wrappedValue.osmoModel == .osmo360 ? Honest.osmo360 : Honest.osmo)
                 .font(.caption)
@@ -131,6 +241,29 @@ struct DeviceForm: View {
         studio.note(outcome.text)
         if outcome.ok {
             device.wrappedValue.pairedOnce = true
+        }
+    }
+}
+
+/// 기판이 지금 알려 준 붙음만 보여 줍니다. 카메라를 일부러 연결하지는 않습니다.
+struct BridgeAttachmentList: View {
+    @EnvironmentObject private var studio: Studio
+    let device: DeviceRecord
+
+    var body: some View {
+        let phase = studio.bridgePhase[device.id] ?? "기판을 찾는 중입니다."
+        Text(phase)
+        if BoardMac.isFull(device.boardMac) {
+            Text("기판 \(BoardMac.normalize(device.boardMac))")
+        }
+        if let live = studio.bridgeLive[device.id], !live.ssid.isEmpty {
+            Text("기판 망 \(live.ssid)")
+        }
+        ForEach(BridgeCameraSlot.padded(device.cameras)) { slot in
+            let state = studio.bridgeLive[device.id]?.attachment(for: slot)
+                ?? (BoardMac.isFull(slot.mac) ? "아직 읽지 못했습니다." : "맥 주소를 적지 않았습니다.")
+            let mac = BoardMac.isFull(slot.mac) ? BoardMac.normalize(slot.mac) : "맥 없음"
+            Text("\(slot.slot + 1). \(slot.role.title)  \(mac)  \(state)")
         }
     }
 }

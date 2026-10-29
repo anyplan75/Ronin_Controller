@@ -16,8 +16,6 @@ struct StudioView: View {
     @State private var showCompanionNote = false
     @State private var companionNote = ""
     @State private var importProfile = false
-    @State private var showFinder = false
-    @State private var showQR = false
     /// 무대 아래 휠에 올릴 로닌입니다. 고른 순서가 왼쪽부터이고, 최대 4대입니다.
     @State private var stageWheels: [UUID] = []
 
@@ -60,12 +58,6 @@ struct StudioView: View {
         .fileExporter(isPresented: $showProfile, document: profileFile, contentType: .json, defaultFilename: "로닌컨트롤-프로필") { result in
             if case .failure = result { studio.note("프로필 파일을 저장하지 못했습니다.") }
         }
-        .sheet(isPresented: $showFinder) {
-            GoProFindSheet()
-        }
-        .sheet(isPresented: $showQR) {
-            GoProQRConnectSheet()
-        }
         .fileImporter(isPresented: $importProfile, allowedContentTypes: [.json]) { result in
             if case .success(let url) = result, let data = readSecurityScoped(url) {
                 studio.importProfile(data)
@@ -84,6 +76,8 @@ struct StudioView: View {
                         RoninDeck(deviceId: id)
                     case .gopro, .goproAction5:
                         GoProDeck(deviceId: id)
+                    case .goproBridge:
+                        EmptyView()
                     case .osmoAction, .osmoNoAPI:
                         OsmoDeck(radio: studio.radio, deviceId: id)
                     }
@@ -115,14 +109,8 @@ struct StudioView: View {
             Button("무대") { selection = nil }
         }
         ToolbarItem {
-            Button("찾기") { showFinder = true }
-        }
-        ToolbarItem {
-            Button("QR") { showQR = true }
-        }
-        ToolbarItem {
             Menu("장치 추가") {
-                ForEach(DeviceProduct.allCases) { product in
+                ForEach(DeviceProduct.addMenu) { product in
                     Button(product.label) { studio.addDevice(product) }
                 }
             }
@@ -165,6 +153,7 @@ struct StudioView: View {
         case .ronin: return "rotate.3d"
         case .gopro: return "wifi"
         case .goproAction5: return "dot.radiowaves.left.and.right"
+        case .goproBridge: return "square.grid.2x2"
         case .osmoAction:
             return device.osmoModel == .osmo360 ? "camera.metering.center.weighted" : "camera.metering.spot"
         case .osmoNoAPI: return "questionmark.circle"

@@ -195,6 +195,9 @@ struct StageConsole: View {
                 case .gopro, .goproAction5:
                     Button("셔터") { shutter(device, true) }
                     Button("정지") { shutter(device, false) }
+                case .goproBridge:
+                    Button("촬영") { Task { await studio.bridgeRecord(device, start: true) } }
+                    Button("정지") { Task { await studio.bridgeRecord(device, start: false) } }
                 case .osmoAction:
                     Button("녹화") { osmoRecord(device, true) }
                     Button("정지") { osmoRecord(device, false) }
@@ -283,6 +286,8 @@ struct StageConsole: View {
             } else {
                 Text("아직 상태를 읽지 못했습니다.")
             }
+        case .goproBridge:
+            BridgeAttachmentList(device: device)
         case .gopro, .goproAction5:
             Text(studio.goproSession[device.id] ?? "세션을 아직 확인하지 않았습니다.")
             if let live = studio.goproLive[device.id] {
@@ -317,6 +322,13 @@ struct StageConsole: View {
         switch device.kind {
         case .ronin:
             roninSettings(device)
+        case .goproBridge:
+            Text("설정")
+                .font(.caption.weight(.semibold))
+            Text("카메라 칸은 장치 설정에서 바꿉니다. 여기에는 지금 붙었는지가 바로 나옵니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            BridgeAttachmentList(device: device)
         case .gopro, .goproAction5:
             Text("설정")
                 .font(.caption.weight(.semibold))

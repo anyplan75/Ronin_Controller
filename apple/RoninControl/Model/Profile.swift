@@ -8,6 +8,8 @@ enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case gopro
     /// 오즈모 액션 5 프로. 앱은 이미 둔 C3 중계 기판으로만 붙습니다. 고프로가 아닙니다.
     case goproAction5
+    /// 고프로와 액션 5 프로가 붙는 ESP32-C3 입니다. 앱은 기판 맥 주소로 바로 연결합니다.
+    case goproBridge
     case osmoAction
     case osmoNoAPI
 
@@ -18,12 +20,13 @@ enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
         case .ronin: return "로닌 기판 · CAN"
         case .gopro: return "고프로 · 와이파이"
         case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
+        case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
         case .osmoAction: return "오즈모 액션 · 블루투스"
         case .osmoNoAPI: return "제어 API 없음"
         }
     }
 
-    var usesHTTP: Bool { self == .ronin || isGoProFamily }
+    var usesHTTP: Bool { self == .ronin || self == .goproBridge || isGoProFamily }
 
     /// 고프로 HERO는 카메라 와이파이입니다. 오즈모 액션 5 프로는 여기 넣지 않습니다.
     var isDirectGoPro: Bool { self == .gopro }
@@ -37,7 +40,7 @@ enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var defaultPort: Int {
         switch self {
-        case .ronin, .goproAction5: return 80
+        case .ronin, .goproAction5, .goproBridge: return 80
         case .gopro: return 8080
         default: return 0
         }
@@ -110,6 +113,7 @@ enum OsmoModel: String, Codable, CaseIterable, Identifiable, Sendable {
 enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
     case ronin
     case goproWifi
+    case goproBridge
     case action5Bluetooth
     case osmoActionBluetooth
     case osmo360Bluetooth
@@ -120,6 +124,7 @@ enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .ronin: return "로닌 기판 · CAN"
         case .goproWifi: return "고프로 · 와이파이"
+        case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
         case .action5Bluetooth: return "오즈모 액션 5 프로 · 블루투스"
         case .osmoActionBluetooth: return "오즈모 액션 · 블루투스"
         case .osmo360Bluetooth: return "오즈모 360 · 블루투스"
@@ -130,6 +135,7 @@ enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .ronin: return .ronin
         case .goproWifi: return .gopro
+        case .goproBridge: return .goproBridge
         case .action5Bluetooth: return .goproAction5
         case .osmoActionBluetooth, .osmo360Bluetooth: return .osmoAction
         }
@@ -143,14 +149,53 @@ enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// 새로 넣는 장치만 여기 있습니다. 고프로 와이파이와 단독 액션 5 프로는 더 이상 만들지 않습니다.
+    static let addMenu: [DeviceProduct] = [.ronin, .goproBridge, .osmoActionBluetooth, .osmo360Bluetooth]
+
     static func matching(_ device: DeviceRecord) -> DeviceProduct? {
         switch device.kind {
         case .ronin: return .ronin
         case .gopro: return .goproWifi
+        case .goproBridge: return .goproBridge
         case .goproAction5: return .action5Bluetooth
         case .osmoAction: return device.osmoModel == .osmo360 ? .osmo360Bluetooth : .osmoActionBluetooth
         case .osmoNoAPI: return nil
         }
+    }
+}
+
+/// 한 기판에 붙는 카메라입니다. 고프로 또는 액션 5 프로이고, 최대 4칸입니다.
+enum BridgeCameraRole: String, Codable, CaseIterable, Identifiable, Sendable {
+    case gopro
+    case action5
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .gopro: return "고프로"
+        case .action5: return "액션 5 프로"
+        }
+    }
+}
+
+struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
+    var slot: Int
+    var role: BridgeCameraRole
+    var mac: String
+    var id: Int { slot }
+
+    static func emptyFour() -> [BridgeCameraSlot] {
+        (0..<4).map { BridgeCameraSlot(slot: $0, role: .gopro, mac: "") }
+    }
+
+    static func padded(_ slots: [BridgeCameraSlot]) -> [BridgeCameraSlot] {
+        var next = emptyFour()
+        for item in slots.prefix(4) {
+            let index = min(3, max(0, item.slot))
+            next[index] = BridgeCameraSlot(slot: index, role: item.role, mac: item.mac)
+        }
+        return next
     }
 }
 
@@ -164,6 +209,36 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     var bleIdentifier: String
     var enabled: Bool
     var pairedOnce: Bool
+    /// C3 기판의 와이파이 맥 주소입니다. 다른 장치는 비워 둡니다.
+    var boardMac: String
+    /// 이 기판에 블루투스로 붙는 카메라입니다.
+    var cameras: [BridgeCameraSlot]
+
+    init(
+        id: UUID,
+        name: String,
+        kind: DeviceKind,
+        osmoModel: OsmoModel,
+        host: String,
+        port: Int,
+        bleIdentifier: String,
+        enabled: Bool,
+        pairedOnce: Bool,
+        boardMac: String = "",
+        cameras: [BridgeCameraSlot] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.osmoModel = osmoModel
+        self.host = host
+        self.port = port
+        self.bleIdentifier = bleIdentifier
+        self.enabled = enabled
+        self.pairedOnce = pairedOnce
+        self.boardMac = boardMac
+        self.cameras = kind == .goproBridge ? BridgeCameraSlot.padded(cameras) : cameras
+    }
 
     /// 목록과 메뉴에 쓰는 이름입니다. 제품과 연결을 같이 적습니다.
     var linkLabel: String {
@@ -171,6 +246,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         case .ronin: return "로닌 기판 · CAN"
         case .gopro: return "고프로 · 와이파이"
         case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
+        case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
         case .osmoAction:
             return osmoModel == .osmo360 ? "오즈모 360 · 블루투스" : "오즈모 액션 · 블루투스"
         case .osmoNoAPI:
@@ -182,6 +258,41 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, port > 0 else { return "" }
         return "http://\(trimmed):\(port)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, kind, osmoModel, host, port, bleIdentifier, enabled, pairedOnce, boardMac, cameras
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id = try box.decode(UUID.self, forKey: .id)
+        name = try box.decode(String.self, forKey: .name)
+        kind = try box.decode(DeviceKind.self, forKey: .kind)
+        osmoModel = try box.decode(OsmoModel.self, forKey: .osmoModel)
+        host = try box.decode(String.self, forKey: .host)
+        port = try box.decode(Int.self, forKey: .port)
+        bleIdentifier = try box.decode(String.self, forKey: .bleIdentifier)
+        enabled = try box.decode(Bool.self, forKey: .enabled)
+        pairedOnce = try box.decode(Bool.self, forKey: .pairedOnce)
+        boardMac = try box.decodeIfPresent(String.self, forKey: .boardMac) ?? ""
+        let stored = try box.decodeIfPresent([BridgeCameraSlot].self, forKey: .cameras) ?? []
+        cameras = kind == .goproBridge ? BridgeCameraSlot.padded(stored) : stored
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(id, forKey: .id)
+        try box.encode(name, forKey: .name)
+        try box.encode(kind, forKey: .kind)
+        try box.encode(osmoModel, forKey: .osmoModel)
+        try box.encode(host, forKey: .host)
+        try box.encode(port, forKey: .port)
+        try box.encode(bleIdentifier, forKey: .bleIdentifier)
+        try box.encode(enabled, forKey: .enabled)
+        try box.encode(pairedOnce, forKey: .pairedOnce)
+        try box.encode(boardMac, forKey: .boardMac)
+        try box.encode(cameras, forKey: .cameras)
     }
 }
 
