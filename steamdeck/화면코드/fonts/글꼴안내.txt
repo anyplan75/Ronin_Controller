@@ -1,0 +1,3 @@
+이 폴더의 NotoSansKR-Regular.otf 는 구글 노토 산스 한국어 글꼴입니다.
+고친 곳 없이 그대로 넣었습니다.
+사용 허락은 같은 폴더의 OFL.txt (SIL Open Font License 1.1) 를 따릅니다.

@@ -16,6 +16,10 @@ compile_commands.json
 *credentials*
 *credential*
 *비밀*
+!steamdeck/비밀암호/
+!steamdeck/비밀암호/비밀암호.example.txt
+비밀암호/비밀암호.txt
+.venv/
 .DS_Store
 __pycache__/
 *.pyc
