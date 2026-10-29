@@ -16,14 +16,28 @@ enum GoProLabsJoin {
         return "*JOIN=\(quote)\(name):\(pass)\(quote)"
     }
 
-    /// 두 번째 코드입니다. 카메라 메뉴는 쓰지 않습니다.
-    /// 2025년 8월 랩스 기록: `$ADDR=초`는 지금 주소를 그 초만큼 카메라 화면에 남깁니다.
-    /// `$DSPL=9`는 안내 글이 1초 만에 사라지지 않게 9초로 늘립니다. 9초가 최대입니다.
-    /// `!8N`은 켜진 채로 8초를 쉽니다. `!10N`부터는 카메라가 잠들어 방금 붙은 망이 끊깁니다.
-    /// 빌드 12의 `oW1!W*OPNW=1$COHN=1$ADDR=8`은 접속과 동시에 주소를 띄워서,
-    /// 카메라가 보여 주는 joining network 화면에 가려진 채 끝났습니다.
-    /// 그래서 접속(`!W`) 다음에 8초를 두 번 기다리고, 그 뒤에 주소를 9초씩 세 번 보여 줍니다.
-    static let joinCommand = "oW1*OPNW=1$COHN=1!W!8N!8N$DSPL=9$ADDR=9!2N$ADDR=9!2N$ADDR=9"
+    /// 접속 코드입니다. 카메라 메뉴는 쓰지 않습니다.
+    /// `!N` 대기는 화면을 비웁니다. 빌드 13이 그래서 joining network 뒤에 빈 화면으로 남았습니다.
+    /// 주소 명령은 여기 넣지 않습니다. 접속 글자와 겹치면 숫자가 안 남습니다.
+    static let joinCommand = "oW1*OPNW=1$COHN=1!W"
+
+    /// 주소 코드입니다. 접속 글자가 끝난 뒤에 바로 보여 줍니다. 초를 세지 않습니다.
+    /// `$ADDR=9`는 지금 주소를 9초 보여 주고, `$DSPL=9`는 그 글자가 1초 만에 사라지지 않게 합니다.
+    static let addressCommand = "$DSPL=9$ADDR=9"
+
+    /// 비밀번호 형식이 아니면 바로 이 문장을 씁니다. 와이파이 비밀번호는 8자에서 63자입니다.
+    static func passwordMessage(_ password: String) -> String? {
+        if password.isEmpty || password.count < 8 || password.count > 63 {
+            return "비밀번호가 틀렸습니다."
+        }
+        if password.contains("\"") || password.contains("\\") {
+            return "비밀번호가 틀렸습니다."
+        }
+        if password.unicodeScalars.contains(where: { $0.value < 32 || $0.value > 126 }) {
+            return "비밀번호가 틀렸습니다."
+        }
+        return nil
+    }
 
     /// 카메라 화면에 적힌 글에서 IPv4 주소만 꺼냅니다.
     static func hostAddress(from text: String) -> String? {

@@ -30,7 +30,7 @@ struct GoProQRConnectSheet: View {
                         .autocorrectionDisabled()
                     SecureField("와이파이 비밀번호", text: $password)
                         .textFieldStyle(.roundedBorder)
-                    Button("1단계 저장 QR") { makeStore(GoProLabsJoin.storeCommand(ssid: ssid, password: password)) }
+                    Button("1단계 저장 QR") { makeStoreFromFields() }
                         .buttonStyle(.borderedProminent)
                     #if os(iOS)
                     Button("다른 저장 QR 읽기") { openScanner() }
@@ -56,13 +56,24 @@ struct GoProQRConnectSheet: View {
                             .buttonStyle(.borderedProminent)
                     }
                     if showJoin, let image = LabsQRImage.make(GoProLabsJoin.joinCommand) {
-                        Text("2단계. 이 코드를 카메라 렌즈에 보여 주고 셔터로 확인합니다. 카메라 메뉴는 열지 않습니다. 화면에 joining network 가 나온 뒤 16초를 기다립니다. 그 다음 숫자 주소가 카메라 화면에 9초씩 세 번 나옵니다. 그 숫자를 아래에 적습니다. 놓치면 이 2단계 코드만 다시 보여 줍니다.")
+                        Text("2단계. 이 접속 코드를 렌즈에 보여 주고 셔터로 확인합니다. 카메라 메뉴는 열지 않습니다. 화면에 joining network 가 끝나면, 바로 아래 주소 코드를 보여 줍니다. 초를 세지 않습니다.")
                             .font(.caption)
                             .foregroundStyle(StagePalette.ink)
                         Text(GoProLabsJoin.joinCommand)
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(StagePalette.ink)
                         qrImage(image, label: "고프로 랩스 접속 QR")
+                        if let addressImage = LabsQRImage.make(GoProLabsJoin.addressCommand) {
+                            Text("주소 코드. 접속 글자가 끝난 직후에 보여 줍니다. 카메라 화면에 숫자 주소가 나옵니다. 그 숫자를 아래에 적습니다.")
+                                .font(.caption)
+                                .foregroundStyle(StagePalette.ink)
+                            Text(GoProLabsJoin.addressCommand)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(StagePalette.ink)
+                            qrImage(addressImage, label: "고프로 주소 QR")
+                        }
+                        Button("바로 확인") { reportJoinNow() }
+                            .buttonStyle(.borderedProminent)
                         TextField("카메라 화면에 나온 주소", text: $typedHost)
                             .textFieldStyle(.roundedBorder)
                             .textInputAutocapitalization(.never)
@@ -106,14 +117,17 @@ struct GoProQRConnectSheet: View {
         }
         .onChange(of: finder.found) { _, items in
             guard armed else { return }
+            var joined = false
             for item in items where !known.contains(item.service) {
                 known.insert(item.service)
+                joined = true
                 let already = studio.profile.devices.contains {
                     $0.kind == .gopro && $0.host == item.host && $0.port == item.port
                 }
                 guard !already else { continue }
                 studio.addDiscoveredGoPro(name: item.name, host: item.host, port: item.port)
             }
+            if joined { problem = "" }
         }
         #if os(iOS)
         .sheet(isPresented: $scanning) {
@@ -159,9 +173,20 @@ struct GoProQRConnectSheet: View {
         storeCommand = ""
     }
 
+    private func makeStoreFromFields() {
+        if GoProLabsJoin.passwordMessage(password) != nil {
+            problem = "비밀번호가 틀렸습니다."
+            storeCommand = ""
+            showJoin = false
+            armed = false
+            return
+        }
+        makeStore(GoProLabsJoin.storeCommand(ssid: ssid, password: password))
+    }
+
     private func makeStore(_ command: String?) {
         guard let command else {
-            problem = "와이파이 이름과 비밀번호가 있어야 합니다. 이름에는 콜론, 따옴표, 역슬래시를 넣지 않습니다."
+            problem = "와이파이 이름이 있어야 합니다. 이름에는 콜론, 따옴표, 역슬래시를 넣지 않습니다."
             showJoin = false
             armed = false
             return
@@ -170,6 +195,11 @@ struct GoProQRConnectSheet: View {
         storeCommand = command
         showJoin = false
         armed = false
+    }
+
+    /// 초를 세지 않습니다. 지금 고프로가 안 보이면 바로 실패를 말합니다.
+    private func reportJoinNow() {
+        problem = finder.found.isEmpty ? "카메라가 망에 붙지 않았습니다." : ""
     }
 
     private func revealJoin() {
@@ -193,7 +223,7 @@ struct GoProQRConnectSheet: View {
                 return
             }
         }
-        problem = "그 주소에서 고프로 응답이 없습니다. 2단계 코드를 다시 보여 준 뒤, 카메라 화면에 나온 숫자만 적습니다."
+        problem = "카메라가 망에 붙지 않았습니다."
     }
 
     private func foundRow(_ item: FoundGoPro) -> some View {
