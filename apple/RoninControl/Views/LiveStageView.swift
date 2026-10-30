@@ -25,7 +25,7 @@ struct StageConsole: View {
 
     @StateObject private var preview = GoProPreview()
     @State private var selected: UUID?
-    @State private var nudges: [UUID: GimbalNudge] = [:]
+    @State private var sticks: [UUID: CGSize] = [:]
     @State private var settingChoices: [Int: Int] = [:]
     @State private var osmoMode = 0x01
     @State private var zoom = 0.0
@@ -43,14 +43,14 @@ struct StageConsole: View {
     }
 
     private var drives: [StageDrive] {
-        nudges.compactMap { id, nudge in
+        sticks.compactMap { id, vector in
+            guard hypot(vector.width, vector.height) > 0.08 else { return nil }
             guard studio.profile.devices.contains(where: { $0.id == id && $0.kind == .ronin }) else { return nil }
             let spot = studio.stageSpot(for: id)
-            let status = studio.roninLive[id]
             return StageDrive(
                 deviceId: id,
-                yaw: spot.aimYaw + headYaw(status, nudge, home: spot.homeYaw),
-                pitch: headPitch(status, nudge, home: spot.homePitch)
+                yaw: spot.aimYaw + spot.homeYaw + Double(vector.width) * 24,
+                pitch: -spot.homePitch - Double(vector.height) * 24
             )
         }
     }
@@ -390,6 +390,7 @@ struct StageConsole: View {
     }
 
     @ViewBuilder private func roninSettings(_ device: DeviceRecord) -> some View {
+        RoninCommandBoard(device: device)
         let spot = studio.stageSpot(for: device.id)
         Text("제자리")
             .font(.caption.weight(.semibold))
@@ -481,14 +482,16 @@ struct StageConsole: View {
             HStack(alignment: .center, spacing: 8) {
                 ForEach(items) { device in
                     VStack(spacing: 4) {
-                        GimbalWheel(title: device.name, diameter: diameter) { nudge in
-                            if let nudge {
-                                nudges[device.id] = nudge
+                        RoninStick(device: device, diameter: diameter) { vector in
+                            if hypot(vector.width, vector.height) > 0.08 {
+                                sticks[device.id] = vector
                             } else {
-                                nudges[device.id] = nil
+                                sticks[device.id] = nil
                             }
-                            Task { await studio.roninHold(device, path: nudge?.path) }
                         }
+                        Text(device.name)
+                            .font(.caption2)
+                            .lineLimit(1)
                         Button("제자리") { goHome(device) }
                             .buttonStyle(.bordered)
                             .font(.caption2)

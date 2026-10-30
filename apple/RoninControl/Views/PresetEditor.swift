@@ -30,6 +30,7 @@ struct PresetEditor: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if (preset.wrappedValue.kind ?? .shared) != .action {
             Section("로닌") {
                 Picker("샷", selection: preset.ronin.shot) {
                     Text("보내지 않음").tag("")
@@ -48,8 +49,10 @@ struct PresetEditor: View {
                 number("피치", preset.ronin.pitch)
                 number("초", preset.ronin.seconds)
             }
-            Section("고프로") {
-                Text("체크한 설정만 보냅니다. 오즈모 액션 5 프로 중계에는 줌과 카메라 프리셋 번호를 보내지 않습니다.")
+            }
+            if (preset.wrappedValue.kind ?? .shared) != .ronin {
+            Section("카메라 설정") {
+                Text("한 화면에 모은 카메라 설정입니다. 체크한 것만 저장하고 보냅니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 ForEach(GoProCatalog.settings) { spec in
@@ -62,6 +65,7 @@ struct PresetEditor: View {
                     }
                     .disabled(!choice.wrappedValue.enabled)
                 }
+                if (preset.wrappedValue.kind ?? .shared) != .action {
                 Toggle("디지털 줌 (고프로 와이파이)", isOn: zoomOn)
                 if preset.wrappedValue.gopro.digitalZoomPercent != nil {
                     Stepper("\(preset.wrappedValue.gopro.digitalZoomPercent ?? 0)%", value: zoomValue, in: 0...100)
@@ -70,7 +74,10 @@ struct PresetEditor: View {
                 if preset.wrappedValue.gopro.loadPresetId != nil {
                     Stepper("번호 \(preset.wrappedValue.gopro.loadPresetId ?? 0)", value: presetIdValue, in: 0...200)
                 }
+                }
             }
+            }
+            if (preset.wrappedValue.kind ?? .shared) == .shared {
             Section("오즈모 모드") {
                 Picker("모드", selection: osmoMode) {
                     Text("보내지 않음").tag(-1)
@@ -90,6 +97,7 @@ struct PresetEditor: View {
                     Text("\(device.name)  \(device.linkLabel)  \(device.baseURLText)")
                         .font(.caption)
                 }
+            }
             }
         }
         .formStyle(.grouped)

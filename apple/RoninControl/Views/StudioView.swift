@@ -18,14 +18,14 @@ struct StudioView: View {
     @State private var importProfile = false
     /// 무대 아래 휠에 올릴 로닌입니다. 고른 순서가 왼쪽부터이고, 최대 4대입니다.
     @State private var stageWheels: [UUID] = []
+    @State private var pendingPresetDelete: UUID?
 
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
                 Section("장치 \(studio.profile.devices.count)/\(StudioProfile.maxDevices)") {
                     ForEach(studio.profile.devices) { device in
-                        Label(device.name, systemImage: icon(device))
-                            .tag(StudioPick.device(device.id))
+                        deviceListRows(device)
                     }
                 }
                 Section("프리셋") {
@@ -57,6 +57,21 @@ struct StudioView: View {
         }
         .fileExporter(isPresented: $showProfile, document: profileFile, contentType: .json, defaultFilename: "로닌컨트롤-프로필") { result in
             if case .failure = result { studio.note("프로필 파일을 저장하지 못했습니다.") }
+        }
+        .alert("이 프리셋을 지울까요?", isPresented: Binding(
+            get: { pendingPresetDelete != nil },
+            set: { if !$0 { pendingPresetDelete = nil } }
+        )) {
+            Button("삭제", role: .destructive) {
+                if let id = pendingPresetDelete {
+                    studio.deletePreset(id)
+                    if selection == .preset(id) { selection = nil }
+                }
+                pendingPresetDelete = nil
+            }
+            Button("취소", role: .cancel) { pendingPresetDelete = nil }
+        } message: {
+            Text("저장된 프로필에서 빠집니다. 기판에 들어 있는 로닌 동작은 지우지 않습니다.")
         }
         .fileImporter(isPresented: $importProfile, allowedContentTypes: [.json]) { result in
             if case .success(let url) = result, let data = readSecurityScoped(url) {
@@ -95,8 +110,7 @@ struct StudioView: View {
             PresetEditor(presetId: id)
                 .toolbar {
                     Button("프리셋 삭제", role: .destructive) {
-                        studio.deletePreset(id)
-                        selection = nil
+                        pendingPresetDelete = id
                     }
                 }
         case nil:
@@ -117,7 +131,23 @@ struct StudioView: View {
             .disabled(studio.profile.devices.count >= StudioProfile.maxDevices)
         }
         ToolbarItem {
-            Button("프리셋 추가") { studio.addPreset() }
+            Menu("프리셋 추가") {
+                Button("로닌 프리셋") {
+                    guard let device = studio.profile.devices.first(where: { $0.kind == .ronin }) else {
+                        studio.note("로닌 기판을 먼저 추가하세요.")
+                        return
+                    }
+                    studio.addRoninPreset(for: device, look: RoninLook(shot: "wide", timeScale: 1, sendMove: false, yaw: 0, roll: 0, pitch: 0, seconds: 1.5, absolute: true))
+                }
+                Button("카메라 설정 프리셋") {
+                    guard let device = studio.profile.devices.first(where: { $0.kind == .goproBridge || $0.kind == .gopro || $0.kind == .goproAction5 }) else {
+                        studio.note("고프로 또는 액션 5 프로 칸을 먼저 추가하세요.")
+                        return
+                    }
+                    let cameraId = device.kind == .goproBridge ? device.cameras.first?.id : nil
+                    studio.addActionPreset(deviceId: device.id, cameraId: cameraId, name: "", look: GoProCatalog.freshLook())
+                }
+            }
         }
         ToolbarItem {
             Menu("파일") {
@@ -145,6 +175,49 @@ struct StudioView: View {
             showProfile = true
         } catch {
             studio.note("프로필을 만들지 못했습니다.")
+        }
+    }
+
+    private func deviceListRows(_ device: DeviceRecord) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(device.name, systemImage: icon(device))
+                Spacer()
+                Button("삭제", role: .destructive) {
+                    if selection == .device(device.id) { selection = nil }
+                    studio.deleteDevice(device.id)
+                }
+                .buttonStyle(.borderless)
+            }
+            if device.kind == .goproBridge {
+                ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
+                    HStack {
+                        Image(systemName: "video")
+                        Text("카메라 \(index + 1)")
+                        Text(camera.role.title)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("삭제", role: .destructive) {
+                            studio.deleteCamera(device.id, camera.id)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                if device.cameras.count < 4 {
+                    Button("카메라 추가") { studio.addCamera(device.id) }
+                        .buttonStyle(.borderless)
+                }
+            }
+        }
+        .tag(StudioPick.device(device.id))
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button("삭제", role: .destructive) {
+                if selection == .device(device.id) { selection = nil }
+                studio.deleteDevice(device.id)
+            }
         }
     }
 

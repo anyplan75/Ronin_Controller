@@ -26,6 +26,7 @@ struct RoninDeck: View {
     }
 
     @ViewBuilder private func deck(_ device: DeviceRecord) -> some View {
+        RoninCommandBoard(device: device)
         Section("이 기판 상태") {
             ApiBadge(title: "실사용 · CAN", tint: .green)
             Button("상태 다시 읽기") { Task { await studio.refresh() } }
@@ -196,5 +197,178 @@ struct RoninDeck: View {
 
     private func motorStop(_ device: DeviceRecord, _ path: String) {
         Task { await studio.ronin(device, path: path) }
+    }
+}
+
+/// 가운데에서 끌고, 누르고 있는 동안 팬·틸트를 보내고, 떼면 가운데로 돌아옵니다.
+struct RoninStick: View {
+    @EnvironmentObject private var studio: Studio
+    var device: DeviceRecord
+    var diameter: CGFloat = 148
+    var onDrive: (CGSize) -> Void = { _ in }
+
+    @State private var knob: CGSize = .zero
+    @State private var vector: CGSize = .zero
+    @State private var held = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(StagePalette.paper)
+            Circle()
+                .stroke(StagePalette.ink, lineWidth: 2)
+            Circle()
+                .fill(StagePalette.ink.opacity(0.18))
+                .frame(width: 8, height: 8)
+            Circle()
+                .fill(held ? StagePalette.oxblood : StagePalette.brass)
+                .frame(width: diameter * 0.34, height: diameter * 0.34)
+                .offset(knob)
+        }
+        .frame(width: diameter, height: diameter)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let limit = diameter * 0.33
+                    let raw = value.translation
+                    let reach = max(1, hypot(raw.width, raw.height))
+                    let scale = min(1, limit / reach)
+                    let next = CGSize(width: raw.width * scale, height: raw.height * scale)
+                    knob = next
+                    vector = CGSize(width: next.width / limit, height: next.height / limit)
+                    held = true
+                    onDrive(vector)
+                }
+                .onEnded { _ in
+                    knob = .zero
+                    vector = .zero
+                    held = false
+                    onDrive(.zero)
+                    Task { await studio.roninHold(device, path: nil) }
+                }
+        )
+        .task(id: held) {
+            guard held else { return }
+            while !Task.isCancelled {
+                let yaw = Double(vector.width) * 45
+                let pitch = Double(vector.height) * 45
+                if hypot(vector.width, vector.height) < 0.12 {
+                    await studio.roninHold(device, path: nil)
+                } else {
+                    await studio.roninSpeed(device, yaw: yaw, pitch: pitch)
+                }
+                try? await Task.sleep(nanoseconds: 180_000_000)
+            }
+        }
+        .accessibilityLabel("\(device.name) 조이스틱")
+    }
+}
+
+/// 기판이 받는 로닌 명령을 한 화면에 두고, 각 버튼이 그 주소로 보냅니다.
+struct RoninCommandBoard: View {
+    @EnvironmentObject private var studio: Studio
+    var device: DeviceRecord
+    @State private var pendingDelete: UUID?
+
+    private var look: RoninLook {
+        RoninLook(shot: "wide", timeScale: 1, sendMove: false, yaw: 0, roll: 0, pitch: 0, seconds: 1.5, absolute: true)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("짐벌 조작")
+                .font(.caption.weight(.semibold))
+            Text("가운데에서 스틱을 끌면 누르고 있는 동안 팬과 틸트가 나갑니다. 떼면 가운데로 돌아오고 멈춥니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            RoninStick(device: device)
+            commandGrid
+            Text("기판에 있는 동작")
+                .font(.caption.weight(.semibold))
+            Text("이 동작은 기판에 그대로 둡니다. 여기서 지우지 않습니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 6)]) {
+                ForEach(studio.shotNames, id: \.self) { name in
+                    Button(RoninCatalog.title(name)) {
+                        Task { await studio.ronin(device, path: "/shot/\(name)", query: ["t": "1.00"]) }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption2)
+                }
+            }
+            Text("내가 저장한 프리셋")
+                .font(.caption.weight(.semibold))
+            Button("이 로닌 프리셋 저장") {
+                studio.addRoninPreset(for: device, look: look)
+            }
+            .buttonStyle(.bordered)
+            .font(.caption2)
+            ForEach(studio.userPresets(kind: .ronin, deviceId: device.id)) { preset in
+                HStack {
+                    Button(preset.name) { Task { await studio.applyRoninLook(preset, to: device) } }
+                        .buttonStyle(.bordered)
+                        .font(.caption2)
+                    Button("삭제", role: .destructive) { pendingDelete = preset.id }
+                        .font(.caption2)
+                }
+            }
+        }
+        .alert("이 프리셋을 지울까요?", isPresented: Binding(
+            get: { pendingDelete != nil },
+            set: { if !$0 { pendingDelete = nil } }
+        )) {
+            Button("삭제", role: .destructive) {
+                if let id = pendingDelete { studio.deletePreset(id) }
+                pendingDelete = nil
+            }
+            Button("취소", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("저장된 프로필에서 빠집니다. 기판에 있는 동작은 지우지 않습니다.")
+        }
+    }
+
+    private var commandGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 6)]) {
+            command("중앙", "/recenter")
+            command("정지", "/stop")
+            command("정면", "/preset/front")
+            command("아래", "/preset/down")
+            command("위", "/preset/up")
+            command("녹화", "/record", ["action": "start"])
+            command("녹화 정지", "/record", ["action": "stop"])
+            command("녹화 토글", "/record", ["action": "toggle"])
+            command("셔터", "/photo")
+            command("시계", "/sync/clock")
+            command("소니 상태", "/sony/status")
+            command("CAN 듣기", "/can/listen", ["sec": "30"])
+            hold("요 왼쪽", "/jog/yaw/left")
+            hold("요 오른쪽", "/jog/yaw/right")
+            hold("틸트 위", "/jog/pitch/up")
+            hold("틸트 아래", "/jog/pitch/down")
+            hold("롤 왼쪽", "/jog/roll/left")
+            hold("롤 오른쪽", "/jog/roll/right")
+            hold("줌 인", "/zoom/in", stop: "/zoom/stop")
+            hold("줌 아웃", "/zoom/out", stop: "/zoom/stop")
+            hold("포커스 인", "/focus/in", stop: "/focus/stop")
+            hold("포커스 아웃", "/focus/out", stop: "/focus/stop")
+            hold("모터 인", "/motor/in", stop: "/motor/stop")
+            hold("모터 아웃", "/motor/out", stop: "/motor/stop")
+        }
+        .font(.caption2)
+    }
+
+    private func command(_ title: String, _ path: String, _ query: [String: String] = [:]) -> some View {
+        Button(title) { Task { await studio.ronin(device, path: path, query: query) } }
+            .buttonStyle(.bordered)
+    }
+
+    private func hold(_ title: String, _ path: String, stop: String = "/stop") -> some View {
+        HoldButton(title: title, press: {
+            Task { await studio.roninHold(device, path: path) }
+        }, release: {
+            Task { await studio.ronin(device, path: stop) }
+        })
     }
 }

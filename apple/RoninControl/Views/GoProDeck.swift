@@ -112,7 +112,16 @@ struct GoProDeck: View {
                     Task { await studio.gopro(device, { try await GoProClient.presetList($0) }, label: "프리셋 목록") }
                 }
                 if let list = studio.goproLive[device.id]?.presetList, !list.isEmpty {
-                    Text(list).font(.caption2)
+                    let items = CameraPresetText.parse(list)
+                    if items.isEmpty {
+                        Text(list).font(.caption2)
+                    } else {
+                        ForEach(items) { item in
+                            Button(item.title) {
+                                Task { await studio.gopro(device, { try await GoProClient.loadPreset($0, id: item.id) }, label: item.title) }
+                            }
+                        }
+                    }
                 }
                 TextField("프리셋 번호", text: $presetId)
                 Button("그 번호 불러오기") {

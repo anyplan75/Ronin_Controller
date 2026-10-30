@@ -145,7 +145,35 @@ enum C3Client {
             }
             return body.cameras ?? []
         }
-        throw CallError.unavailable("주변 고프로 찾기가 끝나지 않았습니다.")
+        throw CallError.unavailable("주변 카메라 찾기가 끝나지 않았습니다.")
+    }
+
+    static func cameraPresets(_ device: DeviceRecord, mac: String) async throws -> [CameraPresetItem] {
+        let clean = BoardMac.normalize(mac)
+        guard let url = LocalHTTP.url(host: device.host, port: device.port, path: "/presets", query: ["mac": clean]) else {
+            throw CallError.noAddress
+        }
+        let (_, text) = try await LocalHTTP.get(url, timeout: 12)
+        return CameraPresetText.parse(text)
+    }
+
+    static func loadCameraPreset(_ device: DeviceRecord, mac: String, id: Int) async throws -> String {
+        let clean = BoardMac.normalize(mac)
+        guard let url = LocalHTTP.url(host: device.host, port: device.port, path: "/preset/load", query: [
+            "mac": clean,
+            "id": String(id),
+        ]) else { throw CallError.noAddress }
+        return try await LocalHTTP.get(url, timeout: 12).1
+    }
+
+    static func setSetting(_ device: DeviceRecord, mac: String, setting: Int, option: Int) async throws -> String {
+        let clean = BoardMac.normalize(mac)
+        guard let url = LocalHTTP.url(host: device.host, port: device.port, path: "/setting", query: [
+            "mac": clean,
+            "setting": String(setting),
+            "option": String(option),
+        ]) else { throw CallError.noAddress }
+        return try await LocalHTTP.get(url, timeout: 12).1
     }
 }
 
@@ -154,6 +182,51 @@ struct NearbyGoPro: Decodable, Sendable {
     var name: String?
     /// 기판이 그 카메라와 이미 블루투스로 붙어 있으면 true 입니다. 광고만 들리면 false 입니다.
     var attached: Bool?
+}
+
+struct CameraPresetItem: Identifiable, Sendable, Equatable {
+    var id: Int
+    var title: String
+}
+
+enum CameraPresetText {
+    static func title(id: Int, titleId: Int, name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        let names = [
+            0: "액티비티", 1: "표준", 2: "시네마틱", 3: "사진", 4: "라이브 버스트",
+            5: "버스트", 6: "야간", 7: "타임워프", 8: "타임랩스", 9: "나이트 랩스",
+            10: "비디오", 11: "슬로 모션", 14: "파노라마", 35: "액션",
+        ]
+        if let known = names[titleId] { return known }
+        return "프리셋 \(id)"
+    }
+
+    static func parse(_ text: String) -> [CameraPresetItem] {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        if let root = json as? [String: Any], let presets = root["presets"] as? [[String: Any]] {
+            return presets.compactMap { item in
+                guard let id = item["id"] as? Int else { return nil }
+                let titleId = item["titleId"] as? Int ?? -1
+                let name = item["name"] as? String ?? ""
+                return CameraPresetItem(id: id, title: title(id: id, titleId: titleId, name: name))
+            }
+        }
+        guard let root = json as? [String: Any],
+              let groups = root["presetGroupArray"] as? [[String: Any]] else { return [] }
+        var items: [CameraPresetItem] = []
+        for group in groups {
+            let presets = group["presets"] as? [[String: Any]] ?? []
+            for preset in presets {
+                guard let id = preset["id"] as? Int else { continue }
+                let name = (preset["title"] as? String) ?? (preset["customName"] as? String) ?? ""
+                let titleId = preset["title"] as? Int ?? -1
+                items.append(CameraPresetItem(id: id, title: title(id: id, titleId: titleId, name: name)))
+            }
+        }
+        return items
+    }
 }
 
 /// 기판이 알리는 이름을 듣고, 맥 주소가 맞으면 바로 숫자 주소를 받습니다.

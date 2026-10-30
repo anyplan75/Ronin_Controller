@@ -71,7 +71,7 @@ struct DeviceForm: View {
                     if !BoardMac.isFull(device.wrappedValue.boardMac) {
                         device.wrappedValue.boardMac = BoardMac.pluggedIn
                     }
-                    device.wrappedValue.cameras = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+                    device.wrappedValue.cameras = BridgeCameraSlot.capped(device.wrappedValue.cameras)
                 }
             }
         )
@@ -108,23 +108,39 @@ struct DeviceForm: View {
         Text("기판은 JMEDIA 에 먼저 붙고, 안 되면 JMEDIA_Cam 에 붙습니다. 와이파이 비밀번호는 앱에 없습니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        ForEach(0..<4, id: \.self) { index in
+        if device.wrappedValue.cameras.isEmpty {
+            Text("카메라 칸이 없습니다. 장치 목록에서 카메라를 추가하세요.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        ForEach(Array(device.wrappedValue.cameras.enumerated()), id: \.element.id) { index, camera in
             VStack(alignment: .leading, spacing: 6) {
-                Text("카메라 \(index + 1)")
-                    .font(.caption.weight(.semibold))
-                Picker("종류", selection: cameraRole(index)) {
+                HStack {
+                    Text("카메라 \(index + 1)")
+                        .font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("이 카메라 삭제", role: .destructive) {
+                        studio.deleteCamera(deviceId, camera.id)
+                    }
+                    .font(.caption)
+                }
+                Picker("종류", selection: cameraRole(camera.id)) {
                     ForEach(BridgeCameraRole.allCases) { role in
                         Text(role.title).tag(role)
                     }
                 }
-                TextField("카메라 블루투스 맥 주소", text: cameraMac(index))
+                TextField("카메라 블루투스 맥 주소", text: cameraMac(camera.id))
                     .autocorrectionDisabled()
-                Text(slotLine(index))
+                Text(slotLine(camera.id))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                BridgeCameraPresets(deviceId: deviceId, camera: camera)
             }
         }
-        Button(findingCameras ? "고프로 찾는 중" : "주변 고프로 찾기") {
+        if device.wrappedValue.cameras.count < 4 {
+            Button("카메라 추가") { studio.addCamera(deviceId) }
+        }
+        Button(findingCameras ? "카메라 찾는 중" : "주변 카메라 찾기") {
             findingCameras = true
             Task {
                 await studio.scanCameras(deviceId)
@@ -132,7 +148,7 @@ struct DeviceForm: View {
             }
         }
         .disabled(findingCameras || device.wrappedValue.host.isEmpty)
-        Text("기판이 주변 고프로를 읽으면 네 칸에 맥 주소와 붙음 또는 붙지 않음이 바로 나옵니다.")
+        Text("기판이 주변 고프로와 액션 5 프로를 같은 목록으로 읽습니다. 있는 칸에 맥 주소와 붙음 또는 붙지 않음이 바로 나오고, 칸이 모자라면 4대까지 추가합니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Button("촬영 시작") {
@@ -155,43 +171,38 @@ struct DeviceForm: View {
         )
     }
 
-    private func cameraRole(_ index: Int) -> Binding<BridgeCameraRole> {
+    private func cameraRole(_ id: UUID) -> Binding<BridgeCameraRole> {
         Binding(
-            get: {
-                let slots = device.wrappedValue.cameras
-                guard slots.indices.contains(index) else { return .gopro }
-                return slots[index].role
-            },
+            get: { device.wrappedValue.cameras.first(where: { $0.id == id })?.role ?? .gopro },
             set: { newValue in
-                var slots = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+                var slots = device.wrappedValue.cameras
+                guard let index = slots.firstIndex(where: { $0.id == id }) else { return }
                 slots[index].role = newValue
                 device.wrappedValue.cameras = slots
             }
         )
     }
 
-    private func cameraMac(_ index: Int) -> Binding<String> {
+    private func cameraMac(_ id: UUID) -> Binding<String> {
         Binding(
-            get: {
-                let slots = device.wrappedValue.cameras
-                guard slots.indices.contains(index) else { return "" }
-                return slots[index].mac
-            },
+            get: { device.wrappedValue.cameras.first(where: { $0.id == id })?.mac ?? "" },
             set: { newValue in
-                var slots = BridgeCameraSlot.padded(device.wrappedValue.cameras)
+                var slots = device.wrappedValue.cameras
+                guard let index = slots.firstIndex(where: { $0.id == id }) else { return }
                 slots[index].mac = BoardMac.isFull(newValue) ? BoardMac.normalize(newValue) : newValue.uppercased()
                 device.wrappedValue.cameras = slots
             }
         )
     }
 
-    private func slotLine(_ index: Int) -> String {
-        let slots = BridgeCameraSlot.padded(device.wrappedValue.cameras)
-        guard slots.indices.contains(index) else { return "맥 주소를 적지 않았습니다." }
-        if let live = studio.bridgeLive[deviceId] {
-            return live.attachment(for: slots[index])
+    private func slotLine(_ id: UUID) -> String {
+        guard let slot = device.wrappedValue.cameras.first(where: { $0.id == id }) else {
+            return "맥 주소를 적지 않았습니다."
         }
-        return BoardMac.isFull(slots[index].mac) ? "아직 읽지 못했습니다." : "맥 주소를 적지 않았습니다."
+        if let live = studio.bridgeLive[deviceId] {
+            return live.attachment(for: slot)
+        }
+        return BoardMac.isFull(slot.mac) ? "아직 읽지 못했습니다." : "맥 주소를 적지 않았습니다."
     }
 
     @ViewBuilder private var note: some View {
@@ -283,11 +294,142 @@ struct BridgeAttachmentList: View {
         if let live = studio.bridgeLive[device.id], !live.ssid.isEmpty {
             Text("기판 망 \(live.ssid)")
         }
-        ForEach(BridgeCameraSlot.padded(device.cameras)) { slot in
+        if device.cameras.isEmpty {
+            Text("카메라 칸이 없습니다.")
+        }
+        ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, slot in
             let state = studio.bridgeLive[device.id]?.attachment(for: slot)
                 ?? (BoardMac.isFull(slot.mac) ? "아직 읽지 못했습니다." : "맥 주소를 적지 않았습니다.")
             let mac = BoardMac.isFull(slot.mac) ? BoardMac.normalize(slot.mac) : "맥 없음"
-            Text("\(slot.slot + 1). \(slot.role.title)  \(mac)  \(state)")
+            Text("\(index + 1). \(slot.role.title)  \(mac)  \(state)")
         }
+    }
+}
+
+/// 이 카메라 칸의 설정을 한 화면에 모읍니다. 카메라에 있는 프리셋과 앱에 저장한 프리셋은 따로입니다.
+struct BridgeCameraPresets: View {
+    @EnvironmentObject private var studio: Studio
+    var deviceId: UUID
+    var camera: BridgeCameraSlot
+    @State private var found: [CameraPresetItem] = []
+    @State private var reading = false
+    @State private var look = GoProCatalog.freshLook()
+    @State private var pendingDelete: UUID?
+
+    var body: some View {
+        Text("카메라 설정")
+            .font(.caption.weight(.semibold))
+        Button(reading ? "읽는 중" : "카메라에 있는 프리셋 읽기") {
+            reading = true
+            Task {
+                await readPresets()
+                reading = false
+            }
+        }
+        .disabled(reading || !BoardMac.isFull(camera.mac))
+        .font(.caption)
+        ForEach(found) { item in
+            Button(item.title) {
+                Task { await pick(item) }
+            }
+            .font(.caption)
+        }
+        ForEach(GoProCatalog.settings) { spec in
+            Toggle(spec.title, isOn: enabled(spec))
+                .font(.caption)
+            Picker(spec.title, selection: option(spec)) {
+                ForEach(spec.options) { choice in
+                    Text(choice.label).tag(choice.value)
+                }
+            }
+            .disabled(!(look.settings.first(where: { $0.settingId == spec.id })?.enabled ?? false))
+            .font(.caption)
+        }
+        Button("이 설정을 프리셋으로 저장") {
+            let name = "\(camera.role.title) 설정"
+            studio.addActionPreset(deviceId: deviceId, cameraId: camera.id, name: name, look: look)
+        }
+        .font(.caption)
+        ForEach(studio.userPresets(kind: .action, deviceId: deviceId, cameraId: camera.id)) { preset in
+            HStack {
+                Button(preset.name) {
+                    look = preset.gopro
+                    Task { await applySaved(preset) }
+                }
+                Button("삭제", role: .destructive) { pendingDelete = preset.id }
+            }
+            .font(.caption)
+        }
+        .alert("이 프리셋을 지울까요?", isPresented: Binding(
+            get: { pendingDelete != nil },
+            set: { if !$0 { pendingDelete = nil } }
+        )) {
+            Button("삭제", role: .destructive) {
+                if let id = pendingDelete { studio.deletePreset(id) }
+                pendingDelete = nil
+            }
+            Button("취소", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("저장된 프로필에서 빠집니다. 카메라에 원래 있던 프리셋은 지우지 않습니다.")
+        }
+    }
+
+    private func enabled(_ spec: GoProSettingSpec) -> Binding<Bool> {
+        Binding(
+            get: { look.settings.first(where: { $0.settingId == spec.id })?.enabled ?? false },
+            set: { on in
+                if let index = look.settings.firstIndex(where: { $0.settingId == spec.id }) {
+                    look.settings[index].enabled = on
+                }
+            }
+        )
+    }
+
+    private func option(_ spec: GoProSettingSpec) -> Binding<Int> {
+        Binding(
+            get: { look.settings.first(where: { $0.settingId == spec.id })?.option ?? spec.options[0].value },
+            set: { value in
+                if let index = look.settings.firstIndex(where: { $0.settingId == spec.id }) {
+                    look.settings[index].option = value
+                }
+            }
+        )
+    }
+
+    private func readPresets() async {
+        guard let device = studio.profile.devices.first(where: { $0.id == deviceId }) else { return }
+        do {
+            if device.kind == .gopro {
+                let text = try await GoProClient.presetList(device)
+                found = CameraPresetText.parse(text)
+            } else {
+                found = try await C3Client.cameraPresets(device, mac: camera.mac)
+            }
+            if found.isEmpty {
+                studio.note("\(camera.role.title) 에서 읽을 프리셋이 없습니다.")
+            }
+        } catch {
+            studio.note(error.localizedDescription)
+        }
+    }
+
+    private func pick(_ item: CameraPresetItem) async {
+        guard let device = studio.profile.devices.first(where: { $0.id == deviceId }) else { return }
+        do {
+            if device.kind == .gopro {
+                _ = try await GoProClient.loadPreset(device, id: item.id)
+            } else {
+                _ = try await C3Client.loadCameraPreset(device, mac: camera.mac, id: item.id)
+            }
+            studio.note("\(camera.role.title) 프리셋 \(item.title) 을 불렀습니다.")
+        } catch {
+            studio.note(error.localizedDescription)
+        }
+    }
+
+    private func applySaved(_ preset: ShootPreset) async {
+        guard let device = studio.profile.devices.first(where: { $0.id == deviceId }) else { return }
+        let line = await GroupFire.apply(preset, to: device)
+        studio.note(line.isEmpty ? "보낼 설정이 없습니다. 체크한 뒤 저장하세요." : line)
     }
 }

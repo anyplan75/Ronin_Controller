@@ -92,7 +92,8 @@ struct PhoneRunView: View {
 
     private func cameraRow(_ device: DeviceRecord) -> some View {
         let picked = wheelIds.contains(device.id)
-        return HStack(spacing: 12) {
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
             if device.kind == .ronin {
                 Button {
                     toggleWheel(device.id)
@@ -135,6 +136,28 @@ struct PhoneRunView: View {
             Button(device.kind == .goproBridge ? "설정" : "주소") { editing = device.id }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.bordered)
+            Button("삭제", role: .destructive) { studio.deleteDevice(device.id) }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+        }
+        if device.kind == .goproBridge {
+            ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
+                HStack {
+                    Text("카메라 \(index + 1)  \(camera.role.title)")
+                    Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("삭제", role: .destructive) {
+                        studio.deleteCamera(device.id, camera.id)
+                    }
+                }
+                .font(.caption)
+            }
+            if device.cameras.count < 4 {
+                Button("카메라 추가") { studio.addCamera(device.id) }
+                    .font(.caption.weight(.semibold))
+            }
+        }
         }
         .padding(12)
         .background(picked ? StagePalette.brass.opacity(0.28) : rowFill, in: RoundedRectangle(cornerRadius: 12))
@@ -239,7 +262,7 @@ struct PhoneRunView: View {
             let live = studio.bridgeLive[device.id]
             let attached = device.cameras.filter { live?.attachment(for: $0) == "붙음" }.count
             let phase = studio.bridgePhase[device.id] ?? "기판을 찾는 중입니다."
-            return "\(device.linkLabel)  \(phase)  붙음 \(attached)/4"
+            return "\(device.linkLabel)  \(phase)  붙음 \(attached)/\(device.cameras.count)"
         case .osmoAction:
             let battery = studio.radio.live[device.id]?.battery
             let power = battery.map { "배터리 \($0)" } ?? "배터리 없음"
@@ -313,10 +336,8 @@ struct PhoneDeviceDetail: View {
     @ViewBuilder private func basicControls(_ device: DeviceRecord) -> some View {
         switch device.kind {
         case .ronin:
-            Section("이 기판만") {
-                Button("녹화 시작") { Task { await studio.ronin(device, path: "/record", query: ["action": "start"]) } }
-                Button("녹화 정지") { Task { await studio.ronin(device, path: "/record", query: ["action": "stop"]) } }
-                Button("짐벌 정지") { Task { await studio.ronin(device, path: "/stop") } }
+            Section("짐벌") {
+                RoninCommandBoard(device: device)
             }
         case .goproAction5:
             Section("중계 기판") {

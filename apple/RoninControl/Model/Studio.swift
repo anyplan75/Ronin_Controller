@@ -142,37 +142,95 @@ final class Studio: ObservableObject {
             enabled: true,
             pairedOnce: false,
             boardMac: product.kind == .goproBridge && !boardAlready ? knownMac : "",
-            cameras: product.kind == .goproBridge ? BridgeCameraSlot.emptyFour() : []
+            cameras: []
         )
         profile.devices.append(device)
         profile.groupIds.append(device.id)
+        if device.kind == .goproBridge {
+            let id = device.id
+            note("\(device.name) 을 목록에 넣었습니다. 카메라 칸은 따로 추가합니다.")
+            Task { await connectBoard(id, reportMiss: false) }
+        }
     }
 
     func deleteDevice(_ id: UUID) {
+        let name = profile.devices.first(where: { $0.id == id })?.name ?? "장치"
         profile.devices.removeAll { $0.id == id }
         profile.groupIds.removeAll { $0 == id }
         profile.stageSpots.removeAll { $0.deviceId == id }
         for index in profile.presets.indices {
             profile.presets[index].deviceIds.removeAll { $0 == id }
         }
+        bridgeLive[id] = nil
+        bridgePhase[id] = nil
+        note("\(name) 을 목록과 저장된 프로필에서 뺐습니다.")
     }
 
-    func addPreset() {
+    /// 이 기판의 카메라 칸을 하나 넣습니다. 최대 4칸이고, 바로 프로필에 저장됩니다.
+    func addCamera(_ deviceId: UUID) {
+        guard let index = profile.devices.firstIndex(where: { $0.id == deviceId && $0.kind == .goproBridge }) else { return }
+        guard profile.devices[index].cameras.count < 4 else {
+            note("카메라는 한 기판에 4대까지입니다.")
+            return
+        }
+        profile.devices[index].cameras.append(BridgeCameraSlot())
+        let count = profile.devices[index].cameras.count
+        note("\(profile.devices[index].name) 에 카메라 \(count)칸을 넣고 저장했습니다.")
+    }
+
+    /// 이 카메라 칸만 지웁니다. 기판은 남고, 저장된 프로필에서도 빠집니다.
+    func deleteCamera(_ deviceId: UUID, _ cameraId: UUID) {
+        guard let index = profile.devices.firstIndex(where: { $0.id == deviceId && $0.kind == .goproBridge }) else { return }
+        let before = profile.devices[index].cameras.count
+        profile.devices[index].cameras.removeAll { $0.id == cameraId }
+        guard profile.devices[index].cameras.count != before else { return }
+        note("\(profile.devices[index].name) 의 카메라 칸을 목록과 저장된 프로필에서 뺐습니다.")
+    }
+
+    func addRoninPreset(for device: DeviceRecord, look: RoninLook) {
+        let count = profile.presets.filter { $0.kind == .ronin }.count + 1
         let preset = ShootPreset(
             id: UUID(),
-            name: "프리셋 \(profile.presets.count + 1)",
+            name: "\(device.name) 프리셋 \(count)",
             note: "",
-            deviceIds: profile.groupIds,
-            ronin: RoninLook(shot: "wide", timeScale: 1, sendMove: false, yaw: 0, roll: 0, pitch: 0, seconds: 1.5, absolute: true),
+            deviceIds: [device.id],
+            ronin: look,
             gopro: GoProCatalog.freshLook(),
             osmo: OsmoLook(mode: nil),
-            connections: profile.devices
+            connections: [],
+            kind: .ronin
         )
         profile.presets.append(preset)
+        note("\(preset.name) 을 저장했습니다. 기판에 있는 동작은 그대로입니다.")
+    }
+
+    func addActionPreset(deviceId: UUID, cameraId: UUID?, name: String, look: GoProLook) {
+        let preset = ShootPreset(
+            id: UUID(),
+            name: name.isEmpty ? "카메라 설정 \(profile.presets.filter { $0.kind == .action }.count + 1)" : name,
+            note: "",
+            deviceIds: [deviceId],
+            ronin: RoninLook(shot: "", timeScale: 1, sendMove: false, yaw: 0, roll: 0, pitch: 0, seconds: 1, absolute: true),
+            gopro: look,
+            osmo: OsmoLook(mode: nil),
+            connections: [],
+            kind: .action,
+            cameraId: cameraId
+        )
+        profile.presets.append(preset)
+        note("\(preset.name) 을 저장했습니다.")
+    }
+
+    func userPresets(kind: PresetKind, deviceId: UUID, cameraId: UUID? = nil) -> [ShootPreset] {
+        profile.presets.filter { preset in
+            preset.kind == kind && preset.deviceIds.contains(deviceId) && preset.cameraId == cameraId
+        }
     }
 
     func deletePreset(_ id: UUID) {
+        guard let preset = profile.presets.first(where: { $0.id == id }) else { return }
         profile.presets.removeAll { $0.id == id }
+        note("\(preset.name) 을 저장된 프로필에서 뺐습니다.")
     }
 
     func rememberConnections(in presetId: UUID) {
@@ -402,6 +460,20 @@ final class Studio: ObservableObject {
         await refresh()
     }
 
+    /// 스틱을 누르고 있는 동안 팬·틸트 속도를 다시 보냅니다. 성공 기록은 남기지 않습니다.
+    func roninSpeed(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
+        if profile.practice { return }
+        do {
+            _ = try await RoninClient.command(device, path: "/speed", query: [
+                "yaw": String(format: "%.1f", yaw),
+                "roll": "0",
+                "pitch": String(format: "%.1f", pitch),
+            ])
+        } catch {
+            note("\(device.name) \(error.localizedDescription)")
+        }
+    }
+
     /// 휠을 누르는 동안만 보냅니다. 성공 기록은 남기지 않아 로그가 넘치지 않습니다.
     func roninHold(_ device: DeviceRecord, path: String?) async {
         if profile.practice { return }
@@ -488,7 +560,6 @@ final class Studio: ObservableObject {
     func importProfile(_ data: Data) {
         do {
             profile = try JSONDecoder().decode(StudioProfile.self, from: data)
-            ensureKnownBoard()
             note("프로필을 가져왔습니다. 장치 \(profile.devices.count)대, 프리셋 \(profile.presets.count)개.")
         } catch {
             note("프로필을 읽지 못했습니다.")
@@ -530,9 +601,8 @@ final class Studio: ObservableObject {
         }
     }
 
-    /// 꽂힌 기판이 목록에 없으면 맥 주소로 넣고, 찾는 즉시 붙습니다.
+    /// 목록에 있는 기판만 붙습니다. 지운 기판은 다시 만들지 않습니다.
     private func bootBoards() async {
-        ensureKnownBoard()
         c3.onFound = { [weak self] mac, host, port in
             Task { @MainActor in
                 self?.adoptBoard(mac: mac, host: host, port: port)
@@ -546,44 +616,6 @@ final class Studio: ObservableObject {
         c3.start()
         await connectRegisteredBoards()
         await watchBoards()
-    }
-
-    private func ensureKnownBoard() {
-        let mac = BoardMac.pluggedIn
-        if profile.devices.contains(where: { $0.kind == .goproBridge && BoardMac.same($0.boardMac, mac) }) {
-            return
-        }
-        if let index = profile.devices.firstIndex(where: { $0.kind == .goproBridge && !BoardMac.isFull($0.boardMac) }) {
-            profile.devices[index].boardMac = mac
-            profile.devices[index].port = 80
-            profile.devices[index].cameras = BridgeCameraSlot.padded(profile.devices[index].cameras)
-            bridgePhase[profile.devices[index].id] = "기판을 찾는 중입니다."
-            note("꽂힌 C3 기판 \(mac) 을 등록하고 바로 연결합니다.")
-            return
-        }
-        guard profile.devices.count < StudioProfile.maxDevices else {
-            note("C3 기판을 넣을 자리가 없습니다. 장치는 8대까지입니다.")
-            return
-        }
-        let device = DeviceRecord(
-            id: UUID(),
-            name: "C3 중계",
-            kind: .goproBridge,
-            osmoModel: .unknown,
-            host: "",
-            port: 80,
-            bleIdentifier: "",
-            enabled: true,
-            pairedOnce: false,
-            boardMac: mac,
-            cameras: BridgeCameraSlot.emptyFour()
-        )
-        profile.devices.append(device)
-        if !profile.groupIds.contains(device.id) {
-            profile.groupIds.append(device.id)
-        }
-        bridgePhase[device.id] = "기판을 찾는 중입니다."
-        note("꽂힌 C3 기판 \(mac) 을 등록하고 바로 연결합니다.")
     }
 
     private func adoptBoard(mac: String, host: String, port: Int) {
@@ -653,7 +685,14 @@ final class Studio: ObservableObject {
         note("같은 망에서 그 기판의 대답을 듣지 못했습니다.")
     }
 
-    /// 기판이 주변 고프로의 블루투스 맥 주소를 읽어 빈 칸부터 채웁니다.
+    private static func bridgeRole(_ name: String) -> BridgeCameraRole {
+        if name.contains("action") || name.contains("osmo") || name.contains("oa5") || name.contains("ac5") {
+            return .action5
+        }
+        return .gopro
+    }
+
+    /// 기판이 주변 고프로와 액션 5 프로의 블루투스 맥 주소를 읽어 칸에 넣습니다.
     func scanCameras(_ id: UUID) async {
         guard let index = profile.devices.firstIndex(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
         let device = profile.devices[index]
@@ -665,16 +704,19 @@ final class Studio: ObservableObject {
         do {
             let found = try await C3Client.nearbyGoPros(device).filter { BoardMac.isFull($0.mac) }
             guard !found.isEmpty else {
-                note("주변에서 고프로를 찾지 못했습니다.")
+                note("주변에서 고프로나 액션 5 프로를 찾지 못했습니다.")
                 return
             }
-            var slots = BridgeCameraSlot.padded(device.cameras)
+            var slots = BridgeCameraSlot.capped(device.cameras)
             let take = min(4, found.count)
+            if slots.count < take {
+                slots.append(contentsOf: (0..<(take - slots.count)).map { _ in BridgeCameraSlot() })
+            }
             for slotIndex in 0..<take {
                 let item = found[slotIndex]
                 slots[slotIndex].mac = BoardMac.normalize(item.mac)
                 let name = (item.name ?? "").lowercased()
-                slots[slotIndex].role = (name.contains("action") || name.contains("osmo")) ? .action5 : .gopro
+                slots[slotIndex].role = Self.bridgeRole(name)
             }
             profile.devices[index].cameras = slots
             var live = bridgeLive[id] ?? BridgeBoardLive(ssid: "", ip: "", boardMac: BoardMac.normalize(device.boardMac), slots: [:])
@@ -687,7 +729,7 @@ final class Studio: ObservableObject {
                 }
             }
             bridgeLive[id] = live
-            note("주변 고프로 \(take)대를 칸에 넣고 붙음 여부를 바로 표시했습니다.")
+            note("주변 카메라 \(take)대를 칸에 넣고 붙음 여부를 바로 표시했습니다.")
             await pullBoard(profile.devices[index])
         } catch {
             note("\(device.name) \(error.localizedDescription)")
@@ -769,7 +811,20 @@ extension GroupFire {
             }
             return parts.isEmpty ? "" : "\(device.name) \(parts.joined(separator: " "))"
         case .goproBridge:
-            return ""
+            guard preset.kind == .action,
+                  let cameraId = preset.cameraId,
+                  let slot = device.cameras.first(where: { $0.id == cameraId }),
+                  BoardMac.isFull(slot.mac) else { return "" }
+            var parts: [String] = []
+            for choice in preset.gopro.settings where choice.enabled {
+                let text = try? await C3Client.setSetting(device, mac: slot.mac, setting: choice.settingId, option: choice.option)
+                parts.append(text == nil ? "설정 \(choice.settingId) 실패" : "설정 \(choice.settingId)")
+            }
+            if let id = preset.gopro.loadPresetId {
+                let text = try? await C3Client.loadCameraPreset(device, mac: slot.mac, id: id)
+                parts.append(text == nil ? "카메라 프리셋 실패" : "카메라 프리셋 \(id)")
+            }
+            return parts.isEmpty ? "" : "\(device.name) \(parts.joined(separator: ", "))"
         case .gopro, .goproAction5:
             var parts: [String] = []
             for choice in preset.gopro.settings where choice.enabled {

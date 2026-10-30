@@ -180,22 +180,37 @@ enum BridgeCameraRole: String, Codable, CaseIterable, Identifiable, Sendable {
 }
 
 struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
-    var slot: Int
+    var id: UUID
     var role: BridgeCameraRole
     var mac: String
-    var id: Int { slot }
 
-    static func emptyFour() -> [BridgeCameraSlot] {
-        (0..<4).map { BridgeCameraSlot(slot: $0, role: .gopro, mac: "") }
+    init(id: UUID = UUID(), role: BridgeCameraRole = .gopro, mac: String = "") {
+        self.id = id
+        self.role = role
+        self.mac = mac
     }
 
-    static func padded(_ slots: [BridgeCameraSlot]) -> [BridgeCameraSlot] {
-        var next = emptyFour()
-        for item in slots.prefix(4) {
-            let index = min(3, max(0, item.slot))
-            next[index] = BridgeCameraSlot(slot: index, role: item.role, mac: item.mac)
-        }
-        return next
+    /// 한 기판은 4대를 넘기지 않습니다. 비어 있는 칸을 다시 만들지 않습니다.
+    static func capped(_ slots: [BridgeCameraSlot]) -> [BridgeCameraSlot] {
+        Array(slots.prefix(4))
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, slot, role, mac
+    }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id = try box.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        role = try box.decodeIfPresent(BridgeCameraRole.self, forKey: .role) ?? .gopro
+        mac = try box.decodeIfPresent(String.self, forKey: .mac) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(id, forKey: .id)
+        try box.encode(role, forKey: .role)
+        try box.encode(mac, forKey: .mac)
     }
 }
 
@@ -237,7 +252,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         self.enabled = enabled
         self.pairedOnce = pairedOnce
         self.boardMac = boardMac
-        self.cameras = kind == .goproBridge ? BridgeCameraSlot.padded(cameras) : cameras
+        self.cameras = kind == .goproBridge ? BridgeCameraSlot.capped(cameras) : cameras
     }
 
     /// 목록과 메뉴에 쓰는 이름입니다. 제품과 연결을 같이 적습니다.
@@ -277,7 +292,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         pairedOnce = try box.decode(Bool.self, forKey: .pairedOnce)
         boardMac = try box.decodeIfPresent(String.self, forKey: .boardMac) ?? ""
         let stored = try box.decodeIfPresent([BridgeCameraSlot].self, forKey: .cameras) ?? []
-        cameras = kind == .goproBridge ? BridgeCameraSlot.padded(stored) : stored
+        cameras = kind == .goproBridge ? BridgeCameraSlot.capped(stored) : stored
     }
 
     func encode(to encoder: Encoder) throws {
@@ -324,6 +339,12 @@ struct OsmoLook: Codable, Equatable, Sendable {
     var mode: Int?
 }
 
+enum PresetKind: String, Codable, Sendable {
+    case ronin
+    case action
+    case shared
+}
+
 struct ShootPreset: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var name: String
@@ -334,6 +355,34 @@ struct ShootPreset: Codable, Identifiable, Equatable, Sendable {
     var osmo: OsmoLook
     /// 저장 당시의 직접 연결 주소입니다. 중계 컴퓨터 없이 다시 붙을 때 씁니다.
     var connections: [DeviceRecord]
+    /// 없으면 예전 함께 프리셋입니다. 로닌 기판 동작과는 따로 둡니다.
+    var kind: PresetKind?
+    /// 중계 기판의 카메라 칸입니다. 로닌 프리셋에는 없습니다.
+    var cameraId: UUID?
+
+    init(
+        id: UUID,
+        name: String,
+        note: String,
+        deviceIds: [UUID],
+        ronin: RoninLook,
+        gopro: GoProLook,
+        osmo: OsmoLook,
+        connections: [DeviceRecord],
+        kind: PresetKind? = nil,
+        cameraId: UUID? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.note = note
+        self.deviceIds = deviceIds
+        self.ronin = ronin
+        self.gopro = gopro
+        self.osmo = osmo
+        self.connections = connections
+        self.kind = kind
+        self.cameraId = cameraId
+    }
 }
 
 /// 무대 위 한 장치의 자리입니다. 단위는 미터, 방향은 도입니다.
