@@ -544,6 +544,7 @@ final class Studio: ObservableObject {
             }
         }
         c3.start()
+        await connectRegisteredBoards()
         await watchBoards()
     }
 
@@ -608,9 +609,24 @@ final class Studio: ObservableObject {
         }
     }
 
-    /// 같은 망에서 기판을 찾고, 그 기판이 대답한 맥 주소만 넣습니다.
+    /// 등록된 기판이 있으면 이름 알림을 기다리지 않고 바로 80번 문에 붙습니다.
+    private func connectRegisteredBoards() async {
+        for device in profile.devices where device.kind == .goproBridge && BoardMac.same(device.boardMac, BoardMac.pluggedIn) {
+            await connectBoard(device.id, reportMiss: false)
+        }
+    }
+
+    /// 같은 망에서 기판을 찾고, 그 기판이 대답한 맥 주소만 넣은 뒤 바로 붙습니다.
     func scanBoard(_ id: UUID) async {
-        guard profile.devices.contains(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
+        await connectBoard(id, reportMiss: true)
+    }
+
+    private func connectBoard(_ id: UUID, reportMiss: Bool) async {
+        guard let index = profile.devices.firstIndex(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
+        if !profile.devices[index].host.isEmpty && BoardMac.same(profile.devices[index].boardMac, BoardMac.pluggedIn) {
+            await pullBoard(profile.devices[index])
+            return
+        }
         bridgePhase[id] = "기판을 찾는 중입니다."
         let found = await c3.listen()
         for item in found {
@@ -621,14 +637,18 @@ final class Studio: ObservableObject {
                 continue
             }
             guard let index = profile.devices.firstIndex(where: { $0.id == id }) else { return }
+            let wasEmpty = profile.devices[index].host.isEmpty
             profile.devices[index].boardMac = BoardMac.pluggedIn
             profile.devices[index].host = item.host
             profile.devices[index].port = item.port
             bridgeLive[id] = live
-            bridgePhase[id] = "기판이 대답했습니다."
-            note("기판이 대답해서 맥 주소 \(BoardMac.pluggedIn) 를 넣었습니다.")
+            bridgePhase[id] = "기판에 붙었습니다."
+            if wasEmpty {
+                note("\(profile.devices[index].name) \(BoardMac.pluggedIn) 에 바로 붙었습니다.")
+            }
             return
         }
+        guard reportMiss else { return }
         bridgePhase[id] = "기판이 대답하지 않았습니다."
         note("같은 망에서 그 기판의 대답을 듣지 못했습니다.")
     }
@@ -657,7 +677,17 @@ final class Studio: ObservableObject {
                 slots[slotIndex].role = (name.contains("action") || name.contains("osmo")) ? .action5 : .gopro
             }
             profile.devices[index].cameras = slots
-            note("주변 고프로 \(take)대의 맥 주소를 칸에 넣었습니다.")
+            var live = bridgeLive[id] ?? BridgeBoardLive(ssid: "", ip: "", boardMac: BoardMac.normalize(device.boardMac), slots: [:])
+            for slot in slots where BoardMac.isFull(slot.mac) {
+                let key = BoardMac.normalize(slot.mac)
+                if let match = found.first(where: { BoardMac.same($0.mac, key) }) {
+                    live.slots[key] = match.attached == true ? "붙음" : "붙지 않음"
+                } else if live.slots[key] == nil {
+                    live.slots[key] = "붙지 않음"
+                }
+            }
+            bridgeLive[id] = live
+            note("주변 고프로 \(take)대를 칸에 넣고 붙음 여부를 바로 표시했습니다.")
             await pullBoard(profile.devices[index])
         } catch {
             note("\(device.name) \(error.localizedDescription)")
@@ -678,7 +708,13 @@ final class Studio: ObservableObject {
     private func pullBoard(_ device: DeviceRecord) async {
         guard !device.host.isEmpty else { return }
         do {
-            let live = try await C3Client.status(device)
+            var live = try await C3Client.status(device)
+            for slot in device.cameras where BoardMac.isFull(slot.mac) {
+                let key = BoardMac.normalize(slot.mac)
+                if live.slots[key] == nil {
+                    live.slots[key] = "붙지 않음"
+                }
+            }
             bridgeLive[device.id] = live
             if BoardMac.isFull(live.boardMac), BoardMac.isFull(device.boardMac), !BoardMac.same(live.boardMac, device.boardMac) {
                 bridgePhase[device.id] = "다른 기판이 대답했습니다."

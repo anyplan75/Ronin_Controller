@@ -152,6 +152,8 @@ enum C3Client {
 struct NearbyGoPro: Decodable, Sendable {
     var mac: String
     var name: String?
+    /// 기판이 그 카메라와 이미 블루투스로 붙어 있으면 true 입니다. 광고만 들리면 false 입니다.
+    var attached: Bool?
 }
 
 /// 기판이 알리는 이름을 듣고, 맥 주소가 맞으면 바로 숫자 주소를 받습니다.

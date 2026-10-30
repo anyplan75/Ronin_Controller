@@ -96,7 +96,7 @@ struct DeviceForm: View {
             }
         }
         .disabled(findingBoard)
-        Text("같은 망에서 기판을 찾습니다. 그 기판이 대답하면 맥 주소가 채워집니다.")
+        Text("같은 망에서 기판을 찾습니다. 그 기판이 대답하면 맥 주소가 채워지고 바로 붙습니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
         let phase = studio.bridgePhase[deviceId] ?? "기판을 찾는 중입니다."
@@ -132,7 +132,7 @@ struct DeviceForm: View {
             }
         }
         .disabled(findingCameras || device.wrappedValue.host.isEmpty)
-        Text("기판이 주변 고프로의 블루투스 맥 주소를 읽어 위 칸에 넣습니다.")
+        Text("기판이 주변 고프로를 읽으면 네 칸에 맥 주소와 붙음 또는 붙지 않음이 바로 나옵니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Button("촬영 시작") {
