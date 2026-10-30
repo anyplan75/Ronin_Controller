@@ -26,7 +26,6 @@ struct RoninDeck: View {
     }
 
     @ViewBuilder private func deck(_ device: DeviceRecord) -> some View {
-        RoninCommandBoard(device: device)
         Section("이 기판 상태") {
             ApiBadge(title: "실사용 · CAN", tint: .green)
             Button("상태 다시 읽기") { Task { await studio.refresh() } }
@@ -200,11 +199,18 @@ struct RoninDeck: View {
     }
 }
 
-/// 가운데에서 끌고, 누르고 있는 동안 팬·틸트를 보내고, 떼면 가운데로 돌아옵니다.
+/// 왼쪽 휠은 팬·틸트, 오른쪽 휠은 위아래 줌입니다. 오른쪽의 좌우는 나중에 슬라이드로 둡니다.
+enum StickJob {
+    case panTilt
+    case zoom
+}
+
+/// 가운데에서 끌고, 누르고 있는 동안 그 축을 보내고, 떼면 가운데로 돌아옵니다.
 struct RoninStick: View {
     @EnvironmentObject private var studio: Studio
     var device: DeviceRecord
     var diameter: CGFloat = 148
+    var job: StickJob = .panTilt
     var onDrive: (CGSize) -> Void = { _ in }
 
     @State private var knob: CGSize = .zero
@@ -245,23 +251,48 @@ struct RoninStick: View {
                     vector = .zero
                     held = false
                     onDrive(.zero)
-                    Task { await studio.roninHold(device, path: nil) }
+                    Task { await release() }
                 }
         )
         .task(id: held) {
             guard held else { return }
             while !Task.isCancelled {
-                let yaw = Double(vector.width) * 45
-                let pitch = Double(vector.height) * 45
-                if hypot(vector.width, vector.height) < 0.12 {
-                    await studio.roninHold(device, path: nil)
-                } else {
-                    await studio.roninSpeed(device, yaw: yaw, pitch: pitch)
-                }
+                await hold()
                 try? await Task.sleep(nanoseconds: 180_000_000)
             }
         }
-        .accessibilityLabel("\(device.name) 조이스틱")
+        .accessibilityLabel(job == .panTilt ? "\(device.name) 방향" : "\(device.name) 줌")
+    }
+
+    private func hold() async {
+        switch job {
+        case .panTilt:
+            let yaw = Double(vector.width) * 45
+            let pitch = Double(vector.height) * 45
+            if hypot(vector.width, vector.height) < 0.12 {
+                await studio.roninHold(device, path: nil)
+            } else {
+                await studio.roninSpeed(device, yaw: yaw, pitch: pitch)
+            }
+        case .zoom:
+            let down = Double(vector.height)
+            if abs(down) < 0.12 {
+                await studio.roninZoom(device, path: "/zoom/stop")
+            } else if down < 0 {
+                await studio.roninZoom(device, path: "/zoom/in")
+            } else {
+                await studio.roninZoom(device, path: "/zoom/out")
+            }
+        }
+    }
+
+    private func release() async {
+        switch job {
+        case .panTilt:
+            await studio.roninHold(device, path: nil)
+        case .zoom:
+            await studio.roninZoom(device, path: "/zoom/stop")
+        }
     }
 }
 
@@ -277,12 +308,8 @@ struct RoninCommandBoard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("짐벌 조작")
+            Text("명령")
                 .font(.caption.weight(.semibold))
-            Text("가운데에서 스틱을 끌면 누르고 있는 동안 팬과 틸트가 나갑니다. 떼면 가운데로 돌아오고 멈춥니다.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            RoninStick(device: device)
             commandGrid
             Text("기판에 있는 동작")
                 .font(.caption.weight(.semibold))

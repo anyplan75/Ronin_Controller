@@ -26,6 +26,42 @@ enum StageRoom {
     }
 }
 
+/// 기판이 실제로 받는 짐벌 각도입니다. 이동 명령은 요 -180°~180°, 피치 -56°~146°에서 잘립니다.
+enum RoninTravel {
+    static let yawMin = -180.0
+    static let yawMax = 180.0
+    static let pitchMin = -56.0
+    static let pitchMax = 146.0
+
+    static func clampYaw(_ value: Double) -> Double {
+        min(yawMax, max(yawMin, value))
+    }
+
+    static func clampPitch(_ value: Double) -> Double {
+        min(pitchMax, max(pitchMin, value))
+    }
+
+    /// 스틱을 끝까지 밀면 그 방향의 끝 각도에 닿습니다. 가운데는 저장한 제자리입니다.
+    static func yaw(from home: Double, stickRight: Double) -> Double {
+        let base = clampYaw(home)
+        let t = min(1, max(-1, stickRight))
+        if t >= 0 {
+            return base + t * (yawMax - base)
+        }
+        return base + t * (base - yawMin)
+    }
+
+    /// 아래로 밀면 피치가 커집니다. 기판에서 위는 음수입니다.
+    static func pitch(from home: Double, stickDown: Double) -> Double {
+        let base = clampPitch(home)
+        let t = min(1, max(-1, stickDown))
+        if t >= 0 {
+            return base + t * (pitchMax - base)
+        }
+        return base + t * (base - pitchMin)
+    }
+}
+
 enum StagePalette {
     static let paper = Color(red: 244 / 255, green: 239 / 255, blue: 230 / 255)
     static let ink = Color(red: 28 / 255, green: 25 / 255, blue: 21 / 255)
@@ -275,8 +311,8 @@ struct StageBoard: View {
                         context: context,
                         size: size,
                         spot: spot,
-                        yaw: spot.aimYaw + spot.homeYaw,
-                        pitch: -spot.homePitch
+                        yaw: spot.aimYaw + RoninTravel.clampYaw(spot.homeYaw),
+                        pitch: -RoninTravel.clampPitch(spot.homePitch)
                     )
                 }
             }

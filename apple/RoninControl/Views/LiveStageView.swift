@@ -1,14 +1,17 @@
 import SwiftUI
 
-/// 아이폰 무대입니다. 가운데 위는 방, 아래는 휠과 촬영, 오른쪽은 고른 장치입니다.
+/// 아이폰 무대입니다. 가운데 위는 방, 아래는 조작대, 오른쪽은 고른 장치입니다.
 struct LiveStageView: View {
     var deviceId: UUID?
-    @Binding var wheelIds: [UUID]
+    @Binding var selected: UUID?
+    @Binding var showSettings: Bool
 
     var body: some View {
-        StageConsole(initialId: deviceId, wheelIds: $wheelIds, showsWheels: true)
+        StageConsole(initialId: deviceId, selected: $selected, showSettings: $showSettings)
             .navigationTitle("무대")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbarBackground(StagePalette.paper, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbarColorScheme(.light, for: .navigationBar)
@@ -16,15 +19,14 @@ struct LiveStageView: View {
     }
 }
 
-/// 가운데를 위아래로 반씩 나눕니다. 위는 방, 아래는 휠과 촬영, 오른쪽은 상태와 설정입니다.
+/// 가운데를 위아래로 반씩 나눕니다. 위는 방, 아래 가운데는 조작대, 오른쪽은 상태입니다.
 struct StageConsole: View {
     @EnvironmentObject private var studio: Studio
     var initialId: UUID?
-    @Binding var wheelIds: [UUID]
-    var showsWheels: Bool
+    @Binding var selected: UUID?
+    @Binding var showSettings: Bool
 
     @StateObject private var preview = GoProPreview()
-    @State private var selected: UUID?
     @State private var sticks: [UUID: CGSize] = [:]
     @State private var settingChoices: [Int: Int] = [:]
     @State private var osmoMode = 0x01
@@ -35,22 +37,29 @@ struct StageConsole: View {
         return studio.profile.devices.first { $0.id == selected }
     }
 
-    private var wheels: [DeviceRecord] {
-        guard showsWheels else { return [] }
-        return wheelIds.compactMap { id in
-            studio.profile.devices.first { $0.id == id && $0.kind == .ronin }
-        }
-    }
-
+    /// 화각은 기판이 갈 수 있는 각도 안에 둡니다. 각도가 오면 그 값을 쓰고, 없으면 스틱이 끝 각도까지 미리 보여 줍니다.
     private var drives: [StageDrive] {
-        sticks.compactMap { id, vector in
-            guard hypot(vector.width, vector.height) > 0.08 else { return nil }
-            guard studio.profile.devices.contains(where: { $0.id == id && $0.kind == .ronin }) else { return nil }
-            let spot = studio.stageSpot(for: id)
+        studio.profile.devices.compactMap { device in
+            guard device.kind == .ronin else { return nil }
+            let spot = studio.stageSpot(for: device.id)
+            let stick = sticks[device.id] ?? .zero
+            let live = studio.roninLive[device.id]
+            let gimbalYaw: Double
+            let firmwarePitch: Double
+            if live?.attitudeValid == true, let yaw = live?.yaw, let pitch = live?.pitch {
+                gimbalYaw = RoninTravel.clampYaw(yaw)
+                firmwarePitch = RoninTravel.clampPitch(pitch)
+            } else if hypot(stick.width, stick.height) > 0.08 {
+                gimbalYaw = RoninTravel.yaw(from: spot.homeYaw, stickRight: Double(stick.width))
+                firmwarePitch = RoninTravel.pitch(from: spot.homePitch, stickDown: Double(stick.height))
+            } else {
+                gimbalYaw = RoninTravel.clampYaw(spot.homeYaw)
+                firmwarePitch = RoninTravel.clampPitch(spot.homePitch)
+            }
             return StageDrive(
-                deviceId: id,
-                yaw: spot.aimYaw + spot.homeYaw + Double(vector.width) * 24,
-                pitch: -spot.homePitch - Double(vector.height) * 24
+                deviceId: device.id,
+                yaw: spot.aimYaw + gimbalYaw,
+                pitch: -firmwarePitch
             )
         }
     }
@@ -82,7 +91,13 @@ struct StageConsole: View {
             }
         }
         .onChange(of: studio.profile.devices.map(\.id)) { _, ids in
-            wheelIds.removeAll { !ids.contains($0) }
+            if let selected, !ids.contains(selected) {
+                self.selected = ids.first
+            }
+        }
+        .sheet(isPresented: $showSettings) {
+            settingsSheet
+                .stagePopup()
         }
         .task(id: device?.id) {
             guard let device, device.kind.supportsLiveView else {
@@ -114,20 +129,18 @@ struct StageConsole: View {
     }
 
     private func bottomHalf(width: CGFloat, height: CGFloat) -> some View {
-        let picker: CGFloat = showsWheels ? 34 : 0
-        let wheelBand = max(64, height - picker - 14)
-        return VStack(spacing: 4) {
-            if showsWheels {
-                wheelPicker
-            }
-            HStack(alignment: .center, spacing: 8) {
-                if showsWheels {
-                    wheelRow(width: max(72, width - 96), height: wheelBand)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 4) {
+            if let device, device.kind == .ronin {
+                roninController(device, height: max(72, height - 16))
+            } else {
+                HStack(alignment: .center, spacing: 8) {
+                    Text(device == nil ? "무대에서 로닌을 누르면 아래에 휠 두 개가 나옵니다." : "이 장치에는 짐벌 휠이 없습니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    shootControls
                 }
-                shootControls
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -140,47 +153,42 @@ struct StageConsole: View {
         }
     }
 
-    private var wheelPicker: some View {
-        let ronins = studio.profile.devices.filter { $0.kind == .ronin }
-        return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                if ronins.isEmpty {
-                    Text("등록된 로닌이 없습니다.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(ronins) { item in
-                    let on = wheelIds.contains(item.id)
-                    Button {
-                        toggleWheel(item.id)
-                    } label: {
-                        Text(item.name)
-                            .font(.caption2.weight(.semibold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .foregroundStyle(StagePalette.ink)
-                            .background(on ? StagePalette.brass.opacity(0.35) : Color.white.opacity(0.7), in: Capsule())
-                            .overlay(Capsule().stroke(StagePalette.ink.opacity(0.35), lineWidth: 1))
+    /// 화면 아래 가운데에 있던 조작대입니다. 드론 모드 2처럼 휠은 두 개입니다.
+    private func roninController(_ device: DeviceRecord, height: CGFloat) -> some View {
+        let diameter = min(150, max(64, height - 28))
+        return HStack(alignment: .center, spacing: 8) {
+            VStack(spacing: 2) {
+                Text("방향")
+                    .font(.caption2.weight(.semibold))
+                RoninStick(device: device, diameter: diameter, job: .panTilt) { vector in
+                    if hypot(vector.width, vector.height) > 0.08 {
+                        sticks[device.id] = vector
+                    } else {
+                        sticks[device.id] = nil
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(on ? "\(item.name) 휠 빼기" : "\(item.name) 휠에 넣기")
                 }
+                Text("팬 · 틸트")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            ScrollView {
+                RoninCommandBoard(device: device)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 2) {
+                Text("줌")
+                    .font(.caption2.weight(.semibold))
+                RoninStick(device: device, diameter: diameter, job: .zoom)
+                Text("위아래 줌")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("좌우는 슬라이드")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
-        .frame(height: 30)
-    }
-
-    private func toggleWheel(_ id: UUID) {
-        if let index = wheelIds.firstIndex(of: id) {
-            wheelIds.remove(at: index)
-            return
-        }
-        guard wheelIds.count < 4 else {
-            studio.note("휠은 고른 로닌 4대까지입니다.")
-            return
-        }
-        wheelIds.append(id)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var shootControls: some View {
@@ -226,6 +234,9 @@ struct StageConsole: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(device.name)
                             .font(.headline)
+                        Button("설정") { showSettings = true }
+                            .buttonStyle(.bordered)
+                            .font(.caption)
                         Text(device.linkLabel)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -240,7 +251,7 @@ struct StageConsole: View {
                     .padding(10)
                 }
             } else {
-                Text("무대에서 장치를 누르면 상태와 설정이 여기에 나옵니다.")
+                Text("무대에서 장치를 누르면 상태가 여기에 나옵니다. 설정은 작은 창으로 엽니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(10)
@@ -390,11 +401,10 @@ struct StageConsole: View {
     }
 
     @ViewBuilder private func roninSettings(_ device: DeviceRecord) -> some View {
-        RoninCommandBoard(device: device)
         let spot = studio.stageSpot(for: device.id)
         Text("제자리")
             .font(.caption.weight(.semibold))
-        Text("화각은 이 각도를 기준으로 그립니다. 제자리는 짐벌을 이 각도로 되돌립니다.")
+        Text("화각은 기판이 가는 각도입니다. 요는 -180°에서 180°, 피치는 -56°에서 146°까지입니다.")
             .font(.caption2)
             .foregroundStyle(.secondary)
         Text(String(format: "저장값 요 %.0f°  피치 %.0f°", spot.homeYaw, spot.homePitch))
@@ -408,7 +418,7 @@ struct StageConsole: View {
                     get: { spot.homeYaw },
                     set: { studio.moveStage(deviceId: device.id, homeYaw: $0) }
                 ),
-                in: -180...180
+                in: RoninTravel.yawMin...RoninTravel.yawMax
             )
         }
         .font(.caption2)
@@ -420,7 +430,7 @@ struct StageConsole: View {
                     get: { spot.homePitch },
                     set: { studio.moveStage(deviceId: device.id, homePitch: $0) }
                 ),
-                in: -180...180
+                in: RoninTravel.pitchMin...RoninTravel.pitchMax
             )
         }
         .font(.caption2)
@@ -430,83 +440,9 @@ struct StageConsole: View {
         Button("지금 각도를 제자리로 기억") { rememberHome(device) }
             .buttonStyle(.bordered)
             .font(.caption2)
-        Text("기판에 고정된 자세")
-            .font(.caption.weight(.semibold))
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 6)]) {
-            Button("정면") { Task { await studio.ronin(device, path: "/preset/front") } }
-            Button("아래") { Task { await studio.ronin(device, path: "/preset/down") } }
-            Button("위") { Task { await studio.ronin(device, path: "/preset/up") } }
-            Button("중앙") { Task { await studio.ronin(device, path: "/recenter") } }
-        }
-        .buttonStyle(.bordered)
-        .font(.caption2)
-        Text("기판 샷")
-            .font(.caption.weight(.semibold))
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 6)]) {
-            ForEach(studio.shotNames, id: \.self) { name in
-                Button(RoninCatalog.title(name)) {
-                    Task { await studio.ronin(device, path: "/shot/\(name)", query: ["t": "1.00"]) }
-                }
-                .buttonStyle(.bordered)
-                .font(.caption2)
-            }
-        }
-        Text("저장된 프리셋")
-            .font(.caption.weight(.semibold))
-        if studio.profile.presets.isEmpty {
-            Text("저장된 프리셋이 없습니다. 맥이나 아이패드에서 만듭니다.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        } else {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 88), spacing: 6)]) {
-                ForEach(studio.profile.presets) { preset in
-                    Button(preset.name) {
-                        Task { await studio.applyRoninLook(preset, to: device) }
-                    }
-                    .buttonStyle(.bordered)
-                    .font(.caption2)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private func wheelRow(width: CGFloat, height: CGFloat) -> some View {
-        let items = wheels
-        if items.isEmpty {
-            Text("아래 이름에서 로닌을 고르면 휠이 나옵니다. 최대 4대입니다.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            let diameter = wheelSize(items.count, width: width, height: height)
-            HStack(alignment: .center, spacing: 8) {
-                ForEach(items) { device in
-                    VStack(spacing: 4) {
-                        RoninStick(device: device, diameter: diameter) { vector in
-                            if hypot(vector.width, vector.height) > 0.08 {
-                                sticks[device.id] = vector
-                            } else {
-                                sticks[device.id] = nil
-                            }
-                        }
-                        Text(device.name)
-                            .font(.caption2)
-                            .lineLimit(1)
-                        Button("제자리") { goHome(device) }
-                            .buttonStyle(.bordered)
-                            .font(.caption2)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    private func wheelSize(_ count: Int, width: CGFloat, height: CGFloat) -> CGFloat {
-        let gaps = CGFloat(max(count - 1, 0)) * 8
-        let fit = (width - gaps) / CGFloat(max(count, 1))
-        let tall = height - 52
-        return min(220, max(36, min(fit, tall)))
+        Text("명령 버튼과 휠은 아래 가운데에 있습니다.")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
     }
 
     private func choiceBinding(_ spec: GoProSettingSpec) -> Binding<Int> {
@@ -532,14 +468,16 @@ struct StageConsole: View {
         }
     }
 
-    /// 저장해 둔 제자리로 절대 이동합니다. 롤은 0입니다.
+    /// 저장해 둔 제자리로 절대 이동합니다. 롤은 0이고, 각도는 기판이 받는 범위로 자릅니다.
     private func goHome(_ device: DeviceRecord) {
         let spot = studio.stageSpot(for: device.id)
+        let yaw = RoninTravel.clampYaw(spot.homeYaw)
+        let pitch = RoninTravel.clampPitch(spot.homePitch)
         Task {
             await studio.ronin(device, path: "/move", query: [
-                "yaw": String(format: "%.2f", spot.homeYaw),
+                "yaw": String(format: "%.2f", yaw),
                 "roll": "0",
-                "pitch": String(format: "%.2f", spot.homePitch),
+                "pitch": String(format: "%.2f", pitch),
                 "time": "1.2",
             ])
         }
@@ -556,108 +494,51 @@ struct StageConsole: View {
         studio.note(String(format: "%@ 제자리 요 %.1f° 피치 %.1f°", device.name, yaw, pitch))
     }
 
-    /// 기판이 각도를 주면 그 값을 씁니다. 없을 때는 제자리에서 누르고 있는 방향으로 12°를 그립니다.
-    /// 위 버튼은 기판에 음수 피치를 보내므로, 그림의 위는 그 값의 반대입니다.
-    private func headYaw(_ status: RoninStatus?, _ nudge: GimbalNudge, home: Double) -> Double {
-        if status?.attitudeValid == true, let yaw = status?.yaw { return yaw }
-        switch nudge {
-        case .left: return home - 12
-        case .right: return home + 12
-        case .up, .down: return home
-        }
-    }
-
-    private func headPitch(_ status: RoninStatus?, _ nudge: GimbalNudge, home: Double) -> Double {
-        if status?.attitudeValid == true, let pitch = status?.pitch { return -pitch }
-        switch nudge {
-        case .up: return -home + 12
-        case .down: return -home - 12
-        case .left, .right: return -home
-        }
-    }
-}
-
-private enum GimbalNudge {
-    case up, down, left, right
-
-    /// 기판이 이미 받는 조그 주소입니다. 롤·줌·포커스는 이 휠에서 보내지 않습니다.
-    var path: String {
-        switch self {
-        case .up: return "/jog/pitch/up"
-        case .down: return "/jog/pitch/down"
-        case .left: return "/jog/yaw/left"
-        case .right: return "/jog/yaw/right"
-        }
-    }
-}
-
-/// 가운데 버튼이 있는 작은 원형 휠입니다. 한 대 로닌의 좌우·상하만 움직입니다.
-private struct GimbalWheel: View {
-    var title: String
-    var diameter: CGFloat
-    var onNudge: (GimbalNudge?) -> Void
-
-    @State private var sent: GimbalNudge?
-
-    var body: some View {
-        VStack(spacing: 4) {
-            ZStack {
-                Circle()
-                    .fill(StagePalette.paper)
-                Circle()
-                    .stroke(StagePalette.ink, lineWidth: 2)
-                chevron("chevron.up", .up, y: -1)
-                chevron("chevron.down", .down, y: 1)
-                chevron("chevron.left", .left, x: -1)
-                chevron("chevron.right", .right, x: 1)
-                Button {
-                    sent = nil
-                    onNudge(nil)
-                } label: {
-                    Circle()
-                        .fill(StagePalette.brass.opacity(0.85))
-                        .frame(width: diameter * 0.32, height: diameter * 0.32)
+    private var settingsSheet: some View {
+        NavigationStack {
+            Form {
+                if let device {
+                    DeviceForm(radio: studio.radio, deviceId: device.id)
+                    switch device.kind {
+                    case .ronin:
+                        RoninDeck(deviceId: device.id)
+                    case .gopro, .goproAction5:
+                        GoProDeck(deviceId: device.id)
+                    case .goproBridge:
+                        EmptyView()
+                    case .osmoAction, .osmoNoAPI:
+                        OsmoDeck(radio: studio.radio, deviceId: device.id)
+                    }
+                    Section {
+                        Button("이 장치 삭제", role: .destructive) {
+                            let id = device.id
+                            studio.deleteDevice(id)
+                            showSettings = false
+                            if selected == id { selected = nil }
+                        }
+                    }
+                } else {
+                    Text("무대에서 장치를 먼저 고르세요.")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(title) 정지")
             }
-            .frame(width: diameter, height: diameter)
-            .contentShape(Circle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        let next = direction(value.translation)
-                        guard next != sent else { return }
-                        sent = next
-                        onNudge(next)
-                    }
-                    .onEnded { _ in
-                        sent = nil
-                        onNudge(nil)
-                    }
-            )
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(StagePalette.ink)
-                .lineLimit(1)
-                .frame(width: diameter)
+            .navigationTitle("설정")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                Button("닫기") { showSettings = false }
+            }
         }
     }
+}
 
-    private func chevron(_ name: String, _ nudge: GimbalNudge, x: CGFloat = 0, y: CGFloat = 0) -> some View {
-        Image(systemName: name)
-            .font(.system(size: max(9, diameter * 0.12), weight: .bold))
-            .foregroundStyle(sent == nudge ? StagePalette.oxblood : StagePalette.ink)
-            .offset(x: x * diameter * 0.32, y: y * diameter * 0.32)
-            .allowsHitTesting(false)
-    }
-
-    private func direction(_ translation: CGSize) -> GimbalNudge? {
-        let reach = hypot(translation.width, translation.height)
-        guard reach > diameter * 0.18 else { return nil }
-        if abs(translation.width) > abs(translation.height) {
-            return translation.width < 0 ? .left : .right
-        }
-        return translation.height < 0 ? .up : .down
+extension View {
+    @ViewBuilder func stagePopup() -> some View {
+        #if os(iOS)
+        self.presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        #else
+        self.frame(minWidth: 460, minHeight: 520)
+        #endif
     }
 }

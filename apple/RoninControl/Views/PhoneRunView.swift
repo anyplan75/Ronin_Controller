@@ -5,26 +5,50 @@ import UniformTypeIdentifiers
 /// 무대 화면 위쪽에 장치를 두고, 그 아래 휠은 고른 로닌만 셉니다. 실시간 그림은 고프로 와이파이만 엽니다.
 struct PhoneRunView: View {
     @EnvironmentObject private var studio: Studio
-    @State private var editing: UUID?
     @State private var importProfile = false
     @State private var profileFile: ExportFile?
     @State private var showProfile = false
-    @State private var liveID: UUID?
-    @State private var detailID: UUID?
-    @State private var showStage = false
-    /// 휠에 올릴 로닌입니다. 고른 순서가 왼쪽부터입니다. 비어 있으면 휠이 없습니다.
-    @State private var wheelIds: [UUID] = []
+    @State private var selected: UUID?
+    @State private var showDevices = false
+    @State private var showSettings = false
+    @State private var openSettingsAfterList = false
 
     private let canvas = StagePalette.paper
     private let rowFill = Color.white.opacity(0.72)
 
     var body: some View {
         NavigationStack {
+            LiveStageView(deviceId: nil, selected: $selected, showSettings: $showSettings)
+                .toolbar { toolbar }
+                .sheet(isPresented: $showDevices, onDismiss: {
+                    if openSettingsAfterList {
+                        openSettingsAfterList = false
+                        showSettings = true
+                    }
+                }) {
+                    deviceSheet
+                }
+                .fileImporter(isPresented: $importProfile, allowedContentTypes: [.json]) { result in
+                    if case .success(let url) = result, let data = readSecurityScoped(url) {
+                        studio.importProfile(data)
+                    }
+                }
+                .fileExporter(isPresented: $showProfile, document: profileFile, contentType: .json, defaultFilename: "로닌컨트롤-프로필") { result in
+                    if case .failure = result { studio.note("프로필 파일을 저장하지 못했습니다.") }
+                }
+        }
+        .background(StagePalette.paper)
+        .foregroundStyle(StagePalette.ink)
+        .preferredColorScheme(.light)
+    }
+
+    private var deviceSheet: some View {
+        NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     listHeader
                     if studio.profile.devices.isEmpty {
-                        Text("아이폰에서는 연결하고, 이미 만든 프리셋을 적용합니다. 프리셋 편집은 맥이나 아이패드에서 하세요.")
+                        Text("장치를 추가한 뒤 무대에서 고릅니다. 프리셋 편집은 맥이나 아이패드에서 하세요.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 4)
@@ -43,70 +67,32 @@ struct PhoneRunView: View {
                 .padding(16)
             }
             .background(canvas)
-            .navigationTitle("카메라")
+            .navigationTitle("장치")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(StagePalette.paper, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbarColorScheme(.light, for: .navigationBar)
-            .toolbar { toolbar }
-            .sheet(isPresented: Binding(get: { editing != nil }, set: { if !$0 { editing = nil } })) {
-                addressSheet
-            }
-            .navigationDestination(item: $liveID) { id in
-                LiveStageView(deviceId: id, wheelIds: $wheelIds)
-            }
-            .navigationDestination(isPresented: $showStage) {
-                LiveStageView(deviceId: nil, wheelIds: $wheelIds)
-            }
-            .navigationDestination(item: $detailID) { id in
-                PhoneDeviceDetail(deviceId: id)
-            }
-            .fileImporter(isPresented: $importProfile, allowedContentTypes: [.json]) { result in
-                if case .success(let url) = result, let data = readSecurityScoped(url) {
-                    studio.importProfile(data)
-                }
-            }
-            .fileExporter(isPresented: $showProfile, document: profileFile, contentType: .json, defaultFilename: "로닌컨트롤-프로필") { result in
-                if case .failure = result { studio.note("프로필 파일을 저장하지 못했습니다.") }
-            }
-            .onChange(of: studio.profile.devices.map(\.id)) { _, ids in
-                wheelIds.removeAll { !ids.contains($0) }
+            #endif
+            .toolbar {
+                Button("닫기") { showDevices = false }
             }
         }
-        .background(StagePalette.paper)
-        .foregroundStyle(StagePalette.ink)
-        .preferredColorScheme(.light)
+        .stagePopup()
     }
 
     private var listHeader: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("고른 로닌 \(wheelIds.count)대")
-                .font(.subheadline.weight(.semibold))
-            Text("무대는 가운데를 위아래로 반씩 나눕니다. 위는 방, 아래는 여기서 고른 로닌 휠 0개에서 4개까지입니다. 고프로와 액션 5 프로는 C3 기판으로 붙습니다.")
+            Text("장치를 누르면 무대에서 그 장치가 선택됩니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Button("무대") { showStage = true }
-                .buttonStyle(.borderedProminent)
         }
     }
 
     private func cameraRow(_ device: DeviceRecord) -> some View {
-        let picked = wheelIds.contains(device.id)
+        let picked = selected == device.id
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-            if device.kind == .ronin {
-                Button {
-                    toggleWheel(device.id)
-                } label: {
-                    Image(systemName: picked ? "checkmark.circle.fill" : "circle")
-                        .font(.title3)
-                        .foregroundStyle(picked ? Color.accentColor : Color.secondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(picked ? "\(device.name) 휠 빼기" : "\(device.name) 휠에 넣기")
-            }
             Button {
-                open(device)
+                selected = device.id
+                showDevices = false
             } label: {
                 HStack(alignment: .center, spacing: 10) {
                     Circle()
@@ -133,7 +119,11 @@ struct PhoneRunView: View {
                 }
             }
             .buttonStyle(.plain)
-            Button(device.kind == .goproBridge ? "설정" : "주소") { editing = device.id }
+            Button(device.kind == .goproBridge ? "설정" : "주소") {
+                selected = device.id
+                openSettingsAfterList = true
+                showDevices = false
+            }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.bordered)
             Button("삭제", role: .destructive) { studio.deleteDevice(device.id) }
@@ -187,7 +177,10 @@ struct PhoneRunView: View {
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            Menu("장치") {
+            Button("장치") { showDevices = true }
+        }
+        ToolbarItem(placement: .topBarLeading) {
+            Menu("추가") {
                 ForEach(DeviceProduct.addMenu) { product in
                     Button(product.label) { studio.addDevice(product) }
                 }
@@ -203,48 +196,6 @@ struct PhoneRunView: View {
                 Button("프로필 보내기") { exportProfile() }
             }
         }
-    }
-
-    @ViewBuilder private var addressSheet: some View {
-        if let id = editing {
-            NavigationStack {
-                Form {
-                    DeviceForm(radio: studio.radio, deviceId: id)
-                    Section {
-                        Button("삭제", role: .destructive) {
-                            studio.deleteDevice(id)
-                            editing = nil
-                        }
-                    }
-                }
-                .navigationTitle(sheetTitle(id))
-                .toolbar {
-                    Button("닫기") { editing = nil }
-                }
-            }
-        }
-    }
-
-    private func open(_ device: DeviceRecord) {
-        if device.kind.supportsLiveView {
-            detailID = nil
-            liveID = device.id
-        } else {
-            liveID = nil
-            detailID = device.id
-        }
-    }
-
-    private func toggleWheel(_ id: UUID) {
-        if let index = wheelIds.firstIndex(of: id) {
-            wheelIds.remove(at: index)
-            return
-        }
-        guard wheelIds.count < 4 else {
-            studio.note("휠은 고른 로닌 4대까지입니다.")
-            return
-        }
-        wheelIds.append(id)
     }
 
     private func summary(_ device: DeviceRecord) -> String {
@@ -293,10 +244,6 @@ struct PhoneRunView: View {
         }
     }
 
-    private func sheetTitle(_ id: UUID) -> String {
-        studio.profile.devices.first(where: { $0.id == id })?.kind == .goproBridge ? "장치 설정" : "주소"
-    }
-
     private func exportProfile() {
         do {
             profileFile = ExportFile(data: try studio.exportProfile())
@@ -307,77 +254,3 @@ struct PhoneRunView: View {
     }
 }
 
-/// 미리보기가 없는 장치의 기본 조작입니다. 영상 자리는 만들지 않습니다.
-struct PhoneDeviceDetail: View {
-    @EnvironmentObject private var studio: Studio
-    let deviceId: UUID
-
-    var body: some View {
-        Group {
-            if let device = studio.profile.devices.first(where: { $0.id == deviceId }) {
-                Form {
-                    Section(device.linkLabel) {
-                        Text(device.baseURLText.isEmpty ? "주소가 없습니다." : device.baseURLText)
-                        Text("이 장치는 실시간 그림을 주지 않습니다. 미리보기 화면을 만들지 않습니다.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    basicControls(device)
-                }
-                .navigationTitle(device.name)
-            } else {
-                ContentUnavailableView("장치를 찾지 못했습니다", systemImage: "video.slash")
-            }
-        }
-        .background(StagePalette.paper)
-        .preferredColorScheme(.light)
-    }
-
-    @ViewBuilder private func basicControls(_ device: DeviceRecord) -> some View {
-        switch device.kind {
-        case .ronin:
-            Section("짐벌") {
-                RoninCommandBoard(device: device)
-            }
-        case .goproAction5:
-            Section("중계 기판") {
-                Button("셔터 시작") { shutter(device, true) }
-                Button("셔터 정지") { shutter(device, false) }
-                Text("오즈모 액션 5 프로 중계는 미리보기 그림을 주지 않습니다.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .goproBridge:
-            Section("기판에 붙은 카메라") {
-                BridgeAttachmentList(device: device)
-                Button("촬영 시작") { Task { await studio.bridgeRecord(device, start: true) } }
-                Button("촬영 정지") { Task { await studio.bridgeRecord(device, start: false) } }
-            }
-        case .gopro:
-            EmptyView()
-        case .osmoAction:
-            Section("이 카메라만") {
-                Button("녹화 시작") { osmoRecord(device, true) }
-                Button("녹화 정지") { osmoRecord(device, false) }
-            }
-        case .osmoNoAPI:
-            Section("제어 불가") {
-                Text(Honest.noAPI)
-            }
-        }
-    }
-
-    private func shutter(_ device: DeviceRecord, _ start: Bool) {
-        Task { await studio.gopro(device, { try await GoProClient.shutter($0, start: start) }, label: start ? "셔터 시작" : "셔터 정지") }
-    }
-
-    private func osmoRecord(_ device: DeviceRecord, _ start: Bool) {
-        Task {
-            if studio.profile.practice {
-                studio.note("연습: \(device.name) \(start ? "시작" : "정지")")
-            } else {
-                studio.note((await studio.radio.record(device, start: start)).text)
-            }
-        }
-    }
-}

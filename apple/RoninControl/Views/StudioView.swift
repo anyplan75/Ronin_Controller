@@ -16,8 +16,10 @@ struct StudioView: View {
     @State private var showCompanionNote = false
     @State private var companionNote = ""
     @State private var importProfile = false
-    /// 무대 아래 휠에 올릴 로닌입니다. 고른 순서가 왼쪽부터이고, 최대 4대입니다.
-    @State private var stageWheels: [UUID] = []
+    /// 무대에서 고른 장치입니다. 목록을 눌러도 무대는 그대로입니다.
+    @State private var stageSelection: UUID?
+    @State private var showSettings = false
+    @State private var presetEditor: UUID?
     @State private var pendingPresetDelete: UUID?
 
     var body: some View {
@@ -30,7 +32,8 @@ struct StudioView: View {
                 }
                 Section("프리셋") {
                     ForEach(studio.profile.presets) { preset in
-                        Text(preset.name).tag(StudioPick.preset(preset.id))
+                        Button(preset.name) { presetEditor = preset.id }
+                            .buttonStyle(.plain)
                     }
                 }
             }
@@ -78,49 +81,48 @@ struct StudioView: View {
                 studio.importProfile(data)
             }
         }
+        .onChange(of: selection) { _, pick in
+            switch pick {
+            case .device(let id):
+                stageSelection = id
+            case .preset, nil:
+                break
+            }
+        }
+        .onChange(of: stageSelection) { _, id in
+            if let id, selection != .device(id) {
+                selection = .device(id)
+            }
+        }
+        .sheet(isPresented: Binding(get: { presetEditor != nil }, set: { if !$0 { presetEditor = nil } })) {
+            if let id = presetEditor {
+                NavigationStack {
+                    PresetEditor(presetId: id)
+                        .toolbar {
+                            Button("프리셋 삭제", role: .destructive) {
+                                pendingPresetDelete = id
+                            }
+                            Button("닫기") { presetEditor = nil }
+                        }
+                }
+                .stagePopup()
+            }
+        }
     }
 
     @ViewBuilder private var detail: some View {
-        switch selection {
-        case .device(let id):
-            Form {
-                DeviceForm(radio: studio.radio, deviceId: id)
-                if let device = studio.profile.devices.first(where: { $0.id == id }) {
-                    switch device.kind {
-                    case .ronin:
-                        RoninDeck(deviceId: id)
-                    case .gopro, .goproAction5:
-                        GoProDeck(deviceId: id)
-                    case .goproBridge:
-                        EmptyView()
-                    case .osmoAction, .osmoNoAPI:
-                        OsmoDeck(radio: studio.radio, deviceId: id)
-                    }
-                }
-                Section("기록") { LogList() }
-                Section {
-                    Button("이 장치 삭제", role: .destructive) {
-                        studio.deleteDevice(id)
-                        selection = nil
-                    }
-                }
-            }
-            .formStyle(.grouped)
-        case .preset(let id):
-            PresetEditor(presetId: id)
-                .toolbar {
-                    Button("프리셋 삭제", role: .destructive) {
-                        pendingPresetDelete = id
-                    }
-                }
-        case nil:
-            StageConsole(initialId: nil, wheelIds: $stageWheels, showsWheels: true)
-        }
+        StageConsole(initialId: nil, selected: $stageSelection, showSettings: $showSettings)
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem {
-            Button("무대") { selection = nil }
+            Button("설정") {
+                guard stageSelection != nil else {
+                    studio.note("무대에서 장치를 먼저 고르세요.")
+                    return
+                }
+                showSettings = true
+            }
         }
         ToolbarItem {
             Menu("장치 추가") {
@@ -183,8 +185,14 @@ struct StudioView: View {
             HStack {
                 Label(device.name, systemImage: icon(device))
                 Spacer()
+                Button("설정") {
+                    stageSelection = device.id
+                    showSettings = true
+                }
+                .buttonStyle(.borderless)
                 Button("삭제", role: .destructive) {
                     if selection == .device(device.id) { selection = nil }
+                    if stageSelection == device.id { stageSelection = nil }
                     studio.deleteDevice(device.id)
                 }
                 .buttonStyle(.borderless)
@@ -216,6 +224,7 @@ struct StudioView: View {
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button("삭제", role: .destructive) {
                 if selection == .device(device.id) { selection = nil }
+                if stageSelection == device.id { stageSelection = nil }
                 studio.deleteDevice(device.id)
             }
         }

@@ -301,8 +301,8 @@ final class Studio: ObservableObject {
         if let y { spot.y = min(StageRoom.length - 0.4, max(0.4, y)) }
         if let z { spot.z = min(StageRoom.height - 0.3, max(0.2, z)) }
         if let aimYaw { spot.aimYaw = min(180, max(-180, aimYaw)) }
-        if let homeYaw { spot.homeYaw = min(180, max(-180, homeYaw)) }
-        if let homePitch { spot.homePitch = min(180, max(-180, homePitch)) }
+        if let homeYaw { spot.homeYaw = RoninTravel.clampYaw(homeYaw) }
+        if let homePitch { spot.homePitch = RoninTravel.clampPitch(homePitch) }
         if let index = profile.stageSpots.firstIndex(where: { $0.deviceId == deviceId }) {
             profile.stageSpots[index] = spot
         } else {
@@ -458,6 +458,16 @@ final class Studio: ObservableObject {
             }
         }
         await refresh()
+    }
+
+    /// 오른쪽 휠의 위아래입니다. 성공 기록은 남기지 않습니다. 좌우는 아직 보내지 않습니다.
+    func roninZoom(_ device: DeviceRecord, path: String) async {
+        if profile.practice { return }
+        do {
+            _ = try await RoninClient.command(device, path: path)
+        } catch {
+            note("\(device.name) \(error.localizedDescription)")
+        }
     }
 
     /// 스틱을 누르고 있는 동안 팬·틸트 속도를 다시 보냅니다. 성공 기록은 남기지 않습니다.
