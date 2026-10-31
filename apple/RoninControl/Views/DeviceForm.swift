@@ -18,7 +18,7 @@ struct DeviceForm: View {
                 Text("오즈모 포켓·모바일·나노는 제어 API가 없어 새로 추가할 수 없습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
+            } else if !FormFactor.phone {
                 Picker("종류", selection: productChoice) {
                     ForEach(productChoices) { product in
                         Text(product.label).tag(product)
@@ -26,7 +26,9 @@ struct DeviceForm: View {
                 }
             }
             Toggle("사용", isOn: device.enabled)
-            Toggle("함께 촬영에 포함", isOn: studio.groupBinding(deviceId))
+            if !FormFactor.phone {
+                Toggle("함께 촬영에 포함", isOn: studio.groupBinding(deviceId))
+            }
             if device.wrappedValue.kind == .goproBridge {
                 bridgeBoard
             } else if device.wrappedValue.kind.usesHTTP {
@@ -149,14 +151,16 @@ struct DeviceForm: View {
     @ViewBuilder private func cameraSettings(_ camera: BridgeCameraSlot) -> some View {
         Text("이 카메라만")
             .font(.caption.weight(.semibold))
-        Picker("기종 사진", selection: cameraFace(camera.id)) {
-            ForEach(ProductFace.cameraChoices) { face in
+        Picker("기종 사진", selection: FormFactor.phone ? phoneCameraFace(camera.id) : cameraFace(camera.id)) {
+            ForEach(FormFactor.phone ? ProductFace.phoneCameras : ProductFace.cameraChoices) { face in
                 Text(face.title).tag(face)
             }
         }
-        Picker("종류", selection: cameraRole(camera.id)) {
-            ForEach(BridgeCameraRole.allCases) { role in
-                Text(role.title).tag(role)
+        if !FormFactor.phone {
+            Picker("종류", selection: cameraRole(camera.id)) {
+                ForEach(BridgeCameraRole.allCases) { role in
+                    Text(role.title).tag(role)
+                }
             }
         }
         TextField("카메라 블루투스 맥 주소", text: cameraMac(camera.id))
@@ -178,6 +182,21 @@ struct DeviceForm: View {
             get: { device.wrappedValue.boardMac },
             set: { newValue in
                 device.wrappedValue.boardMac = BoardMac.isFull(newValue) ? BoardMac.normalize(newValue) : newValue.uppercased()
+            }
+        )
+    }
+
+    /// 아이폰은 고프로 11, 고프로 12, 액션 5 프로만 고릅니다. 사진은 종류와 같이 바뀝니다.
+    private func phoneCameraFace(_ id: UUID) -> Binding<ProductFace> {
+        Binding(
+            get: {
+                let face = cameraFace(id).wrappedValue
+                if ProductFace.phoneCameras.contains(face) { return face }
+                return cameraRole(id).wrappedValue == .action5 ? .action5Pro : .hero11
+            },
+            set: { newValue in
+                cameraFace(id).wrappedValue = newValue
+                cameraRole(id).wrappedValue = newValue == .action5Pro ? .action5 : .gopro
             }
         )
     }

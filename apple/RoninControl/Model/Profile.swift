@@ -192,6 +192,9 @@ enum ProductFace: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// 아이폰에서 고르는 액션 카메라입니다. 맥과 아이패드 목록은 바꾸지 않습니다.
+    static let phoneCameras: [ProductFace] = [.hero11, .hero12, .action5Pro]
+
     /// 카메라 칸과 고프로에서 고를 수 있는 겉모습입니다.
     static let cameraChoices: [ProductFace] = [
         .hero13, .hero12, .hero11, .hero10, .hero9, .goproUnknown,
