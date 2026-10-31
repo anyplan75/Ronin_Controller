@@ -31,6 +31,52 @@ enum BoardMac {
     }
 }
 
+/// 기판이 직접 여는 연결입니다. 집 공유기 없이 이 주소로 카메라 명령을 보냅니다. 비밀번호는 없습니다.
+enum DirectBoard {
+    static let ssid = "Ronin-C3"
+    static let host = "192.168.4.1"
+    static let port = 80
+}
+
+/// 와이파이로 붙은 길과, 기판이 직접 연 길을 한 줄씩 나눕니다.
+struct BridgeLinks: Equatable, Sendable {
+    var wifiUp: Bool
+    var wifiSsid: String
+    var wifiHost: String
+    var wifiPort: Int
+    var directUp: Bool
+    var directSsid: String
+    var directHost: String
+
+    var commandHost: String {
+        if wifiUp, !wifiHost.isEmpty { return wifiHost }
+        if directUp, !directHost.isEmpty { return directHost }
+        return ""
+    }
+
+    var commandPort: Int {
+        if wifiUp, wifiPort > 0 { return wifiPort }
+        return DirectBoard.port
+    }
+
+    var wifiLine: String {
+        if wifiUp {
+            let name = (wifiSsid.isEmpty || wifiSsid == "없음") ? "집 망" : wifiSsid
+            return "와이파이  \(name)  \(wifiHost)"
+        }
+        return "와이파이  붙지 않음"
+    }
+
+    var directLine: String {
+        let name = directSsid.isEmpty ? DirectBoard.ssid : directSsid
+        let host = directHost.isEmpty ? DirectBoard.host : directHost
+        if directUp {
+            return "직접 연결  \(name)  \(host)"
+        }
+        return "직접 연결  \(name)  이 기기는 아직 붙어 있지 않습니다"
+    }
+}
+
 /// 기판 상태 페이지에서 읽은 카메라 붙음입니다. 촬영 명령을 보내지 않고 글만 읽습니다.
 struct BridgeBoardLive: Equatable, Sendable {
     var ssid: String
@@ -38,6 +84,9 @@ struct BridgeBoardLive: Equatable, Sendable {
     var boardMac: String
     /// 맥 주소(콜론 포함)마다 "붙음" 또는 "등록됨, 연결 끊김" 입니다.
     var slots: [String: String]
+    /// 기판이 직접 연 연결의 이름과 주소입니다. 와이파이 주소와 섞지 않습니다.
+    var directSsid: String = ""
+    var directIp: String = ""
 
     func attachment(for slot: BridgeCameraSlot) -> String {
         guard BoardMac.isFull(slot.mac) else { return "맥 주소를 적지 않았습니다." }
@@ -48,9 +97,19 @@ struct BridgeBoardLive: Equatable, Sendable {
         var ssid = ""
         var ip = ""
         var board = ""
+        var directSsid = ""
+        var directIp = ""
         var slots: [String: String] = [:]
         for raw in page.split(whereSeparator: \.isNewline) {
             let line = String(raw).trimmingCharacters(in: .whitespaces)
+            if let value = Self.value(line, prefix: "DIRECT_SSID:") {
+                directSsid = value
+                continue
+            }
+            if let value = Self.value(line, prefix: "DIRECT_IP:") {
+                directIp = value
+                continue
+            }
             if let value = Self.value(line, prefix: "SSID:") {
                 ssid = value
                 continue
@@ -70,7 +129,14 @@ struct BridgeBoardLive: Equatable, Sendable {
                 slots[mac] = "붙음"
             }
         }
-        return BridgeBoardLive(ssid: ssid, ip: ip, boardMac: board, slots: slots)
+        return BridgeBoardLive(
+            ssid: ssid,
+            ip: ip,
+            boardMac: board,
+            slots: slots,
+            directSsid: directSsid,
+            directIp: directIp
+        )
     }
 
     private static func value(_ line: String, prefix: String) -> String? {
@@ -86,12 +152,16 @@ struct BridgeBoardLive: Equatable, Sendable {
 }
 
 enum C3Client {
-    static func status(_ device: DeviceRecord) async throws -> BridgeBoardLive {
-        guard let url = LocalHTTP.url(host: device.host, port: device.port, path: "/") else {
+    static func status(host: String, port: Int) async throws -> BridgeBoardLive {
+        guard let url = LocalHTTP.url(host: host, port: port, path: "/") else {
             throw CallError.noAddress
         }
         let (_, text) = try await LocalHTTP.get(url, timeout: 2)
         return BridgeBoardLive.read(text)
+    }
+
+    static func status(_ device: DeviceRecord) async throws -> BridgeBoardLive {
+        try await status(host: device.host, port: device.port)
     }
 
     /// 기판이 한 대와만 이야기하므로, 부르는 쪽에서 카메라를 순서대로 보냅니다.

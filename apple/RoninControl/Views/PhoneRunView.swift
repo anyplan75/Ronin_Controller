@@ -104,10 +104,19 @@ struct PhoneRunView: View {
                             Text(device.name)
                                 .font(.headline)
                                 .foregroundStyle(.primary)
-                            Text(summary(device))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
+                            if device.kind == .goproBridge {
+                                Text(studio.bridgeWifiLine(device.id))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(studio.bridgeDirectLine(device.id))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(summary(device))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
                         }
                         Spacer(minLength: 8)
                         if device.kind.supportsLiveView {

@@ -47,7 +47,7 @@ enum GroupFire {
             return ["\(device.name) 카메라 맥 주소가 없습니다."]
         }
         if device.baseURLText.isEmpty {
-            return ["\(device.name) 기판에 아직 붙지 않았습니다."]
+            return ["\(device.name) 와이파이와 직접 연결 모두 대답이 없습니다."]
         }
         var lines: [String] = []
         for slot in slots {
@@ -92,6 +92,8 @@ final class Studio: ObservableObject {
     @Published var goproSession: [UUID: String] = [:]
     @Published var bridgeLive: [UUID: BridgeBoardLive] = [:]
     @Published var bridgePhase: [UUID: String] = [:]
+    /// 와이파이 연결과 기판 직접 연결을 따로 둡니다. 숫자 주소는 프로필에 덮어쓰지 않습니다.
+    @Published var bridgeLinks: [UUID: BridgeLinks] = [:]
     let radio = OsmoRadio()
     private let c3 = C3Link()
     let frameOK = DjiRFrame.selfCheck()
@@ -163,6 +165,7 @@ final class Studio: ObservableObject {
         }
         bridgeLive[id] = nil
         bridgePhase[id] = nil
+        bridgeLinks[id] = nil
         note("\(name) 을 목록과 저장된 프로필에서 뺐습니다.")
     }
 
@@ -324,9 +327,7 @@ final class Studio: ObservableObject {
                     rememberGoPro(device, live)
                 }
             case .goproBridge:
-                if !device.host.isEmpty {
-                    await pullBoard(device)
-                }
+                await pullBoard(device)
             case .osmoAction, .osmoNoAPI:
                 break
             }
@@ -406,7 +407,7 @@ final class Studio: ObservableObject {
         }
         for device in bridges {
             await GroupFire.wait(until: when)
-            let lines = await GroupFire.bridge(device, startRecording: start)
+            let lines = await GroupFire.bridge(commandDoor(device), startRecording: start)
             lines.forEach(note)
             await pullBoard(device)
         }
@@ -429,12 +430,13 @@ final class Studio: ObservableObject {
             note("\(device.name) 고른 카메라의 맥 주소가 없습니다.")
             return
         }
-        guard !device.baseURLText.isEmpty else {
-            note("\(device.name) 기판에 아직 붙지 않았습니다.")
+        let door = commandDoor(device)
+        guard !door.baseURLText.isEmpty else {
+            note("\(device.name) 와이파이와 직접 연결 모두 대답이 없습니다.")
             return
         }
         do {
-            let text = try await C3Client.shutter(device, mac: slot.mac, start: start)
+            let text = try await C3Client.shutter(door, mac: slot.mac, start: start)
             note("\(device.name) \(slot.role.title) \(text)")
         } catch {
             note("\(device.name) \(error.localizedDescription)")
@@ -446,11 +448,9 @@ final class Studio: ObservableObject {
             note("연습: \(device.name) \(start ? "시작" : "정지")")
             return
         }
-        let lines = await GroupFire.bridge(device, startRecording: start)
+        let lines = await GroupFire.bridge(commandDoor(device), startRecording: start)
         lines.forEach(note)
-        if !device.host.isEmpty {
-            await pullBoard(device)
-        }
+        await pullBoard(device)
     }
 
     func apply(_ preset: ShootPreset) async {
@@ -469,7 +469,8 @@ final class Studio: ObservableObject {
         var lines: [String] = []
         await withTaskGroup(of: String.self) { group in
             for device in targets {
-                group.addTask { await GroupFire.apply(preset, to: device) }
+                let door = commandDoor(device)
+                group.addTask { await GroupFire.apply(preset, to: door) }
             }
             for await line in group where !line.isEmpty { lines.append(line) }
         }
@@ -697,7 +698,8 @@ final class Studio: ObservableObject {
 
     private func setBridgePhase(_ text: String) {
         for device in profile.devices where device.kind == .goproBridge {
-            if bridgePhase[device.id] == "기판에 붙었습니다." { continue }
+            if bridgeLinks[device.id]?.commandHost.isEmpty == false { continue }
+            if bridgePhase[device.id]?.contains("붙었습니다") == true { continue }
             bridgePhase[device.id] = text
         }
     }
@@ -715,11 +717,9 @@ final class Studio: ObservableObject {
     }
 
     private func connectBoard(_ id: UUID, reportMiss: Bool) async {
-        guard let index = profile.devices.firstIndex(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
-        if !profile.devices[index].host.isEmpty && BoardMac.same(profile.devices[index].boardMac, BoardMac.pluggedIn) {
-            await pullBoard(profile.devices[index])
-            return
-        }
+        guard let device = profile.devices.first(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
+        await pullBoard(device)
+        if bridgeLinks[id]?.commandHost.isEmpty == false { return }
         bridgePhase[id] = "기판을 찾는 중입니다."
         let found = await c3.listen()
         for item in found {
@@ -734,16 +734,16 @@ final class Studio: ObservableObject {
             profile.devices[index].boardMac = BoardMac.pluggedIn
             profile.devices[index].host = item.host
             profile.devices[index].port = item.port
-            bridgeLive[id] = live
-            bridgePhase[id] = "기판에 붙었습니다."
             if wasEmpty {
-                note("\(profile.devices[index].name) \(BoardMac.pluggedIn) 에 바로 붙었습니다.")
+                note("\(profile.devices[index].name) \(BoardMac.pluggedIn) 와이파이에 바로 붙었습니다.")
             }
+            await pullBoard(profile.devices[index])
             return
         }
         guard reportMiss else { return }
+        if bridgeLinks[id]?.commandHost.isEmpty == false { return }
         bridgePhase[id] = "기판이 대답하지 않았습니다."
-        note("같은 망에서 그 기판의 대답을 듣지 못했습니다.")
+        note("와이파이와 직접 연결 모두 대답이 없습니다. 집 공유기가 없으면 이 기기를 Ronin-C3 에 붙이세요.")
     }
 
     private static func bridgeRole(_ name: String) -> BridgeCameraRole {
@@ -757,13 +757,14 @@ final class Studio: ObservableObject {
     func scanCameras(_ id: UUID) async {
         guard let index = profile.devices.firstIndex(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
         let device = profile.devices[index]
-        guard !device.host.isEmpty else {
+        let door = commandDoor(device)
+        guard !door.host.isEmpty else {
             bridgePhase[id] = "기판이 아직 대답하지 않았습니다."
-            note("기판이 아직 대답하지 않았습니다.")
+            note("와이파이와 직접 연결 모두 대답이 없습니다. 집 공유기가 없으면 이 기기를 Ronin-C3 에 붙이세요.")
             return
         }
         do {
-            let found = try await C3Client.nearbyGoPros(device).filter { BoardMac.isFull($0.mac) }
+            let found = try await C3Client.nearbyGoPros(door).filter { BoardMac.isFull($0.mac) }
             guard !found.isEmpty else {
                 note("주변에서 고프로나 액션 5 프로를 찾지 못했습니다.")
                 return
@@ -799,19 +800,65 @@ final class Studio: ObservableObject {
 
     func refreshBoard(_ id: UUID) async {
         guard let device = profile.devices.first(where: { $0.id == id }), device.kind == .goproBridge else { return }
-        if device.host.isEmpty {
-            if bridgePhase[id] != "기판에 붙었습니다." {
-                bridgePhase[id] = bridgePhase[id] ?? "기판을 찾는 중입니다."
-            }
-            return
-        }
         await pullBoard(device)
     }
 
+    /// 대답하는 연결로 명령을 보냅니다. 직접 연결 주소는 와이파이 주소 칸에 저장하지 않습니다.
+    func commandDoor(_ device: DeviceRecord) -> DeviceRecord {
+        guard device.kind == .goproBridge, let links = bridgeLinks[device.id], !links.commandHost.isEmpty else {
+            return device
+        }
+        var copy = device
+        copy.host = links.commandHost
+        copy.port = links.commandPort
+        return copy
+    }
+
+    func bridgeWifiLine(_ id: UUID) -> String {
+        bridgeLinks[id]?.wifiLine ?? "와이파이  아직 확인하지 않았습니다."
+    }
+
+    func bridgeDirectLine(_ id: UUID) -> String {
+        bridgeLinks[id]?.directLine ?? "직접 연결  아직 확인하지 않았습니다."
+    }
+
+    private struct BoardProbe: Sendable {
+        var live: BridgeBoardLive?
+        var wrongBoard: Bool
+    }
+
+    private nonisolated static func probeBoard(host: String, port: Int, expect: String) async -> BoardProbe {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, port > 0 else { return BoardProbe(live: nil, wrongBoard: false) }
+        guard let live = try? await C3Client.status(host: trimmed, port: port) else {
+            return BoardProbe(live: nil, wrongBoard: false)
+        }
+        guard BoardMac.isFull(live.boardMac) else { return BoardProbe(live: nil, wrongBoard: false) }
+        if BoardMac.same(live.boardMac, expect) { return BoardProbe(live: live, wrongBoard: false) }
+        return BoardProbe(live: nil, wrongBoard: true)
+    }
+
     private func pullBoard(_ device: DeviceRecord) async {
-        guard !device.host.isEmpty else { return }
-        do {
-            var live = try await C3Client.status(device)
+        let expect = BoardMac.isFull(device.boardMac) ? BoardMac.normalize(device.boardMac) : BoardMac.pluggedIn
+        let port = device.port > 0 ? device.port : DirectBoard.port
+        let houseHost = device.host.trimmingCharacters(in: .whitespacesAndNewlines) == DirectBoard.host ? "" : device.host
+        async let wifiProbe = Self.probeBoard(host: houseHost, port: port, expect: expect)
+        async let directProbe = Self.probeBoard(host: DirectBoard.host, port: DirectBoard.port, expect: expect)
+        let wifi = await wifiProbe
+        let direct = await directProbe
+        let advertised = [direct.live?.directSsid, wifi.live?.directSsid]
+            .compactMap { $0 }
+            .first { !$0.isEmpty } ?? DirectBoard.ssid
+        bridgeLinks[device.id] = BridgeLinks(
+            wifiUp: wifi.live != nil,
+            wifiSsid: wifi.live?.ssid ?? "",
+            wifiHost: wifi.live != nil ? houseHost : "",
+            wifiPort: port,
+            directUp: direct.live != nil,
+            directSsid: advertised,
+            directHost: DirectBoard.host
+        )
+        if var live = wifi.live ?? direct.live {
             for slot in device.cameras where BoardMac.isFull(slot.mac) {
                 let key = BoardMac.normalize(slot.mac)
                 if live.slots[key] == nil {
@@ -819,12 +866,10 @@ final class Studio: ObservableObject {
                 }
             }
             bridgeLive[device.id] = live
-            if BoardMac.isFull(live.boardMac), BoardMac.isFull(device.boardMac), !BoardMac.same(live.boardMac, device.boardMac) {
-                bridgePhase[device.id] = "다른 기판이 대답했습니다."
-            } else {
-                bridgePhase[device.id] = "기판에 붙었습니다."
-            }
-        } catch {
+            bridgePhase[device.id] = wifi.live != nil ? "기판에 붙었습니다." : "직접 연결에 붙었습니다."
+        } else if wifi.wrongBoard || direct.wrongBoard {
+            bridgePhase[device.id] = "다른 기판이 대답했습니다."
+        } else {
             bridgePhase[device.id] = "기판에 닿지 않았습니다."
         }
     }
@@ -832,7 +877,7 @@ final class Studio: ObservableObject {
     private func watchBoards() async {
         while !Task.isCancelled {
             if !profile.practice {
-                let boards = profile.devices.filter { $0.enabled && $0.kind == .goproBridge && !$0.host.isEmpty }
+                let boards = profile.devices.filter { $0.enabled && $0.kind == .goproBridge }
                 for device in boards {
                     await pullBoard(device)
                 }

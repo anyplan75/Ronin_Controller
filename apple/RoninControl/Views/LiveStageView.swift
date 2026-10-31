@@ -344,12 +344,13 @@ struct StageConsole: View {
                 Text("아직 상태를 읽지 못했습니다.")
             }
         case .goproBridge:
+            Text(studio.bridgeWifiLine(device.id))
+            Text(studio.bridgeDirectLine(device.id))
             if let camera = focusedCamera {
                 Text(camera.role.title)
                 Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
                 Text(studio.bridgeLive[device.id]?.attachment(for: camera) ?? "아직 읽지 못했습니다.")
             } else {
-                Text(studio.bridgePhase[device.id] ?? "기판을 찾는 중입니다.")
                 Text("왼쪽에서 카메라 한 대를 고르세요.")
             }
         case .gopro, .goproAction5:

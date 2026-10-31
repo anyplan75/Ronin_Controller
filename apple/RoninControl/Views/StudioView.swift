@@ -211,6 +211,7 @@ struct StudioView: View {
     }
 
     private func deviceHeader(_ device: DeviceRecord) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
         HStack {
             Label(device.name, systemImage: icon(device))
             Spacer()
@@ -229,6 +230,15 @@ struct StudioView: View {
                 studio.deleteDevice(device.id)
             }
             .buttonStyle(.borderless)
+        }
+            if device.kind == .goproBridge {
+                Text(studio.bridgeWifiLine(device.id))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(studio.bridgeDirectLine(device.id))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

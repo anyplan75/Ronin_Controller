@@ -98,18 +98,13 @@ struct DeviceForm: View {
             }
         }
         .disabled(findingBoard)
-        Text("같은 망에서 기판을 찾습니다. 그 기판이 대답하면 맥 주소가 채워지고 바로 붙습니다.")
+        Text("집 망이 있으면 그 망에서 기판을 찾습니다. 집 공유기가 없으면 이 기기를 Ronin-C3 에 붙입니다. 비밀번호는 없습니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        let phase = studio.bridgePhase[deviceId] ?? "기판을 찾는 중입니다."
-        Text(phase)
+        Text(studio.bridgeWifiLine(deviceId))
             .font(.caption)
-        Text(device.wrappedValue.baseURLText.isEmpty ? "숫자 주소는 기판을 찾는 즉시 채워집니다." : device.wrappedValue.baseURLText)
+        Text(studio.bridgeDirectLine(deviceId))
             .font(.caption)
-            .foregroundStyle(.secondary)
-        Text("기판은 JMEDIA 에 먼저 붙고, 안 되면 JMEDIA_Cam 에 붙습니다. 와이파이 비밀번호는 앱에 없습니다.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
         if let cameraId {
             if let camera = device.wrappedValue.cameras.first(where: { $0.id == cameraId }) {
                 cameraSettings(camera)
@@ -141,7 +136,7 @@ struct DeviceForm: View {
                     findingCameras = false
                 }
             }
-            .disabled(findingCameras || device.wrappedValue.host.isEmpty)
+            .disabled(findingCameras)
             Text("기판이 주변 고프로와 액션 5 프로를 같은 목록으로 읽습니다. 칸이 모자라면 4대까지 추가합니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -329,13 +324,10 @@ struct BridgeAttachmentList: View {
     let device: DeviceRecord
 
     var body: some View {
-        let phase = studio.bridgePhase[device.id] ?? "기판을 찾는 중입니다."
-        Text(phase)
+        Text(studio.bridgeWifiLine(device.id))
+        Text(studio.bridgeDirectLine(device.id))
         if BoardMac.isFull(device.boardMac) {
             Text("기판 \(BoardMac.normalize(device.boardMac))")
-        }
-        if let live = studio.bridgeLive[device.id], !live.ssid.isEmpty {
-            Text("기판 망 \(live.ssid)")
         }
         if device.cameras.isEmpty {
             Text("카메라 칸이 없습니다.")
@@ -446,7 +438,7 @@ struct BridgeCameraPresets: View {
                 let text = try await GoProClient.presetList(device)
                 found = CameraPresetText.parse(text)
             } else {
-                found = try await C3Client.cameraPresets(device, mac: camera.mac)
+                found = try await C3Client.cameraPresets(studio.commandDoor(device), mac: camera.mac)
             }
             if found.isEmpty {
                 studio.note("\(camera.role.title) 에서 읽을 프리셋이 없습니다.")
@@ -462,7 +454,7 @@ struct BridgeCameraPresets: View {
             if device.kind == .gopro {
                 _ = try await GoProClient.loadPreset(device, id: item.id)
             } else {
-                _ = try await C3Client.loadCameraPreset(device, mac: camera.mac, id: item.id)
+                _ = try await C3Client.loadCameraPreset(studio.commandDoor(device), mac: camera.mac, id: item.id)
             }
             studio.note("\(camera.role.title) 프리셋 \(item.title) 을 불렀습니다.")
         } catch {
@@ -472,7 +464,7 @@ struct BridgeCameraPresets: View {
 
     private func applySaved(_ preset: ShootPreset) async {
         guard let device = studio.profile.devices.first(where: { $0.id == deviceId }) else { return }
-        let line = await GroupFire.apply(preset, to: device)
+        let line = await GroupFire.apply(preset, to: studio.commandDoor(device))
         studio.note(line.isEmpty ? "보낼 설정이 없습니다. 체크한 뒤 저장하세요." : line)
     }
 }
