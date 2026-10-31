@@ -95,6 +95,20 @@ enum OsmoModel: String, Codable, CaseIterable, Identifiable, Sendable {
     /// 폰 블루투스의 오즈모 액션입니다. 액션 5 프로는 C3 중계 줄이라 여기 넣지 않습니다.
     static let actionModels: [OsmoModel] = [.action4, .action6]
 
+    /// 오른쪽 위에 둘 기종 사진입니다. 고프로는 세대, 오즈모 액션은 5 프로·6·그 외를 나눕니다.
+    var face: ProductFace {
+        switch self {
+        case .action4: return .action4
+        case .action5Pro: return .action5Pro
+        case .action6: return .action6
+        case .osmo360: return .osmo360
+        case .pocket: return .osmoPocket
+        case .mobile: return .osmoMobile
+        case .nano: return .osmoNano
+        case .unknown: return .osmoUnknown
+        }
+    }
+
     static func choices(for kind: DeviceKind, model: OsmoModel) -> [OsmoModel] {
         switch kind {
         case .osmoAction:
@@ -106,6 +120,104 @@ enum OsmoModel: String, Codable, CaseIterable, Identifiable, Sendable {
         default:
             return []
         }
+    }
+}
+
+/// 고른 장치의 제품 사진입니다. 로닌, 고프로 세대, 오즈모 액션, 인스타360을 나눕니다.
+enum ProductFace: String, Codable, CaseIterable, Identifiable, Sendable {
+    case ronin
+    case hero13
+    case hero12
+    case hero11
+    case hero10
+    case hero9
+    case goproUnknown
+    case action5Pro
+    case action6
+    case action4
+    case osmo360
+    case osmoPocket
+    case osmoMobile
+    case osmoNano
+    case osmoUnknown
+    case instaX4
+    case instaAce
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ronin: return "로닌"
+        case .hero13: return "고프로 HERO 13"
+        case .hero12: return "고프로 HERO 12"
+        case .hero11: return "고프로 HERO 11"
+        case .hero10: return "고프로 HERO 10"
+        case .hero9: return "고프로 HERO 9"
+        case .goproUnknown: return "고프로"
+        case .action5Pro: return "오즈모 액션 5 프로"
+        case .action6: return "오즈모 액션 6"
+        case .action4: return "오즈모 액션 4"
+        case .osmo360: return "오즈모 360"
+        case .osmoPocket: return "오즈모 포켓"
+        case .osmoMobile: return "오즈모 모바일"
+        case .osmoNano: return "오즈모 나노"
+        case .osmoUnknown: return "오즈모"
+        case .instaX4: return "인스타360 X4"
+        case .instaAce: return "인스타360 에이스 프로"
+        }
+    }
+
+    /// 자산 카탈로그 이름입니다. 사진이 없는 기종은 비웁니다.
+    var assetName: String? {
+        switch self {
+        case .ronin: return "gear-ronin"
+        case .hero13: return "gear-gopro-13"
+        case .hero12: return "gear-gopro-12"
+        case .hero11: return "gear-gopro-11"
+        case .hero10: return "gear-gopro-10"
+        case .hero9: return "gear-gopro-9"
+        case .action5Pro: return "gear-osmo-action-5-pro"
+        case .action6: return "gear-osmo-action-6"
+        case .action4: return "gear-osmo-action-4"
+        case .osmo360: return "gear-osmo-360"
+        case .osmoPocket: return "gear-osmo-pocket"
+        case .instaX4: return "gear-insta360-x4"
+        case .instaAce: return "gear-insta360-ace-pro"
+        case .goproUnknown, .osmoMobile, .osmoNano, .osmoUnknown: return nil
+        }
+    }
+
+    /// 카메라 칸과 고프로에서 고를 수 있는 겉모습입니다.
+    static let cameraChoices: [ProductFace] = [
+        .hero13, .hero12, .hero11, .hero10, .hero9, .goproUnknown,
+        .action5Pro, .action6, .action4, .osmo360, .osmoPocket,
+        .instaX4, .instaAce,
+    ]
+
+    static func inferred(device: DeviceRecord, camera: BridgeCameraSlot?) -> ProductFace {
+        if let camera {
+            if let face = camera.face { return face }
+            return camera.role == .action5 ? .action5Pro : .goproUnknown
+        }
+        if let face = device.productFace { return face }
+        switch device.kind {
+        case .ronin: return .ronin
+        case .gopro: return .goproUnknown
+        case .goproAction5: return .action5Pro
+        case .goproBridge: return .goproUnknown
+        case .osmoAction, .osmoNoAPI: return device.osmoModel.face
+        }
+    }
+
+    /// 카메라가 알려 준 모델 이름입니다. 세대를 모르면 nil입니다.
+    static func from(modelName: String) -> ProductFace? {
+        let text = modelName.lowercased().replacingOccurrences(of: " ", with: "")
+        if text.contains("hero13") { return .hero13 }
+        if text.contains("hero12") { return .hero12 }
+        if text.contains("hero11") { return .hero11 }
+        if text.contains("hero10") { return .hero10 }
+        if text.contains("hero9") { return .hero9 }
+        return nil
     }
 }
 
@@ -183,11 +295,14 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     var role: BridgeCameraRole
     var mac: String
+    /// 이 칸의 제품 사진입니다. 비어 있으면 종류로 고릅니다.
+    var face: ProductFace?
 
-    init(id: UUID = UUID(), role: BridgeCameraRole = .gopro, mac: String = "") {
+    init(id: UUID = UUID(), role: BridgeCameraRole = .gopro, mac: String = "", face: ProductFace? = nil) {
         self.id = id
         self.role = role
         self.mac = mac
+        self.face = face
     }
 
     /// 한 기판은 4대를 넘기지 않습니다. 비어 있는 칸을 다시 만들지 않습니다.
@@ -196,7 +311,7 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, slot, role, mac
+        case id, slot, role, mac, face
     }
 
     init(from decoder: Decoder) throws {
@@ -204,6 +319,7 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
         id = try box.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         role = try box.decodeIfPresent(BridgeCameraRole.self, forKey: .role) ?? .gopro
         mac = try box.decodeIfPresent(String.self, forKey: .mac) ?? ""
+        face = try box.decodeIfPresent(ProductFace.self, forKey: .face)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -211,6 +327,7 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
         try box.encode(id, forKey: .id)
         try box.encode(role, forKey: .role)
         try box.encode(mac, forKey: .mac)
+        try box.encodeIfPresent(face, forKey: .face)
     }
 }
 
@@ -228,6 +345,8 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     var boardMac: String
     /// 이 기판에 블루투스로 붙는 카메라입니다.
     var cameras: [BridgeCameraSlot]
+    /// 오른쪽 위에 둘 제품 사진입니다. 비어 있으면 종류로 고릅니다.
+    var productFace: ProductFace?
 
     init(
         id: UUID,
@@ -240,7 +359,8 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         enabled: Bool,
         pairedOnce: Bool,
         boardMac: String = "",
-        cameras: [BridgeCameraSlot] = []
+        cameras: [BridgeCameraSlot] = [],
+        productFace: ProductFace? = nil
     ) {
         self.id = id
         self.name = name
@@ -253,6 +373,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         self.pairedOnce = pairedOnce
         self.boardMac = boardMac
         self.cameras = kind == .goproBridge ? BridgeCameraSlot.capped(cameras) : cameras
+        self.productFace = productFace
     }
 
     /// 목록과 메뉴에 쓰는 이름입니다. 제품과 연결을 같이 적습니다.
@@ -276,7 +397,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, osmoModel, host, port, bleIdentifier, enabled, pairedOnce, boardMac, cameras
+        case id, name, kind, osmoModel, host, port, bleIdentifier, enabled, pairedOnce, boardMac, cameras, productFace
     }
 
     init(from decoder: Decoder) throws {
@@ -293,6 +414,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         boardMac = try box.decodeIfPresent(String.self, forKey: .boardMac) ?? ""
         let stored = try box.decodeIfPresent([BridgeCameraSlot].self, forKey: .cameras) ?? []
         cameras = kind == .goproBridge ? BridgeCameraSlot.capped(stored) : stored
+        productFace = try box.decodeIfPresent(ProductFace.self, forKey: .productFace)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -308,6 +430,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
         try box.encode(pairedOnce, forKey: .pairedOnce)
         try box.encode(boardMac, forKey: .boardMac)
         try box.encode(cameras, forKey: .cameras)
+        try box.encodeIfPresent(productFace, forKey: .productFace)
     }
 }
 

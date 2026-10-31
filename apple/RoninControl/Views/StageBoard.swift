@@ -41,24 +41,31 @@ enum RoninTravel {
         min(pitchMax, max(pitchMin, value))
     }
 
-    /// 스틱을 끝까지 밀면 그 방향의 끝 각도에 닿습니다. 가운데는 저장한 제자리입니다.
-    static func yaw(from home: Double, stickRight: Double) -> Double {
+    /// 휠을 오른쪽으로 밀면 카메라가 오른쪽을 봅니다. 무대 도면의 오른쪽이 아닙니다.
+    /// 기판에서는 오른쪽이 양수 요입니다.
+    static func yaw(from home: Double, cameraRight: Double) -> Double {
         let base = clampYaw(home)
-        let t = min(1, max(-1, stickRight))
+        let t = min(1, max(-1, cameraRight))
         if t >= 0 {
             return base + t * (yawMax - base)
         }
         return base + t * (base - yawMin)
     }
 
-    /// 아래로 밀면 피치가 커집니다. 기판에서 위는 음수입니다.
-    static func pitch(from home: Double, stickDown: Double) -> Double {
+    /// 휠을 위로 밀면 카메라가 위를 봅니다. 무대 도면의 위쪽이 아닙니다.
+    /// 기판에서는 카메라가 위를 볼 때 피치가 음수입니다.
+    static func pitch(from home: Double, cameraUp: Double) -> Double {
         let base = clampPitch(home)
-        let t = min(1, max(-1, stickDown))
+        let t = min(1, max(-1, cameraUp))
         if t >= 0 {
-            return base + t * (pitchMax - base)
+            return base - t * (base - pitchMin)
         }
-        return base + t * (base - pitchMin)
+        return base - t * (pitchMax - base)
+    }
+
+    /// 기판 피치를 방의 높이로 바꿉니다. 카메라가 위를 보면 빛이 천장으로 갑니다.
+    static func roomPitch(firmwarePitch: Double) -> Double {
+        -clampPitch(firmwarePitch)
     }
 }
 
@@ -312,7 +319,7 @@ struct StageBoard: View {
                         size: size,
                         spot: spot,
                         yaw: spot.aimYaw + RoninTravel.clampYaw(spot.homeYaw),
-                        pitch: -RoninTravel.clampPitch(spot.homePitch)
+                        pitch: RoninTravel.roomPitch(firmwarePitch: spot.homePitch)
                     )
                 }
             }

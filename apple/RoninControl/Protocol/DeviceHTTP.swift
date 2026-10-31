@@ -149,6 +149,12 @@ struct GoProLive: Equatable, Sendable {
     var error: String
     /// 액션 5 프로 중계 기판이 적어 주는 블루투스 세션 글입니다. 직접 연결 고프로는 비어 있습니다.
     var relayBle: String
+    /// 카메라가 알려 준 모델 이름입니다. 없으면 비어 있습니다.
+    var modelName: String = ""
+    /// 미디어 모드 HDMI 비트입니다. 상태가 없으면 nil입니다.
+    var hdmiOut: Bool? = nil
+    /// USB로 카메라를 제어 중이면 참입니다. 케이블만 꽂힌 것은 출력이 아닙니다.
+    var usbOut: Bool? = nil
 }
 
 // 고프로 가족은 Open GoPro HTTP만 사용합니다.
@@ -157,7 +163,11 @@ struct GoProLive: Equatable, Sendable {
 enum GoProClient {
     static func state(_ device: DeviceRecord) async throws -> GoProLive {
         let text = try await get(device, path: "/gopro/camera/state")
-        return parseState(text)
+        var live = parseState(text)
+        if let info = try? await get(device, path: "/gopro/camera/info", timeout: 3) {
+            live.modelName = modelName(info)
+        }
+        return live
     }
 
     static func shutter(_ device: DeviceRecord, start: Bool) async throws -> String {
@@ -242,12 +252,36 @@ enum GoProClient {
         live.remainingVideo = intish(status["35"])
         live.remainingPhotos = intish(status["34"])
         live.sdRemaining = intish(status["54"])
+        live.hdmiOut = hdmiSending(intish(status["110"]))
+        live.usbOut = usbSending(intish(status["116"]))
         for (key, value) in settings {
             if let id = Int(key), let option = intish(value) {
                 live.settings[id] = option
             }
         }
         return live
+    }
+
+    /// 표시 모듈 상태 110번의 HDMI 비트입니다. 2·3·6·7이면 HDMI를 내보냅니다.
+    static func hdmiSending(_ value: Int?) -> Bool? {
+        guard let value else { return nil }
+        return value == 2 || value == 3 || value == 6 || value == 7
+    }
+
+    /// USB 제어 116번이 1이면 USB로 카메라를 다루고 있습니다.
+    static func usbSending(_ value: Int?) -> Bool? {
+        guard let value else { return nil }
+        return value == 1
+    }
+
+    static func modelName(_ text: String) -> String {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ""
+        }
+        if let name = json["model_name"] as? String { return name }
+        if let info = json["info"] as? [String: Any], let name = info["model_name"] as? String { return name }
+        return ""
     }
 
     private static func intish(_ value: Any?) -> Int? {

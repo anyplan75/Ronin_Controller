@@ -78,8 +78,8 @@ struct StageConsole: View {
                 gimbalYaw = RoninTravel.clampYaw(yaw)
                 firmwarePitch = RoninTravel.clampPitch(pitch)
             } else if hypot(stick.width, stick.height) > 0.08 {
-                gimbalYaw = RoninTravel.yaw(from: spot.homeYaw, stickRight: Double(stick.width))
-                firmwarePitch = RoninTravel.pitch(from: spot.homePitch, stickDown: Double(stick.height))
+                gimbalYaw = RoninTravel.yaw(from: spot.homeYaw, cameraRight: Double(stick.width))
+                firmwarePitch = RoninTravel.pitch(from: spot.homePitch, cameraUp: -Double(stick.height))
             } else {
                 gimbalYaw = RoninTravel.clampYaw(spot.homeYaw)
                 firmwarePitch = RoninTravel.clampPitch(spot.homePitch)
@@ -87,7 +87,7 @@ struct StageConsole: View {
             return StageDrive(
                 deviceId: device.id,
                 yaw: spot.aimYaw + gimbalYaw,
-                pitch: -firmwarePitch
+                pitch: RoninTravel.roomPitch(firmwarePitch: firmwarePitch)
             )
         }
     }
@@ -206,7 +206,7 @@ struct StageConsole: View {
                         sticks[device.id] = nil
                     }
                 }
-                Text("팬 · 틸트")
+                Text("카메라 위 · 아래 · 좌 · 우")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Text("떼도 그 방향")
@@ -277,6 +277,7 @@ struct StageConsole: View {
             if let device {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
+                        GearHeader(device: device, camera: focusedCamera)
                         Text(device.name)
                             .font(.headline)
                         Button("설정") { showSettings = true }

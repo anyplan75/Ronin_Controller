@@ -321,7 +321,7 @@ final class Studio: ObservableObject {
                 }
             case .gopro, .goproAction5:
                 if let live = try? await GoProClient.state(device) {
-                    goproLive[device.id] = live
+                    rememberGoPro(device, live)
                 }
             case .goproBridge:
                 if !device.host.isEmpty {
@@ -346,7 +346,7 @@ final class Studio: ObservableObject {
                 }
             case .gopro, .goproAction5:
                 if let live = try? await GoProClient.state(device) {
-                    goproLive[device.id] = live
+                    rememberGoPro(device, live)
                 }
             case .goproBridge:
                 await refreshBoard(device.id)
@@ -580,6 +580,16 @@ final class Studio: ObservableObject {
             note("\(device.name) 소니 연결 요청을 보냈습니다. 비밀번호는 기판에만 저장됩니다.")
         } catch {
             note("\(device.name) 소니 \(error.localizedDescription)")
+        }
+    }
+
+    /// 고프로가 알려 준 모델이 있으면 그 세대를 프로필 사진으로 기억합니다.
+    private func rememberGoPro(_ device: DeviceRecord, _ live: GoProLive) {
+        goproLive[device.id] = live
+        guard device.kind == .gopro, let face = ProductFace.from(modelName: live.modelName) else { return }
+        guard let index = profile.devices.firstIndex(where: { $0.id == device.id }) else { return }
+        if profile.devices[index].productFace != face {
+            profile.devices[index].productFace = face
         }
     }
 

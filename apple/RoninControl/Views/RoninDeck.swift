@@ -277,8 +277,8 @@ struct RoninStick: View {
         switch job {
         case .panTilt:
             let spot = studio.stageSpot(for: device.id)
-            let yaw = RoninTravel.yaw(from: spot.homeYaw, stickRight: Double(vector.width))
-            let pitch = RoninTravel.pitch(from: spot.homePitch, stickDown: Double(vector.height))
+            let yaw = RoninTravel.yaw(from: spot.homeYaw, cameraRight: Double(vector.width))
+            let pitch = RoninTravel.pitch(from: spot.homePitch, cameraUp: -Double(vector.height))
             await studio.roninPlace(device, yaw: yaw, pitch: pitch)
         case .zoom:
             let down = Double(vector.height)

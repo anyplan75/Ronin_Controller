@@ -154,6 +154,11 @@ struct DeviceForm: View {
     @ViewBuilder private func cameraSettings(_ camera: BridgeCameraSlot) -> some View {
         Text("이 카메라만")
             .font(.caption.weight(.semibold))
+        Picker("기종 사진", selection: cameraFace(camera.id)) {
+            ForEach(ProductFace.cameraChoices) { face in
+                Text(face.title).tag(face)
+            }
+        }
         Picker("종류", selection: cameraRole(camera.id)) {
             ForEach(BridgeCameraRole.allCases) { role in
                 Text(role.title).tag(role)
@@ -178,6 +183,21 @@ struct DeviceForm: View {
             get: { device.wrappedValue.boardMac },
             set: { newValue in
                 device.wrappedValue.boardMac = BoardMac.isFull(newValue) ? BoardMac.normalize(newValue) : newValue.uppercased()
+            }
+        )
+    }
+
+    private func cameraFace(_ id: UUID) -> Binding<ProductFace> {
+        Binding(
+            get: {
+                let slot = device.wrappedValue.cameras.first { $0.id == id }
+                return slot?.face ?? ProductFace.inferred(device: device.wrappedValue, camera: slot)
+            },
+            set: { newValue in
+                var slots = device.wrappedValue.cameras
+                guard let index = slots.firstIndex(where: { $0.id == id }) else { return }
+                slots[index].face = newValue
+                device.wrappedValue.cameras = slots
             }
         )
     }
@@ -222,6 +242,11 @@ struct DeviceForm: View {
             Text(Honest.ronin).font(.caption).foregroundStyle(.secondary)
         case .gopro:
             Text(Honest.gopro).font(.caption).foregroundStyle(.secondary)
+            Picker("기종 사진", selection: goproFace) {
+                ForEach(ProductFace.cameraChoices) { face in
+                    Text(face.title).tag(face)
+                }
+            }
         case .goproAction5:
             Text(Honest.action5).font(.caption).foregroundStyle(.secondary)
         case .goproBridge:
@@ -233,6 +258,13 @@ struct DeviceForm: View {
         case .osmoNoAPI:
             Text(Honest.noAPI).font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    private var goproFace: Binding<ProductFace> {
+        Binding(
+            get: { device.wrappedValue.productFace ?? .goproUnknown },
+            set: { device.wrappedValue.productFace = $0 }
+        )
     }
 
     @ViewBuilder private var osmoIdentity: some View {
