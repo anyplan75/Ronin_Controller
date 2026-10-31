@@ -1,11 +1,13 @@
 import SwiftUI
 
-/// 아이폰 화면입니다. 로닌과 짐벌 휠은 없습니다. C3 중계와 그 카메라만 다룹니다.
+/// 아이폰 화면입니다. 카메라 와이파이에는 붙지 않습니다. C3가 들은 블루투스 광고 이름만 보여 줍니다.
 struct PhoneRunView: View {
     @EnvironmentObject private var studio: Studio
-    @State private var selectedCamera: UUID?
-    @State private var showSettings = false
+    @State private var found: [NearbyGoPro] = []
+    @State private var seek: PhoneSeek?
     @State private var connecting = false
+    @State private var joiningMac = ""
+    @State private var settingsCamera: UUID?
 
     private let canvas = StagePalette.paper
     private let rowFill = Color.white.opacity(0.72)
@@ -18,12 +20,8 @@ struct PhoneRunView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if let board {
-                        boardCard(board)
-                        cameraList(board)
-                    } else {
-                        emptyBoard
-                    }
+                    controls
+                    names
                     LogList()
                         .padding(12)
                         .background(rowFill, in: RoundedRectangle(cornerRadius: 12))
@@ -35,7 +33,7 @@ struct PhoneRunView: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
-            .sheet(isPresented: $showSettings) {
+            .sheet(isPresented: settingsPresented) {
                 settingsSheet
             }
         }
@@ -44,150 +42,169 @@ struct PhoneRunView: View {
         .preferredColorScheme(.light)
     }
 
-    private var emptyBoard: some View {
+    private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("이 폰은 C3 중계 기판만 연결합니다. 주소는 192.168.100.200 이고, 공유기가 없으면 Ronin-C3 입니다.")
-                .font(.subheadline)
-            Text("카메라는 고프로 11, 고프로 12, 액션 5 프로입니다. 블루투스로만 붙습니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Button("C3 중계 넣기") { addRelay() }
-                .buttonStyle(.borderedProminent)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(rowFill, in: RoundedRectangle(cornerRadius: 12))
-    }
-
-    private func boardCard(_ board: DeviceRecord) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(board.name)
-                .font(.headline)
-            Text("맥 \(BoardMac.normalize(board.boardMac.isEmpty ? BoardMac.pluggedIn : board.boardMac))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(studio.bridgeWifiLine(board.id))
-                .font(.caption)
-            Text(studio.bridgeDirectLine(board.id))
-                .font(.caption)
-            Text(studio.bridgePhase[board.id] ?? "기판을 찾는 중입니다.")
+            Text("카메라 와이파이에는 붙지 않습니다. 기판이 블루투스로 카메라를 찾습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(connecting ? "연결 중" : "지금 연결") {
-                connecting = true
-                Task {
-                    await studio.scanBoard(board.id)
-                    connecting = false
-                }
+                Task { await connectNow() }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(connecting)
+            .disabled(connecting || !joiningMac.isEmpty)
             HStack(spacing: 10) {
-                Button("모두 녹화") {
-                    Task { await studio.bridgeRecord(board, start: true) }
-                }
-                .buttonStyle(.borderedProminent)
-                Button("모두 정지") {
-                    Task { await studio.bridgeRecord(board, start: false) }
-                }
-                .buttonStyle(.bordered)
+                Button("모두 녹화") { recordAll(true) }
+                    .buttonStyle(.borderedProminent)
+                Button("모두 정지") { recordAll(false) }
+                    .buttonStyle(.bordered)
             }
-            Text("세 대에 같은 버튼을 누릅니다. 기판 라디오가 하나라서 녹화는 한 대씩 이어서 나갑니다.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            .disabled(board == nil)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowFill, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func cameraList(_ board: DeviceRecord) -> some View {
+    @ViewBuilder private var names: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("카메라")
+            Text("블루투스 이름")
                 .font(.subheadline.weight(.semibold))
-            Text("한 대를 고르면 그 카메라 설정만 엽니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if board.cameras.isEmpty {
-                Text("카메라 칸이 없습니다.")
+            if connecting {
+                Text("기판이 페어링 중인 카메라를 찾는 중입니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if found.isEmpty {
+                Text(emptyLine)
+                    .font(.subheadline)
+                Text("카메라를 페어링에 둔 뒤 지금 연결을 다시 누르세요.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(found, id: \.mac) { item in
+                    nameRow(item)
+                }
             }
-            ForEach(Array(board.cameras.enumerated()), id: \.element.id) { index, camera in
-                cameraLine(board, index: index, camera: camera)
-            }
-            if board.cameras.count < 4 {
-                Button("카메라 추가") { studio.addCamera(board.id) }
-                    .font(.caption.weight(.semibold))
-            }
-            Button("주변 카메라 찾기") {
-                Task { await studio.scanCameras(board.id) }
-            }
-            .font(.caption.weight(.semibold))
+            registeredNames
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(rowFill, in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func cameraLine(_ board: DeviceRecord, index: Int, camera: BridgeCameraSlot) -> some View {
-        let picked = selectedCamera == camera.id
-        let face = camera.face ?? ProductFace.inferred(device: board, camera: camera)
-        let title = ProductFace.phoneCameras.contains(face) ? face.title : camera.role.title
-        return HStack(spacing: 8) {
-            Button {
-                selectedCamera = camera.id
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(index + 1). \(title)")
-                    Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
-                        .foregroundStyle(.secondary)
-                    Text(studio.bridgeLive[board.id]?.attachment(for: camera) ?? "아직 읽지 못했습니다.")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            Button("설정") {
-                selectedCamera = camera.id
-                showSettings = true
-            }
-            .font(.caption.weight(.semibold))
-            .buttonStyle(.bordered)
+    private var emptyLine: String {
+        switch seek {
+        case .unreachable:
+            return "기판에 닿지 못했습니다."
+        case .nonePairing:
+            return "기판에는 닿았고, 페어링 중인 카메라는 없습니다."
+        case .cameras, .none:
+            return "아직 찾지 않았습니다. 지금 연결을 누르세요."
         }
-        .font(.caption)
-        .padding(8)
-        .background(picked ? StagePalette.brass.opacity(0.28) : Color.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func addRelay() {
+    @ViewBuilder private var registeredNames: some View {
+        if let board {
+            let saved = board.cameras.filter { BoardMac.isFull($0.mac) && !$0.advertisedName.isEmpty }
+            let fresh = Set(found.map { BoardMac.normalize($0.mac) })
+            let extra = saved.filter { !fresh.contains(BoardMac.normalize($0.mac)) }
+            if !extra.isEmpty {
+                Text("이미 연결한 카메라")
+                    .font(.caption.weight(.semibold))
+                    .padding(.top, 4)
+                ForEach(extra) { camera in
+                    HStack {
+                        Text(camera.advertisedName)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button("설정") { settingsCamera = camera.id }
+                            .font(.caption.weight(.semibold))
+                            .buttonStyle(.bordered)
+                    }
+                    .font(.body)
+                    .padding(8)
+                    .background(Color.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        }
+    }
+
+    private func nameRow(_ item: NearbyGoPro) -> some View {
+        let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let busy = joiningMac == BoardMac.normalize(item.mac)
+        return HStack {
+            Button {
+                Task { await join(item) }
+            } label: {
+                Text(busy ? "\(name) 연결 중" : name)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(busy || connecting)
+            if let camera = savedCamera(item.mac) {
+                Button("설정") { settingsCamera = camera.id }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.bordered)
+            }
+        }
+        .font(.body)
+        .padding(8)
+        .background(Color.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func savedCamera(_ mac: String) -> BridgeCameraSlot? {
+        board?.cameras.first { BoardMac.same($0.mac, mac) && !$0.advertisedName.isEmpty }
+    }
+
+    private func connectNow() async {
+        connecting = true
+        defer { connecting = false }
+        guard let board = ensureBoard() else {
+            seek = .unreachable
+            found = []
+            return
+        }
+        let result = await studio.phoneSeek(board.id)
+        seek = result
+        if case .cameras(let items) = result {
+            found = items
+        } else {
+            found = []
+        }
+    }
+
+    private func ensureBoard() -> DeviceRecord? {
+        if let board { return board }
         let before = Set(studio.profile.devices.map(\.id))
         studio.addDevice(.goproBridge)
-        guard let device = studio.profile.devices.first(where: { $0.kind == .goproBridge && !before.contains($0.id) }) else { return }
-        let plan: [(ProductFace, BridgeCameraRole)] = [
-            (.hero11, .gopro),
-            (.hero12, .gopro),
-            (.action5Pro, .action5),
-        ]
-        for _ in plan {
-            studio.addCamera(device.id)
-        }
-        guard let index = studio.profile.devices.firstIndex(where: { $0.id == device.id }) else { return }
-        var slots = studio.profile.devices[index].cameras
-        for offset in slots.indices where offset < plan.count {
-            slots[offset].face = plan[offset].0
-            slots[offset].role = plan[offset].1
-        }
-        studio.profile.devices[index].cameras = slots
+        return studio.profile.devices.first { $0.kind == .goproBridge && !before.contains($0.id) }
+            ?? studio.profile.devices.first { $0.kind == .goproBridge }
+    }
+
+    private func join(_ item: NearbyGoPro) async {
+        guard let board else { return }
+        joiningMac = BoardMac.normalize(item.mac)
+        defer { joiningMac = "" }
+        await studio.phoneJoin(board.id, item)
+    }
+
+    private func recordAll(_ start: Bool) {
+        guard let board else { return }
+        Task { await studio.bridgeRecord(board, start: start) }
+    }
+
+    private var settingsPresented: Binding<Bool> {
+        Binding(
+            get: { settingsCamera != nil },
+            set: { if !$0 { settingsCamera = nil } }
+        )
     }
 
     private var settingsSheet: some View {
         NavigationStack {
             Form {
-                if let board, let selectedCamera, board.cameras.contains(where: { $0.id == selectedCamera }) {
-                    DeviceForm(radio: studio.radio, deviceId: board.id, cameraId: selectedCamera)
+                if let board, let settingsCamera, board.cameras.contains(where: { $0.id == settingsCamera }) {
+                    DeviceForm(radio: studio.radio, deviceId: board.id, cameraId: settingsCamera)
                 } else {
-                    Text("카메라를 먼저 고르세요.")
+                    Text("카메라를 먼저 연결하세요.")
                 }
             }
             .navigationTitle("카메라 설정")
@@ -195,7 +212,7 @@ struct PhoneRunView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                Button("닫기") { showSettings = false }
+                Button("닫기") { settingsCamera = nil }
             }
         }
         .stagePopup()

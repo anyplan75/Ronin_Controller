@@ -163,8 +163,10 @@ struct DeviceForm: View {
                 }
             }
         }
-        TextField("카메라 블루투스 맥 주소", text: cameraMac(camera.id))
-            .autocorrectionDisabled()
+        if !FormFactor.phone {
+            TextField("카메라 블루투스 맥 주소", text: cameraMac(camera.id))
+                .autocorrectionDisabled()
+        }
         Text(slotLine(camera.id))
             .font(.caption)
             .foregroundStyle(.secondary)

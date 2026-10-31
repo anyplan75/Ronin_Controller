@@ -6,6 +6,13 @@ struct ClockSample: Sendable {
     var mid: Date
 }
 
+/// 아이폰이 지금 연결한 뒤 보여 주는 결과입니다. 새 찾기 방식은 만들지 않습니다.
+enum PhoneSeek {
+    case unreachable
+    case nonePairing
+    case cameras([NearbyGoPro])
+}
+
 enum GroupFire {
     static func clock(_ device: DeviceRecord) async -> (UUID, ClockSample)? {
         let start = Date()
@@ -796,6 +803,61 @@ final class Studio: ObservableObject {
             await pullBoard(profile.devices[index])
         } catch {
             note("\(device.name) \(error.localizedDescription)")
+        }
+    }
+
+    /// 아이폰의 지금 연결입니다. 있는 찾기를 다시 부르고, 카메라가 광고한 이름만 돌려줍니다.
+    func phoneSeek(_ id: UUID) async -> PhoneSeek {
+        await scanBoard(id)
+        guard let device = profile.devices.first(where: { $0.id == id && $0.kind == .goproBridge }) else {
+            return .unreachable
+        }
+        let door = commandDoor(device)
+        guard !door.host.isEmpty else { return .unreachable }
+        do {
+            let found = try await C3Client.nearbyGoPros(door)
+            let named = found.compactMap { item -> NearbyGoPro? in
+                let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard !name.isEmpty, BoardMac.isFull(item.mac) else { return nil }
+                return item
+            }
+            if named.isEmpty { return .nonePairing }
+            return .cameras(named)
+        } catch {
+            return .nonePairing
+        }
+    }
+
+    /// 목록에 나온 이름을 누르면 그 카메라를 칸에 넣고, 기판이 블루투스로 붙습니다.
+    func phoneJoin(_ id: UUID, _ item: NearbyGoPro) async {
+        guard var device = profile.devices.first(where: { $0.id == id && $0.kind == .goproBridge }) else { return }
+        let name = item.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !name.isEmpty, BoardMac.isFull(item.mac) else { return }
+        let mac = BoardMac.normalize(item.mac)
+        var slots = device.cameras.filter { BoardMac.isFull($0.mac) }
+        if let index = slots.firstIndex(where: { BoardMac.same($0.mac, mac) }) {
+            slots[index].advertisedName = name
+            slots[index].role = Self.bridgeRole(name.lowercased())
+        } else if slots.count < 4 {
+            var slot = BridgeCameraSlot()
+            slot.mac = mac
+            slot.advertisedName = name
+            slot.role = Self.bridgeRole(name.lowercased())
+            slot.face = slot.role == .action5 ? .action5Pro : nil
+            slots.append(slot)
+        } else {
+            note("카메라는 한 기판에 4대까지입니다.")
+            return
+        }
+        guard let index = profile.devices.firstIndex(where: { $0.id == id }) else { return }
+        profile.devices[index].cameras = slots
+        device.cameras = slots
+        let door = commandDoor(profile.devices[index])
+        do {
+            _ = try await C3Client.cameraPresets(door, mac: mac)
+            note("\(name) 을 기판에 연결했습니다.")
+        } catch {
+            note("\(name) \(error.localizedDescription)")
         }
     }
 

@@ -303,13 +303,16 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
     var id: UUID
     var role: BridgeCameraRole
     var mac: String
+    /// 카메라가 블루투스 광고에 적은 이름입니다. 아이폰 목록은 이 글만 보여 줍니다.
+    var advertisedName: String
     /// 이 칸의 제품 사진입니다. 비어 있으면 종류로 고릅니다.
     var face: ProductFace?
 
-    init(id: UUID = UUID(), role: BridgeCameraRole = .gopro, mac: String = "", face: ProductFace? = nil) {
+    init(id: UUID = UUID(), role: BridgeCameraRole = .gopro, mac: String = "", advertisedName: String = "", face: ProductFace? = nil) {
         self.id = id
         self.role = role
         self.mac = mac
+        self.advertisedName = advertisedName
         self.face = face
     }
 
@@ -319,7 +322,7 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, slot, role, mac, face
+        case id, slot, role, mac, face, advertisedName
     }
 
     init(from decoder: Decoder) throws {
@@ -327,6 +330,7 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
         id = try box.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         role = try box.decodeIfPresent(BridgeCameraRole.self, forKey: .role) ?? .gopro
         mac = try box.decodeIfPresent(String.self, forKey: .mac) ?? ""
+        advertisedName = try box.decodeIfPresent(String.self, forKey: .advertisedName) ?? ""
         face = try box.decodeIfPresent(ProductFace.self, forKey: .face)
     }
 
@@ -335,6 +339,7 @@ struct BridgeCameraSlot: Codable, Equatable, Identifiable, Sendable {
         try box.encode(id, forKey: .id)
         try box.encode(role, forKey: .role)
         try box.encode(mac, forKey: .mac)
+        try box.encode(advertisedName, forKey: .advertisedName)
         try box.encodeIfPresent(face, forKey: .face)
     }
 }
