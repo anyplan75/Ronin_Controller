@@ -3,6 +3,11 @@ import Foundation
 // 장치에 저장하는 프로필입니다. 주소는 여기 들어 있고, 비밀번호는 넣지 않습니다.
 // 저장 열쇠 앞에 [로닌컨트롤]_ 을 붙여 다른 프로젝트와 섞이지 않게 합니다.
 
+/// 로닌 기판의 고정 주소입니다. 카메라는 이 주소로 붙지 않습니다.
+enum RoninBoard {
+    static let host = "192.168.100.100"
+}
+
 enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case ronin
     case gopro

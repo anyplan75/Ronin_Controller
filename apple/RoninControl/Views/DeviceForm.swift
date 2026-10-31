@@ -98,7 +98,7 @@ struct DeviceForm: View {
             }
         }
         .disabled(findingBoard)
-        Text("집 망이 있으면 그 망에서 기판을 찾습니다. 집 공유기가 없으면 이 기기를 Ronin-C3 에 붙입니다. 비밀번호는 없습니다.")
+        Text("기판 주소는 192.168.100.200 입니다. 집 망이 있으면 그 주소로 닿고, 없으면 이 기기를 Ronin-C3 에 붙입니다. 카메라는 블루투스로만 붙습니다. 비밀번호는 없습니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
         Text(studio.bridgeWifiLine(deviceId))

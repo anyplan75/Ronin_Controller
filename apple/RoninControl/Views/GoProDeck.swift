@@ -84,7 +84,7 @@ struct GoProDeck: View {
         }
         if relay {
             Section("중계 기판 와이파이") {
-                Text("비밀번호는 프로필에 저장하지 않습니다. 중계 기판에만 전달합니다. 처음에는 기판 설정 와이파이 Ronin-Action5 의 192.168.4.1 로 보냅니다.")
+                Text("비밀번호는 프로필에 저장하지 않습니다. 중계 기판에만 전달합니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField("집 와이파이 이름", text: $relaySSID)

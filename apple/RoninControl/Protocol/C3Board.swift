@@ -34,7 +34,7 @@ enum BoardMac {
 /// 기판이 직접 여는 연결입니다. 집 공유기 없이 이 주소로 카메라 명령을 보냅니다. 비밀번호는 없습니다.
 enum DirectBoard {
     static let ssid = "Ronin-C3"
-    static let host = "192.168.4.1"
+    static let host = "192.168.100.200"
     static let port = 80
 }
 
@@ -49,8 +49,8 @@ struct BridgeLinks: Equatable, Sendable {
     var directHost: String
 
     var commandHost: String {
-        if wifiUp, !wifiHost.isEmpty { return wifiHost }
         if directUp, !directHost.isEmpty { return directHost }
+        if wifiUp, !wifiHost.isEmpty { return wifiHost }
         return ""
     }
 
@@ -62,18 +62,18 @@ struct BridgeLinks: Equatable, Sendable {
     var wifiLine: String {
         if wifiUp {
             let name = (wifiSsid.isEmpty || wifiSsid == "없음") ? "집 망" : wifiSsid
-            return "와이파이  \(name)  \(wifiHost)"
+            return "기판 와이파이  \(name)  \(wifiHost)"
         }
-        return "와이파이  붙지 않음"
+        return "기판 와이파이  붙지 않음"
     }
 
     var directLine: String {
         let name = directSsid.isEmpty ? DirectBoard.ssid : directSsid
         let host = directHost.isEmpty ? DirectBoard.host : directHost
         if directUp {
-            return "직접 연결  \(name)  \(host)"
+            return "기판 직접 연결  \(name)  \(host)"
         }
-        return "직접 연결  \(name)  이 기기는 아직 붙어 있지 않습니다"
+        return "기판 직접 연결  \(name)  이 기기는 아직 붙어 있지 않습니다"
     }
 }
 

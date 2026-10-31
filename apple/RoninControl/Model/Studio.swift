@@ -114,6 +114,7 @@ final class Studio: ObservableObject {
         if !frameOK {
             note("프레임 검사가 실패했습니다. 오즈모 명령 형식이 공식 예시와 다릅니다.")
         }
+        applyFixedRoninAddress()
         Task { await bootBoards() }
         Task { await maintainGoProSessions() }
     }
@@ -138,7 +139,7 @@ final class Studio: ObservableObject {
             name: product.kind == .goproBridge ? "C3 중계 \(index)" : "\(product.label) \(index)",
             kind: product.kind,
             osmoModel: product.osmoModel,
-            host: product.kind == .gopro ? "10.5.5.9" : "",
+            host: product.kind == .ronin ? RoninBoard.host : (product.kind == .gopro ? "10.5.5.9" : ""),
             port: product.kind.defaultPort,
             bleIdentifier: "",
             enabled: true,
@@ -815,11 +816,11 @@ final class Studio: ObservableObject {
     }
 
     func bridgeWifiLine(_ id: UUID) -> String {
-        bridgeLinks[id]?.wifiLine ?? "와이파이  아직 확인하지 않았습니다."
+        bridgeLinks[id]?.wifiLine ?? "기판 와이파이  아직 확인하지 않았습니다."
     }
 
     func bridgeDirectLine(_ id: UUID) -> String {
-        bridgeLinks[id]?.directLine ?? "직접 연결  아직 확인하지 않았습니다."
+        bridgeLinks[id]?.directLine ?? "기판 직접 연결  아직 확인하지 않았습니다."
     }
 
     private struct BoardProbe: Sendable {
@@ -838,27 +839,47 @@ final class Studio: ObservableObject {
         return BoardProbe(live: nil, wrongBoard: true)
     }
 
+    /// 로닌 기판은 항상 192.168.100.100 입니다. 다른 주소가 저장돼 있으면 그 주소로 바꿉니다.
+    private func applyFixedRoninAddress() {
+        var changed = false
+        for index in profile.devices.indices where profile.devices[index].kind == .ronin {
+            if profile.devices[index].host != RoninBoard.host || profile.devices[index].port != 80 {
+                profile.devices[index].host = RoninBoard.host
+                profile.devices[index].port = 80
+                changed = true
+            }
+        }
+        if changed {
+            note("로닌 기판 주소를 192.168.100.100 으로 맞췄습니다.")
+        }
+    }
+
     private func pullBoard(_ device: DeviceRecord) async {
         let expect = BoardMac.isFull(device.boardMac) ? BoardMac.normalize(device.boardMac) : BoardMac.pluggedIn
         let port = device.port > 0 ? device.port : DirectBoard.port
-        let houseHost = device.host.trimmingCharacters(in: .whitespacesAndNewlines) == DirectBoard.host ? "" : device.host
+        let saved = device.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let houseHost = saved == DirectBoard.host ? "" : saved
         async let wifiProbe = Self.probeBoard(host: houseHost, port: port, expect: expect)
         async let directProbe = Self.probeBoard(host: DirectBoard.host, port: DirectBoard.port, expect: expect)
         let wifi = await wifiProbe
         let direct = await directProbe
+        let page = direct.live ?? wifi.live
+        let houseName = page?.ssid ?? ""
+        let onHouse = !houseName.isEmpty && houseName != "없음"
         let advertised = [direct.live?.directSsid, wifi.live?.directSsid]
             .compactMap { $0 }
             .first { !$0.isEmpty } ?? DirectBoard.ssid
+        let wifiUp = wifi.live != nil || (direct.live != nil && onHouse)
         bridgeLinks[device.id] = BridgeLinks(
-            wifiUp: wifi.live != nil,
-            wifiSsid: wifi.live?.ssid ?? "",
-            wifiHost: wifi.live != nil ? houseHost : "",
+            wifiUp: wifiUp,
+            wifiSsid: wifiUp ? (onHouse ? houseName : (wifi.live?.ssid ?? "")) : "",
+            wifiHost: wifiUp ? (wifi.live != nil ? houseHost : DirectBoard.host) : "",
             wifiPort: port,
             directUp: direct.live != nil,
             directSsid: advertised,
             directHost: DirectBoard.host
         )
-        if var live = wifi.live ?? direct.live {
+        if var live = page {
             for slot in device.cameras where BoardMac.isFull(slot.mac) {
                 let key = BoardMac.normalize(slot.mac)
                 if live.slots[key] == nil {

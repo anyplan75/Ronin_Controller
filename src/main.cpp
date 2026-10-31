@@ -462,6 +462,8 @@ void onEthEvent(WiFiEvent_t event) {
     case ARDUINO_EVENT_ETH_START:
       Serial.println("이더넷 시작");
       ETH.setHostname("ronin-controller");
+      ETH.config(IPAddress(192, 168, 100, 100), IPAddress(192, 168, 100, 1), IPAddress(255, 255, 255, 0), IPAddress(192, 168, 100, 1));
+      Serial.println("고정 주소 192.168.100.100");
       break;
     case ARDUINO_EVENT_ETH_CONNECTED:
       Serial.println("랜선 연결됨 (링크 업)");
