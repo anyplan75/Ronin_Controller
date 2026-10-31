@@ -205,7 +205,7 @@ enum StickJob {
     case zoom
 }
 
-/// 가운데에서 끌고, 누르고 있는 동안 그 축을 보내고, 떼면 가운데로 돌아옵니다.
+/// 끈 자리에 남습니다. 손을 떼도 가운데로 되돌리거나 중앙 명령을 보내지 않습니다.
 struct RoninStick: View {
     @EnvironmentObject private var studio: Studio
     var device: DeviceRecord
@@ -216,6 +216,8 @@ struct RoninStick: View {
     @State private var knob: CGSize = .zero
     @State private var vector: CGSize = .zero
     @State private var held = false
+    @State private var tracking = false
+    @State private var origin: CGSize = .zero
 
     var body: some View {
         ZStack {
@@ -236,22 +238,29 @@ struct RoninStick: View {
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { value in
+                    if !tracking {
+                        origin = knob
+                        tracking = true
+                        held = true
+                    }
                     let limit = diameter * 0.33
-                    let raw = value.translation
+                    let raw = CGSize(
+                        width: origin.width + value.translation.width,
+                        height: origin.height + value.translation.height
+                    )
                     let reach = max(1, hypot(raw.width, raw.height))
                     let scale = min(1, limit / reach)
                     let next = CGSize(width: raw.width * scale, height: raw.height * scale)
                     knob = next
                     vector = CGSize(width: next.width / limit, height: next.height / limit)
-                    held = true
                     onDrive(vector)
                 }
                 .onEnded { _ in
-                    knob = .zero
-                    vector = .zero
+                    tracking = false
                     held = false
-                    onDrive(.zero)
-                    Task { await release() }
+                    if job == .zoom {
+                        Task { await studio.roninZoom(device, path: "/zoom/stop") }
+                    }
                 }
         )
         .task(id: held) {
@@ -267,13 +276,10 @@ struct RoninStick: View {
     private func hold() async {
         switch job {
         case .panTilt:
-            let yaw = Double(vector.width) * 45
-            let pitch = Double(vector.height) * 45
-            if hypot(vector.width, vector.height) < 0.12 {
-                await studio.roninHold(device, path: nil)
-            } else {
-                await studio.roninSpeed(device, yaw: yaw, pitch: pitch)
-            }
+            let spot = studio.stageSpot(for: device.id)
+            let yaw = RoninTravel.yaw(from: spot.homeYaw, stickRight: Double(vector.width))
+            let pitch = RoninTravel.pitch(from: spot.homePitch, stickDown: Double(vector.height))
+            await studio.roninPlace(device, yaw: yaw, pitch: pitch)
         case .zoom:
             let down = Double(vector.height)
             if abs(down) < 0.12 {
@@ -283,15 +289,6 @@ struct RoninStick: View {
             } else {
                 await studio.roninZoom(device, path: "/zoom/out")
             }
-        }
-    }
-
-    private func release() async {
-        switch job {
-        case .panTilt:
-            await studio.roninHold(device, path: nil)
-        case .zoom:
-            await studio.roninZoom(device, path: "/zoom/stop")
         }
     }
 }

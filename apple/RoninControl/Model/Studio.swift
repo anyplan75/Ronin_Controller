@@ -415,6 +415,32 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// 고른 카메라 한 대만 촬영합니다. 같은 기판의 다른 칸에는 보내지 않습니다.
+    func bridgeSlot(_ device: DeviceRecord, cameraId: UUID, start: Bool) async {
+        guard let slot = device.cameras.first(where: { $0.id == cameraId }) else {
+            note("고른 카메라를 찾지 못했습니다.")
+            return
+        }
+        if profile.practice {
+            note("연습: \(device.name) \(slot.role.title) \(start ? "촬영" : "정지")")
+            return
+        }
+        guard BoardMac.isFull(slot.mac) else {
+            note("\(device.name) 고른 카메라의 맥 주소가 없습니다.")
+            return
+        }
+        guard !device.baseURLText.isEmpty else {
+            note("\(device.name) 기판에 아직 붙지 않았습니다.")
+            return
+        }
+        do {
+            let text = try await C3Client.shutter(device, mac: slot.mac, start: start)
+            note("\(device.name) \(slot.role.title) \(text)")
+        } catch {
+            note("\(device.name) \(error.localizedDescription)")
+        }
+    }
+
     func bridgeRecord(_ device: DeviceRecord, start: Bool) async {
         if profile.practice {
             note("연습: \(device.name) \(start ? "시작" : "정지")")
@@ -458,6 +484,21 @@ final class Studio: ObservableObject {
             }
         }
         await refresh()
+    }
+
+    /// 휠이 가리키는 각도로 옮깁니다. 손을 떼도 그 각도에 남고, 중앙으로 되돌리지 않습니다.
+    func roninPlace(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
+        if profile.practice { return }
+        do {
+            _ = try await RoninClient.command(device, path: "/move", query: [
+                "yaw": String(format: "%.2f", RoninTravel.clampYaw(yaw)),
+                "roll": "0",
+                "pitch": String(format: "%.2f", RoninTravel.clampPitch(pitch)),
+                "time": "0.35",
+            ])
+        } catch {
+            note("\(device.name) \(error.localizedDescription)")
+        }
     }
 
     /// 오른쪽 휠의 위아래입니다. 성공 기록은 남기지 않습니다. 좌우는 아직 보내지 않습니다.

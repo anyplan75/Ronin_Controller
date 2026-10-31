@@ -2,13 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// 아이폰 기본 화면입니다. 밝은 카메라 목록과 연결·함께 시작·프리셋 적용을 둡니다.
-/// 무대 화면 위쪽에 장치를 두고, 그 아래 휠은 고른 로닌만 셉니다. 실시간 그림은 고프로 와이파이만 엽니다.
+/// 기판은 한 줄로 묶이고, 카메라는 한 대씩 고릅니다. 실시간 그림은 아래 가운데에 고프로 와이파이만 엽니다.
 struct PhoneRunView: View {
     @EnvironmentObject private var studio: Studio
     @State private var importProfile = false
     @State private var profileFile: ExportFile?
     @State private var showProfile = false
     @State private var selected: UUID?
+    @State private var selectedCamera: UUID?
     @State private var showDevices = false
     @State private var showSettings = false
     @State private var openSettingsAfterList = false
@@ -18,7 +19,7 @@ struct PhoneRunView: View {
 
     var body: some View {
         NavigationStack {
-            LiveStageView(deviceId: nil, selected: $selected, showSettings: $showSettings)
+            LiveStageView(deviceId: nil, selected: $selected, selectedCamera: $selectedCamera, showSettings: $showSettings)
                 .toolbar { toolbar }
                 .sheet(isPresented: $showDevices, onDismiss: {
                     if openSettingsAfterList {
@@ -80,77 +81,112 @@ struct PhoneRunView: View {
 
     private var listHeader: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("장치를 누르면 무대에서 그 장치가 선택됩니다.")
+            Text("기판을 누르면 그 중계가 선택됩니다. 카메라를 누르면 그 카메라만 선택되고, 설정도 그 카메라만 엽니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
     private func cameraRow(_ device: DeviceRecord) -> some View {
-        let picked = selected == device.id
+        let boardPicked = selected == device.id && selectedCamera == nil
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-            Button {
-                selected = device.id
-                showDevices = false
-            } label: {
-                HStack(alignment: .center, spacing: 10) {
-                    Circle()
-                        .fill(statusColor(device))
-                        .frame(width: 8, height: 8)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(device.name)
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-                        Text(summary(device))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                    Spacer(minLength: 8)
-                    if device.kind.supportsLiveView {
-                        Text("실시간")
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .foregroundStyle(StagePalette.ink)
-                            .background(Color.white.opacity(0.8), in: Capsule())
+                Button {
+                    selected = device.id
+                    selectedCamera = nil
+                    showDevices = false
+                } label: {
+                    HStack(alignment: .center, spacing: 10) {
+                        Circle()
+                            .fill(statusColor(device))
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(device.name)
+                                .font(.headline)
+                                .foregroundStyle(.primary)
+                            Text(summary(device))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer(minLength: 8)
+                        if device.kind.supportsLiveView {
+                            Text("실시간")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .foregroundStyle(StagePalette.ink)
+                                .background(Color.white.opacity(0.8), in: Capsule())
+                        }
                     }
                 }
-            }
-            .buttonStyle(.plain)
-            Button(device.kind == .goproBridge ? "설정" : "주소") {
-                selected = device.id
-                openSettingsAfterList = true
-                showDevices = false
-            }
+                .buttonStyle(.plain)
+                Button(device.kind == .goproBridge ? "설정" : "주소") {
+                    selected = device.id
+                    selectedCamera = nil
+                    openSettingsAfterList = true
+                    showDevices = false
+                }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.bordered)
-            Button("삭제", role: .destructive) { studio.deleteDevice(device.id) }
+                Button("삭제", role: .destructive) {
+                    if selected == device.id {
+                        selected = nil
+                        selectedCamera = nil
+                    }
+                    studio.deleteDevice(device.id)
+                }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.bordered)
+            }
+            if device.kind == .goproBridge {
+                ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
+                    cameraLine(device, index: index, camera: camera)
+                }
+                if device.cameras.count < 4 {
+                    Button("카메라 추가") { studio.addCamera(device.id) }
+                        .font(.caption.weight(.semibold))
+                }
+            }
         }
-        if device.kind == .goproBridge {
-            ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
+        .padding(12)
+        .background(boardPicked ? StagePalette.brass.opacity(0.28) : rowFill, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func cameraLine(_ device: DeviceRecord, index: Int, camera: BridgeCameraSlot) -> some View {
+        let picked = selectedCamera == camera.id
+        return HStack(spacing: 8) {
+            Button {
+                selected = device.id
+                selectedCamera = camera.id
+                showDevices = false
+            } label: {
                 HStack {
                     Text("카메라 \(index + 1)  \(camera.role.title)")
                     Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Button("삭제", role: .destructive) {
-                        studio.deleteCamera(device.id, camera.id)
-                    }
                 }
-                .font(.caption)
             }
-            if device.cameras.count < 4 {
-                Button("카메라 추가") { studio.addCamera(device.id) }
-                    .font(.caption.weight(.semibold))
+            .buttonStyle(.plain)
+            Button("설정") {
+                selected = device.id
+                selectedCamera = camera.id
+                openSettingsAfterList = true
+                showDevices = false
             }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.bordered)
+            Button("삭제", role: .destructive) {
+                if selectedCamera == camera.id { selectedCamera = nil }
+                studio.deleteCamera(device.id, camera.id)
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.bordered)
         }
-        }
-        .padding(12)
-        .background(picked ? StagePalette.brass.opacity(0.28) : rowFill, in: RoundedRectangle(cornerRadius: 12))
+        .font(.caption)
+        .padding(8)
+        .background(picked ? StagePalette.brass.opacity(0.28) : Color.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var presetBlock: some View {

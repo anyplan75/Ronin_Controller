@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 enum StudioPick: Hashable {
     case device(UUID)
+    case camera(UUID, UUID)
     case preset(UUID)
 }
 
@@ -18,6 +19,7 @@ struct StudioView: View {
     @State private var importProfile = false
     /// 무대에서 고른 장치입니다. 목록을 눌러도 무대는 그대로입니다.
     @State private var stageSelection: UUID?
+    @State private var selectedCamera: UUID?
     @State private var showSettings = false
     @State private var presetEditor: UUID?
     @State private var pendingPresetDelete: UUID?
@@ -27,7 +29,18 @@ struct StudioView: View {
             List(selection: $selection) {
                 Section("장치 \(studio.profile.devices.count)/\(StudioProfile.maxDevices)") {
                     ForEach(studio.profile.devices) { device in
-                        deviceListRows(device)
+                        deviceHeader(device)
+                            .tag(StudioPick.device(device.id))
+                        if device.kind == .goproBridge {
+                            ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
+                                cameraHeader(device, index: index, camera: camera)
+                                    .tag(StudioPick.camera(device.id, camera.id))
+                            }
+                            if device.cameras.count < 4 {
+                                Button("카메라 추가") { studio.addCamera(device.id) }
+                                    .buttonStyle(.borderless)
+                            }
+                        }
                     }
                 }
                 Section("프리셋") {
@@ -85,13 +98,30 @@ struct StudioView: View {
             switch pick {
             case .device(let id):
                 stageSelection = id
+                selectedCamera = nil
+            case .camera(let deviceId, let cameraId):
+                stageSelection = deviceId
+                selectedCamera = cameraId
             case .preset, nil:
                 break
             }
         }
         .onChange(of: stageSelection) { _, id in
-            if let id, selection != .device(id) {
+            guard let id else { return }
+            if case .camera(let deviceId, _) = selection, deviceId == id, selectedCamera != nil {
+                return
+            }
+            if selection != .device(id) {
                 selection = .device(id)
+            }
+        }
+        .onChange(of: selectedCamera) { _, cameraId in
+            guard let stageSelection else { return }
+            if let cameraId {
+                let pick = StudioPick.camera(stageSelection, cameraId)
+                if selection != pick { selection = pick }
+            } else if case .camera = selection {
+                selection = .device(stageSelection)
             }
         }
         .sheet(isPresented: Binding(get: { presetEditor != nil }, set: { if !$0 { presetEditor = nil } })) {
@@ -111,7 +141,7 @@ struct StudioView: View {
     }
 
     @ViewBuilder private var detail: some View {
-        StageConsole(initialId: nil, selected: $stageSelection, showSettings: $showSettings)
+        StageConsole(initialId: nil, selected: $stageSelection, selectedCamera: $selectedCamera, showSettings: $showSettings)
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -180,54 +210,51 @@ struct StudioView: View {
         }
     }
 
-    private func deviceListRows(_ device: DeviceRecord) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Label(device.name, systemImage: icon(device))
-                Spacer()
-                Button("설정") {
-                    stageSelection = device.id
-                    showSettings = true
-                }
-                .buttonStyle(.borderless)
-                Button("삭제", role: .destructive) {
-                    if selection == .device(device.id) { selection = nil }
-                    if stageSelection == device.id { stageSelection = nil }
-                    studio.deleteDevice(device.id)
-                }
-                .buttonStyle(.borderless)
+    private func deviceHeader(_ device: DeviceRecord) -> some View {
+        HStack {
+            Label(device.name, systemImage: icon(device))
+            Spacer()
+            Button("설정") {
+                stageSelection = device.id
+                selectedCamera = nil
+                showSettings = true
             }
-            if device.kind == .goproBridge {
-                ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
-                    HStack {
-                        Image(systemName: "video")
-                        Text("카메라 \(index + 1)")
-                        Text(camera.role.title)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("삭제", role: .destructive) {
-                            studio.deleteCamera(device.id, camera.id)
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-                if device.cameras.count < 4 {
-                    Button("카메라 추가") { studio.addCamera(device.id) }
-                        .buttonStyle(.borderless)
-                }
-            }
-        }
-        .tag(StudioPick.device(device.id))
-        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            .buttonStyle(.borderless)
             Button("삭제", role: .destructive) {
-                if selection == .device(device.id) { selection = nil }
-                if stageSelection == device.id { stageSelection = nil }
+                if stageSelection == device.id {
+                    stageSelection = nil
+                    selectedCamera = nil
+                    selection = nil
+                }
                 studio.deleteDevice(device.id)
             }
+            .buttonStyle(.borderless)
         }
+    }
+
+    private func cameraHeader(_ device: DeviceRecord, index: Int, camera: BridgeCameraSlot) -> some View {
+        HStack {
+            Image(systemName: "video")
+            Text("카메라 \(index + 1)")
+            Text(camera.role.title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("설정") {
+                stageSelection = device.id
+                selectedCamera = camera.id
+                showSettings = true
+            }
+            .buttonStyle(.borderless)
+            Button("삭제", role: .destructive) {
+                if selectedCamera == camera.id { selectedCamera = nil }
+                studio.deleteCamera(device.id, camera.id)
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.leading, 16)
     }
 
     private func icon(_ device: DeviceRecord) -> String {

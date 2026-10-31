@@ -4,6 +4,8 @@ struct DeviceForm: View {
     @EnvironmentObject private var studio: Studio
     @ObservedObject var radio: OsmoRadio
     let deviceId: UUID
+    /// 이 값이 있으면 그 카메라 칸만 보여 줍니다. 기판에 붙은 다른 카메라 설정은 열지 않습니다.
+    var cameraId: UUID? = nil
     @State private var findingBoard = false
     @State private var findingCameras = false
 
@@ -108,58 +110,67 @@ struct DeviceForm: View {
         Text("기판은 JMEDIA 에 먼저 붙고, 안 되면 JMEDIA_Cam 에 붙습니다. 와이파이 비밀번호는 앱에 없습니다.")
             .font(.caption)
             .foregroundStyle(.secondary)
-        if device.wrappedValue.cameras.isEmpty {
-            Text("카메라 칸이 없습니다. 장치 목록에서 카메라를 추가하세요.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        ForEach(Array(device.wrappedValue.cameras.enumerated()), id: \.element.id) { index, camera in
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("카메라 \(index + 1)")
-                        .font(.caption.weight(.semibold))
-                    Spacer()
-                    Button("이 카메라 삭제", role: .destructive) {
-                        studio.deleteCamera(deviceId, camera.id)
-                    }
-                    .font(.caption)
-                }
-                Picker("종류", selection: cameraRole(camera.id)) {
-                    ForEach(BridgeCameraRole.allCases) { role in
-                        Text(role.title).tag(role)
-                    }
-                }
-                TextField("카메라 블루투스 맥 주소", text: cameraMac(camera.id))
-                    .autocorrectionDisabled()
-                Text(slotLine(camera.id))
+        if let cameraId {
+            if let camera = device.wrappedValue.cameras.first(where: { $0.id == cameraId }) {
+                cameraSettings(camera)
+            } else {
+                Text("고른 카메라를 찾지 못했습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                BridgeCameraPresets(deviceId: deviceId, camera: camera)
+            }
+        } else {
+            if device.wrappedValue.cameras.isEmpty {
+                Text("카메라 칸이 없습니다. 왼쪽 목록에서 카메라를 추가하세요.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(Array(device.wrappedValue.cameras.enumerated()), id: \.element.id) { index, camera in
+                Text("\(index + 1). \(camera.role.title)  \(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")  \(slotLine(camera.id))")
+                    .font(.caption)
+            }
+            Text("설정은 왼쪽에서 고른 카메라 한 대만 엽니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if device.wrappedValue.cameras.count < 4 {
+                Button("카메라 추가") { studio.addCamera(deviceId) }
+            }
+            Button(findingCameras ? "카메라 찾는 중" : "주변 카메라 찾기") {
+                findingCameras = true
+                Task {
+                    await studio.scanCameras(deviceId)
+                    findingCameras = false
+                }
+            }
+            .disabled(findingCameras || device.wrappedValue.host.isEmpty)
+            Text("기판이 주변 고프로와 액션 5 프로를 같은 목록으로 읽습니다. 칸이 모자라면 4대까지 추가합니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("붙음 다시 읽기") {
+                Task { await studio.refreshBoard(deviceId) }
             }
         }
-        if device.wrappedValue.cameras.count < 4 {
-            Button("카메라 추가") { studio.addCamera(deviceId) }
-        }
-        Button(findingCameras ? "카메라 찾는 중" : "주변 카메라 찾기") {
-            findingCameras = true
-            Task {
-                await studio.scanCameras(deviceId)
-                findingCameras = false
+    }
+
+    @ViewBuilder private func cameraSettings(_ camera: BridgeCameraSlot) -> some View {
+        Text("이 카메라만")
+            .font(.caption.weight(.semibold))
+        Picker("종류", selection: cameraRole(camera.id)) {
+            ForEach(BridgeCameraRole.allCases) { role in
+                Text(role.title).tag(role)
             }
         }
-        .disabled(findingCameras || device.wrappedValue.host.isEmpty)
-        Text("기판이 주변 고프로와 액션 5 프로를 같은 목록으로 읽습니다. 있는 칸에 맥 주소와 붙음 또는 붙지 않음이 바로 나오고, 칸이 모자라면 4대까지 추가합니다.")
+        TextField("카메라 블루투스 맥 주소", text: cameraMac(camera.id))
+            .autocorrectionDisabled()
+        Text(slotLine(camera.id))
             .font(.caption)
             .foregroundStyle(.secondary)
-        Button("촬영 시작") {
-            Task { await studio.bridgeRecord(device.wrappedValue, start: true) }
+        Button("이 카메라 촬영") {
+            Task { await studio.bridgeSlot(device.wrappedValue, cameraId: camera.id, start: true) }
         }
-        Button("촬영 정지") {
-            Task { await studio.bridgeRecord(device.wrappedValue, start: false) }
+        Button("이 카메라 정지") {
+            Task { await studio.bridgeSlot(device.wrappedValue, cameraId: camera.id, start: false) }
         }
-        Button("붙음 다시 읽기") {
-            Task { await studio.refreshBoard(deviceId) }
-        }
+        BridgeCameraPresets(deviceId: deviceId, camera: camera)
     }
 
     private var boardMacText: Binding<String> {

@@ -4,10 +4,11 @@ import SwiftUI
 struct LiveStageView: View {
     var deviceId: UUID?
     @Binding var selected: UUID?
+    @Binding var selectedCamera: UUID?
     @Binding var showSettings: Bool
 
     var body: some View {
-        StageConsole(initialId: deviceId, selected: $selected, showSettings: $showSettings)
+        StageConsole(initialId: deviceId, selected: $selected, selectedCamera: $selectedCamera, showSettings: $showSettings)
             .navigationTitle("무대")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -24,6 +25,7 @@ struct StageConsole: View {
     @EnvironmentObject private var studio: Studio
     var initialId: UUID?
     @Binding var selected: UUID?
+    @Binding var selectedCamera: UUID?
     @Binding var showSettings: Bool
 
     @StateObject private var preview = GoProPreview()
@@ -35,6 +37,32 @@ struct StageConsole: View {
     private var device: DeviceRecord? {
         guard let selected else { return nil }
         return studio.profile.devices.first { $0.id == selected }
+    }
+
+    private var focusedCamera: BridgeCameraSlot? {
+        guard let selectedCamera, let device else { return nil }
+        return device.cameras.first { $0.id == selectedCamera }
+    }
+
+    private var bottomHint: String {
+        if device == nil {
+            return "무대에서 로닌을 누르면 아래에 휠 두 개가 나옵니다."
+        }
+        if device?.kind == .goproBridge, focusedCamera == nil {
+            return "왼쪽에서 카메라 한 대를 고르세요. 촬영과 설정은 그 카메라만 따릅니다."
+        }
+        return "이 장치에는 짐벌 휠이 없습니다."
+    }
+
+    /// 무대에서 장치를 누르면 카메라 선택은 풀립니다. 목록의 카메라 선택은 그대로 둡니다.
+    private var stagePick: Binding<UUID?> {
+        Binding(
+            get: { selected },
+            set: { newValue in
+                selected = newValue
+                selectedCamera = nil
+            }
+        )
     }
 
     /// 화각은 기판이 갈 수 있는 각도 안에 둡니다. 각도가 오면 그 값을 쓰고, 없으면 스틱이 끝 각도까지 미리 보여 줍니다.
@@ -71,12 +99,12 @@ struct StageConsole: View {
             let half = geo.size.height / 2
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
-                    StageBoard(selection: $selected, drives: drives)
+                    StageBoard(selection: stagePick, drives: drives)
                         .frame(width: center, height: half)
                     bottomHalf(width: center, height: half)
                 }
                 .frame(width: center, height: geo.size.height)
-                sidePanel(height: geo.size.height)
+                sidePanel()
                     .frame(width: side, height: geo.size.height)
                     .background(StagePalette.paper)
             }
@@ -93,6 +121,12 @@ struct StageConsole: View {
         .onChange(of: studio.profile.devices.map(\.id)) { _, ids in
             if let selected, !ids.contains(selected) {
                 self.selected = ids.first
+                selectedCamera = nil
+            }
+        }
+        .onChange(of: device?.cameras.map(\.id) ?? []) { _, ids in
+            if let selectedCamera, !ids.contains(selectedCamera) {
+                self.selectedCamera = nil
             }
         }
         .sheet(isPresented: $showSettings) {
@@ -130,11 +164,16 @@ struct StageConsole: View {
 
     private func bottomHalf(width: CGFloat, height: CGFloat) -> some View {
         VStack(spacing: 4) {
-            if let device, device.kind == .ronin {
+            if let device, device.kind.supportsLiveView {
+                HStack(alignment: .center, spacing: 8) {
+                    livePicture(height: max(80, height - 16))
+                    shootControls
+                }
+            } else if let device, device.kind == .ronin {
                 roninController(device, height: max(72, height - 16))
             } else {
                 HStack(alignment: .center, spacing: 8) {
-                    Text(device == nil ? "무대에서 로닌을 누르면 아래에 휠 두 개가 나옵니다." : "이 장치에는 짐벌 휠이 없습니다.")
+                    Text(bottomHint)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -168,6 +207,9 @@ struct StageConsole: View {
                     }
                 }
                 Text("팬 · 틸트")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("떼도 그 방향")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -204,8 +246,14 @@ struct StageConsole: View {
                     Button("셔터") { shutter(device, true) }
                     Button("정지") { shutter(device, false) }
                 case .goproBridge:
-                    Button("촬영") { Task { await studio.bridgeRecord(device, start: true) } }
-                    Button("정지") { Task { await studio.bridgeRecord(device, start: false) } }
+                    if let camera = focusedCamera {
+                        Button("촬영") { Task { await studio.bridgeSlot(device, cameraId: camera.id, start: true) } }
+                        Button("정지") { Task { await studio.bridgeSlot(device, cameraId: camera.id, start: false) } }
+                    } else {
+                        Text("카메라 한 대")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 case .osmoAction:
                     Button("녹화") { osmoRecord(device, true) }
                     Button("정지") { osmoRecord(device, false) }
@@ -224,12 +272,9 @@ struct StageConsole: View {
         }
     }
 
-    private func sidePanel(height: CGFloat) -> some View {
+    private func sidePanel() -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let device {
-                if device.kind.supportsLiveView {
-                    livePicture(height: max(150, height * 0.34))
-                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         Text(device.name)
@@ -298,7 +343,14 @@ struct StageConsole: View {
                 Text("아직 상태를 읽지 못했습니다.")
             }
         case .goproBridge:
-            BridgeAttachmentList(device: device)
+            if let camera = focusedCamera {
+                Text(camera.role.title)
+                Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
+                Text(studio.bridgeLive[device.id]?.attachment(for: camera) ?? "아직 읽지 못했습니다.")
+            } else {
+                Text(studio.bridgePhase[device.id] ?? "기판을 찾는 중입니다.")
+                Text("왼쪽에서 카메라 한 대를 고르세요.")
+            }
         case .gopro, .goproAction5:
             Text(studio.goproSession[device.id] ?? "세션을 아직 확인하지 않았습니다.")
             if let live = studio.goproLive[device.id] {
@@ -336,10 +388,9 @@ struct StageConsole: View {
         case .goproBridge:
             Text("설정")
                 .font(.caption.weight(.semibold))
-            Text("카메라 칸은 장치 설정에서 바꿉니다. 여기에는 지금 붙었는지가 바로 나옵니다.")
+            Text(focusedCamera == nil ? "기판만 고른 상태입니다. 카메라 설정은 고른 카메라만 엽니다." : "이 카메라의 설정만 작은 창으로 엽니다.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            BridgeAttachmentList(device: device)
         case .gopro, .goproAction5:
             Text("설정")
                 .font(.caption.weight(.semibold))
@@ -498,30 +549,45 @@ struct StageConsole: View {
         NavigationStack {
             Form {
                 if let device {
-                    DeviceForm(radio: studio.radio, deviceId: device.id)
+                    DeviceForm(radio: studio.radio, deviceId: device.id, cameraId: selectedCamera)
                     switch device.kind {
                     case .ronin:
-                        RoninDeck(deviceId: device.id)
+                        if selectedCamera == nil {
+                            RoninDeck(deviceId: device.id)
+                        }
                     case .gopro, .goproAction5:
-                        GoProDeck(deviceId: device.id)
+                        if selectedCamera == nil {
+                            GoProDeck(deviceId: device.id)
+                        }
                     case .goproBridge:
                         EmptyView()
                     case .osmoAction, .osmoNoAPI:
-                        OsmoDeck(radio: studio.radio, deviceId: device.id)
+                        if selectedCamera == nil {
+                            OsmoDeck(radio: studio.radio, deviceId: device.id)
+                        }
                     }
                     Section {
-                        Button("이 장치 삭제", role: .destructive) {
-                            let id = device.id
-                            studio.deleteDevice(id)
-                            showSettings = false
-                            if selected == id { selected = nil }
+                        if let camera = focusedCamera {
+                            Button("이 카메라 삭제", role: .destructive) {
+                                studio.deleteCamera(device.id, camera.id)
+                                selectedCamera = nil
+                                showSettings = false
+                            }
+                        } else {
+                            Button("이 장치 삭제", role: .destructive) {
+                                let id = device.id
+                                studio.deleteDevice(id)
+                                showSettings = false
+                                if selected == id { selected = nil }
+                                selectedCamera = nil
+                            }
                         }
                     }
                 } else {
                     Text("무대에서 장치를 먼저 고르세요.")
                 }
             }
-            .navigationTitle("설정")
+            .navigationTitle(focusedCamera?.role.title ?? "설정")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
