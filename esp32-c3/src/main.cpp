@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
 #include <esp_coexist.h>
 #include <esp_wifi.h>
 #include <NimBLEDevice.h>
@@ -17,9 +18,11 @@
  * 이 기판의 라디오는 하나라서, 와이파이 절전을 끄고 와이파이와 블루투스가 나눠 씁니다.
  * 카메라는 최대 4대까지 등록해 둡니다. 8대를 한 박자에 맞추지는 않습니다.
  *
- * 와이파이는 아래 순서만 사용합니다. 다른 망에는 붙지 않고, 기판이 공유기를 만들지도 않습니다.
+ * 집 공유기가 있으면 아래 순서만 사용합니다. 다른 집 망에는 붙지 않습니다.
  * 1. WIFI_SSID_1
  * 2. 실패하면 WIFI_SSID_2
+ * 집 공유기가 없어도 기판이 자기 이름 Ronin-C3 로 직접 연결을 엽니다.
+ * 그 주소는 192.168.4.1 입니다. 직접 연결 비밀번호는 없습니다.
  * 비밀번호는 시리얼로 찍지 않습니다.
  *
  * 아이패드 호출 예:
@@ -43,7 +46,10 @@ static const char* kCommandChar = "b5f90072-aa8d-11e3-9046-0002a5d5c51b";
 static const char* kCommandRspChar = "b5f90073-aa8d-11e3-9046-0002a5d5c51b";
 static const char* kSettingChar = "b5f90074-aa8d-11e3-9046-0002a5d5c51b";
 static const char* kSettingRspChar = "b5f90075-aa8d-11e3-9046-0002a5d5c51b";
+static const char* kQueryChar = "b5f90076-aa8d-11e3-9046-0002a5d5c51b";
+static const char* kQueryRspChar = "b5f90077-aa8d-11e3-9046-0002a5d5c51b";
 
+static const char* kDirectSsid = "Ronin-C3";
 static const int kMaxCameras = 4;
 static const uint32_t kWifiWaitMs = 12000;
 static const uint32_t kWifiRetryGapMs = 10000;
@@ -59,6 +65,9 @@ struct CamSlot {
   NimBLERemoteCharacteristic* commandChar = nullptr;
   NimBLERemoteCharacteristic* commandRspChar = nullptr;
   NimBLERemoteCharacteristic* settingChar = nullptr;
+  NimBLERemoteCharacteristic* settingRspChar = nullptr;
+  NimBLERemoteCharacteristic* queryChar = nullptr;
+  NimBLERemoteCharacteristic* queryRspChar = nullptr;
   uint32_t lastKeepAliveMs = 0;
 };
 
@@ -67,6 +76,7 @@ CamSlot cams[kMaxCameras];
 bool bleStackReady = false;
 bool bleBusy = false;
 bool serverStarted = false;
+bool mdnsUp = false;
 bool radioShared = false;
 String activeSsid;
 uint32_t nextWifiTryMs = 0;
@@ -99,7 +109,9 @@ String hexBytes(const uint8_t* data, size_t len) {
 
 void onNotify(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t length, bool) {
   if (waitingSlot < 0 || waitingSlot >= kMaxCameras) return;
-  if (!chr || chr != cams[waitingSlot].commandRspChar) return;
+  if (!chr) return;
+  const CamSlot& slot = cams[waitingSlot];
+  if (chr != slot.commandRspChar && chr != slot.queryRspChar && chr != slot.settingRspChar) return;
   size_t n = length;
   if (n > sizeof(notifyBuf)) n = sizeof(notifyBuf);
   memcpy(notifyBuf, data, n);
@@ -114,6 +126,9 @@ void BridgeClientCallbacks::onDisconnect(NimBLEClient* client, int reason) {
     cams[i].commandChar = nullptr;
     cams[i].commandRspChar = nullptr;
     cams[i].settingChar = nullptr;
+    cams[i].settingRspChar = nullptr;
+    cams[i].queryChar = nullptr;
+    cams[i].queryRspChar = nullptr;
     Serial.printf("블루투스 끊김 %s 코드 %d. 등록은 유지합니다.\n", cams[i].mac.c_str(), reason);
   }
 }
@@ -186,9 +201,25 @@ int registeredCount() {
   return n;
 }
 
+void ensureDirect() {
+  if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
+  const IPAddress now = WiFi.softAPIP();
+  if (now != IPAddress(0, 0, 0, 0)) return;
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  const bool up = WiFi.softAP(kDirectSsid);
+  shareRadio();
+  Serial.printf("직접 연결 %s %s\n", kDirectSsid, up ? WiFi.softAPIP().toString().c_str() : "열지 못했습니다");
+}
+
+String directIpText() {
+  const IPAddress ip = WiFi.softAPIP();
+  if (ip == IPAddress(0, 0, 0, 0)) return "192.168.4.1";
+  return ip.toString();
+}
+
 bool joinOne(const char* ssid) {
   Serial.printf("Wi-Fi 연결 시도: %s\n", ssid);
-  WiFi.mode(WIFI_STA);
+  ensureDirect();
   shareRadio();
   WiFi.begin(ssid, WIFI_PASS);
   const uint32_t started = millis();
@@ -214,7 +245,8 @@ bool connectWifi() {
   activeSsid = "";
   if (joinOne(WIFI_SSID_1)) return true;
   if (joinOne(WIFI_SSID_2)) return true;
-  Serial.println("JMEDIA 와 JMEDIA_Cam 둘 다 연결되지 않았습니다. 다른 망이나 자체 공유기는 쓰지 않습니다.");
+  ensureDirect();
+  Serial.println("집 와이파이에 붙지 않았습니다. 직접 연결은 그대로 열려 있습니다.");
   return false;
 }
 
@@ -332,7 +364,10 @@ bool prepareSession(const String& mac, int& slot, String& detail) {
   cam.commandChar = service->getCharacteristic(kCommandChar);
   cam.commandRspChar = service->getCharacteristic(kCommandRspChar);
   cam.settingChar = service->getCharacteristic(kSettingChar);
-  NimBLERemoteCharacteristic* settingRsp = service->getCharacteristic(kSettingRspChar);
+  cam.settingRspChar = service->getCharacteristic(kSettingRspChar);
+  cam.queryChar = service->getCharacteristic(kQueryChar);
+  cam.queryRspChar = service->getCharacteristic(kQueryRspChar);
+  NimBLERemoteCharacteristic* settingRsp = cam.settingRspChar;
   if (!cam.commandChar || !cam.commandRspChar) {
     detail = "명령 특성 b5f90072 를 찾지 못했습니다";
     return false;
@@ -342,6 +377,7 @@ bool prepareSession(const String& mac, int& slot, String& detail) {
     return false;
   }
   if (settingRsp) settingRsp->subscribe(true, onNotify, true);
+  if (cam.queryRspChar) cam.queryRspChar->subscribe(true, onNotify, true);
 
   String responseHex;
   const uint8_t thirdParty[] = {0x50};
@@ -394,11 +430,17 @@ void sendJson(int code, bool ok, const String& mac, const String& action, const 
   server.send(code, "application/json", json);
 }
 
+String wifiMacText();
+
 void handleRoot() {
+  const bool house = WiFi.status() == WL_CONNECTED;
   String page;
   page += "액션5 브리지\n";
-  page += "SSID: " + activeSsid + "\n";
-  page += "IP: " + WiFi.localIP().toString() + "\n";
+  page += "SSID: " + (house ? activeSsid : String("없음")) + "\n";
+  page += "IP: " + (house ? WiFi.localIP().toString() : String("없음")) + "\n";
+  page += "MAC: " + wifiMacText() + "\n";
+  page += "DIRECT_SSID: " + String(kDirectSsid) + "\n";
+  page += "DIRECT_IP: " + directIpText() + "\n";
   page += "블루투스: NimBLE\n";
   page += "등록 " + String(registeredCount()) + "/" + String(kMaxCameras) + "\n";
   page += "8대 동시 촬영은 되지 않습니다. 라디오 하나를 와이파이와 블루투스가 나눠 씁니다.\n";
@@ -413,10 +455,6 @@ void handleRoot() {
 }
 
 void handleShutter() {
-  if (WiFi.status() != WL_CONNECTED) {
-    sendJson(503, false, "", "", "와이파이가 연결되어 있지 않습니다", "");
-    return;
-  }
   if (!server.hasArg("mac") || !server.hasArg("action")) {
     sendJson(400, false, "", "", "mac 과 action 이 필요합니다", "");
     return;
@@ -470,14 +508,448 @@ void handleShutter() {
   sendJson(502, false, mac, action, detail, responseHex);
 }
 
+String wifiMacText() {
+  uint8_t mac[6] = {0};
+  if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK) return "";
+  char buf[18];
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+void stopBoardName() {
+  if (!mdnsUp) return;
+  MDNS.end();
+  mdnsUp = false;
+}
+
+// 아이폰이 숫자 주소 없이 이 기판을 찾습니다. 이름은 맥 주소만 담고, 비밀번호는 넣지 않습니다.
+void publishBoard() {
+  if (mdnsUp || WiFi.status() != WL_CONNECTED) return;
+  const String mac = wifiMacText();
+  if (!mac.length()) {
+    Serial.println("기판 맥 주소를 읽지 못했습니다.");
+    return;
+  }
+  String compact = mac;
+  compact.replace(":", "");
+  compact.toLowerCase();
+  const String host = "link-" + compact;
+  if (!MDNS.begin(host.c_str())) {
+    Serial.println("이름 알림을 열지 못했습니다.");
+    return;
+  }
+  MDNS.addService("ronin-c3", "tcp", 80);
+  MDNS.addServiceTxt("ronin-c3", "tcp", "mac", mac.c_str());
+  mdnsUp = true;
+  Serial.printf("이름 알림 _ronin-c3._tcp 맥 주소 %s\n", mac.c_str());
+}
+
+String jsonEscape(const String& raw) {
+  String out;
+  for (unsigned i = 0; i < raw.length(); i++) {
+    const char c = raw[i];
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += c;
+    } else if (c >= 32) {
+      out += c;
+    }
+  }
+  return out;
+}
+
+// 고프로 HERO와 오즈모 액션 5 프로(Open GoPro FEA6)를 같은 찾기 목록에 넣습니다.
+bool looksLikeBridgeCamera(const NimBLEAdvertisedDevice* device) {
+  if (!device) return false;
+  if (device->isAdvertisingService(NimBLEUUID(kControlService))) return true;
+  if (device->isAdvertisingService(NimBLEUUID("FEA6"))) return true;
+  String name(device->getName().c_str());
+  name.toLowerCase();
+  if (name.indexOf("gopro") >= 0 || name.indexOf("hero") >= 0) return true;
+  if (name.indexOf("action") >= 0) return true;
+  if (name.indexOf("osmo") >= 0) return true;
+  if (name.indexOf("oa5") >= 0 || name.indexOf("ac5") >= 0) return true;
+  return false;
+}
+
+struct ScanHit {
+  char mac[18];
+  char name[32];
+  int rssi;
+};
+
+ScanHit scanHits[4];
+volatile int scanCount = 0;
+bool scanWanted = false;
+bool scanRunning = false;
+uint32_t scanBegan = 0;
+String lastScanJson;
+
+void rememberGoPro(const NimBLEAdvertisedDevice* device) {
+  if (!looksLikeBridgeCamera(device)) return;
+  const String mac = normalizeMac(String(device->getAddress().toString().c_str()));
+  if (mac.length() != 17) return;
+  const int rssi = device->getRSSI();
+  const int held = scanCount;
+  for (int i = 0; i < held && i < 4; i++) {
+    if (strcmp(scanHits[i].mac, mac.c_str()) == 0) return;
+  }
+  int slot = -1;
+  if (held < 4) {
+    slot = held;
+    scanCount = held + 1;
+  } else {
+    int weak = 0;
+    for (int i = 1; i < 4; i++) {
+      if (scanHits[i].rssi < scanHits[weak].rssi) weak = i;
+    }
+    if (rssi <= scanHits[weak].rssi) return;
+    slot = weak;
+  }
+  strncpy(scanHits[slot].mac, mac.c_str(), sizeof(scanHits[slot].mac) - 1);
+  scanHits[slot].mac[sizeof(scanHits[slot].mac) - 1] = 0;
+  String name(device->getName().c_str());
+  name.toCharArray(scanHits[slot].name, sizeof(scanHits[slot].name));
+  scanHits[slot].rssi = rssi;
+}
+
+class GoProScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* device) override { rememberGoPro(device); }
+};
+
+GoProScanCallbacks goProScanCallbacks;
+
+// 광고만 들은 카메라는 붙지 않은 것입니다. 이미 블루투스로 붙어 있을 때만 붙음입니다.
+bool cameraAttached(const char* mac) {
+  for (int i = 0; i < kMaxCameras; i++) {
+    if (!cams[i].registered) continue;
+    if (!cams[i].mac.equalsIgnoreCase(mac)) continue;
+    return cams[i].ready && cams[i].client && cams[i].client->isConnected();
+  }
+  return false;
+}
+
+void finishScanJson() {
+  const int count = scanCount > 4 ? 4 : scanCount;
+  for (int a = 0; a < count; a++) {
+    for (int b = a + 1; b < count; b++) {
+      if (scanHits[b].rssi > scanHits[a].rssi) {
+        const ScanHit swap = scanHits[a];
+        scanHits[a] = scanHits[b];
+        scanHits[b] = swap;
+      }
+    }
+  }
+  String json = "{\"ok\":true,\"pending\":false,\"cameras\":[";
+  for (int i = 0; i < count; i++) {
+    if (i) json += ",";
+    const bool up = cameraAttached(scanHits[i].mac);
+    json += "{\"mac\":\"" + String(scanHits[i].mac) + "\",\"name\":\"" + jsonEscape(String(scanHits[i].name)) + "\",\"rssi\":" + String(scanHits[i].rssi) + ",\"attached\":" + (up ? "true" : "false") + "}";
+  }
+  json += "]}";
+  lastScanJson = json;
+  Serial.printf("주변 고프로·액션5 %d대를 찾았습니다.\n", count);
+}
+
+// 찾기는 웹 요청 안에서 기다리지 않습니다. 결과가 나오면 다음 요청이 가져갑니다.
+void serviceScan() {
+  if (scanWanted && !scanRunning) {
+    if (bleBusy) return;
+    ensureBleStack();
+    bleBusy = true;
+    scanCount = 0;
+    memset(scanHits, 0, sizeof(scanHits));
+    NimBLEScan* scan = NimBLEDevice::getScan();
+    scan->setScanCallbacks(&goProScanCallbacks, false);
+    scan->setActiveScan(true);
+    scan->setInterval(100);
+    scan->setWindow(99);
+    scan->setDuplicateFilter(1);
+    if (!scan->start(3000, false, true)) {
+      bleBusy = false;
+      scanWanted = false;
+      lastScanJson = "{\"ok\":false,\"pending\":false,\"cameras\":[],\"detail\":\"블루투스 찾기를 시작하지 못했습니다\"}";
+      return;
+    }
+    scanWanted = false;
+    scanRunning = true;
+    scanBegan = millis();
+  }
+  if (!scanRunning) return;
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  if (scan->isScanning() && millis() - scanBegan < 4000) return;
+  if (scan->isScanning()) scan->stop();
+  scan->clearResults();
+  finishScanJson();
+  scanRunning = false;
+  bleBusy = false;
+}
+
+// 주변 고프로·액션 5 프로의 블루투스 맥 주소를 최대 4개 모읍니다. 아이폰은 이 번호를 직접 읽지 못합니다.
+void handleScan() {
+  const bool startNow = server.hasArg("start");
+  if (startNow && !scanRunning) {
+    if (bleBusy) {
+      sendJson(503, false, "", "scan", "이미 카메라와 이야기하는 중입니다", "");
+      return;
+    }
+    scanWanted = true;
+    lastScanJson = "";
+    server.send(200, "application/json", "{\"ok\":true,\"pending\":true,\"cameras\":[]}");
+    return;
+  }
+  if (scanWanted || scanRunning || !lastScanJson.length()) {
+    server.send(200, "application/json", "{\"ok\":true,\"pending\":true,\"cameras\":[]}");
+    return;
+  }
+  server.send(200, "application/json", lastScanJson);
+}
+
+bool readVarint(const uint8_t* data, size_t len, size_t& index, uint32_t& value) {
+  value = 0;
+  int shift = 0;
+  while (index < len && shift <= 28) {
+    const uint8_t byte = data[index++];
+    value |= (uint32_t)(byte & 0x7F) << shift;
+    if ((byte & 0x80) == 0) return true;
+    shift += 7;
+  }
+  return false;
+}
+
+struct FoundPreset {
+  int id = -1;
+  int titleId = -1;
+  char name[24];
+};
+
+void readPresetMessage(const uint8_t* data, size_t len, FoundPreset& hit) {
+  memset(hit.name, 0, sizeof(hit.name));
+  size_t index = 0;
+  while (index < len) {
+    uint32_t key = 0;
+    if (!readVarint(data, len, index, key)) return;
+    const uint32_t field = key >> 3;
+    const uint32_t wire = key & 7;
+    if (wire == 0) {
+      uint32_t number = 0;
+      if (!readVarint(data, len, index, number)) return;
+      if (field == 1) hit.id = (int)number;
+      if (field == 3) hit.titleId = (int)number;
+    } else if (wire == 2) {
+      uint32_t size = 0;
+      if (!readVarint(data, len, index, size)) return;
+      if (index + size > len) return;
+      if (field == 10 && size > 0 && size < sizeof(hit.name)) {
+        memcpy(hit.name, data + index, size);
+        hit.name[size] = 0;
+      }
+      index += size;
+    } else if (wire == 5) {
+      index += 4;
+    } else if (wire == 1) {
+      index += 8;
+    } else {
+      return;
+    }
+  }
+}
+
+int collectPresets(const uint8_t* data, size_t len, FoundPreset* out, int maxOut) {
+  int count = 0;
+  size_t index = 0;
+  if (len >= 2 && data[0] == 0xF5 && data[1] == 0xF2) index = 2;
+  while (index < len && count < maxOut) {
+    uint32_t key = 0;
+    if (!readVarint(data, len, index, key)) break;
+    const uint32_t field = key >> 3;
+    const uint32_t wire = key & 7;
+    if (wire == 0) {
+      uint32_t ignored = 0;
+      if (!readVarint(data, len, index, ignored)) break;
+      continue;
+    }
+    if (wire != 2) break;
+    uint32_t size = 0;
+    if (!readVarint(data, len, index, size) || index + size > len) break;
+    if (field == 1) {
+      const uint8_t* group = data + index;
+      size_t cursor = 0;
+      while (cursor < size && count < maxOut) {
+        uint32_t groupKey = 0;
+        if (!readVarint(group, size, cursor, groupKey)) break;
+        const uint32_t groupField = groupKey >> 3;
+        const uint32_t groupWire = groupKey & 7;
+        if (groupWire == 0) {
+          uint32_t ignored = 0;
+          if (!readVarint(group, size, cursor, ignored)) break;
+          continue;
+        }
+        if (groupWire != 2) break;
+        uint32_t presetSize = 0;
+        if (!readVarint(group, size, cursor, presetSize) || cursor + presetSize > size) break;
+        if (groupField == 2) {
+          FoundPreset hit;
+          readPresetMessage(group + cursor, presetSize, hit);
+          if (hit.id >= 0) out[count++] = hit;
+        }
+        cursor += presetSize;
+      }
+    }
+    index += size;
+  }
+  return count;
+}
+
+bool gatherNotifies(CamSlot& cam, NimBLERemoteCharacteristic* writeTo, const uint8_t* body, size_t bodyLen,
+                    uint8_t* out, size_t& outLen, size_t outMax) {
+  outLen = 0;
+  auto take = [&](const uint8_t* chunk, size_t chunkLen) {
+    if (chunkLen >= 2 && (chunk[0] & 0xE0) == 0x20) {
+      chunk += 2;
+      chunkLen -= 2;
+    } else if (chunkLen >= 1 && (chunk[0] & 0x80) != 0) {
+      chunk += 1;
+      chunkLen -= 1;
+    }
+    if (chunkLen == 0 || outLen >= outMax) return;
+    if (outLen + chunkLen > outMax) chunkLen = outMax - outLen;
+    memcpy(out + outLen, chunk, chunkLen);
+    outLen += chunkLen;
+  };
+  String ignored;
+  const int slot = (int)(&cam - cams);
+  waitingSlot = slot;
+  const bool wrote = writeFramed(cam, writeTo, body, bodyLen, 500, ignored, true);
+  if (notifyLen > 0) take(notifyBuf, notifyLen);
+  waitingSlot = slot;
+  gotNotify = false;
+  const uint32_t started = millis();
+  while (wrote && millis() - started < 900 && outLen + 8 < outMax) {
+    if (!gotNotify) {
+      delay(15);
+      continue;
+    }
+    gotNotify = false;
+    take(notifyBuf, notifyLen);
+  }
+  waitingSlot = -1;
+  return wrote && outLen > 0;
+}
+
+void handleCameraPresets() {
+  if (!server.hasArg("mac")) {
+    sendJson(400, false, "", "presets", "mac 이 필요합니다", "");
+    return;
+  }
+  const String mac = normalizeMac(server.arg("mac"));
+  if (!mac.length() || bleBusy) {
+    sendJson(bleBusy ? 503 : 400, false, mac, "presets", bleBusy ? "이미 카메라와 이야기하는 중입니다" : "맥 주소 형식이 아닙니다", "");
+    return;
+  }
+  bleBusy = true;
+  String detail;
+  int slot = -1;
+  if (!prepareSession(mac, slot, detail) || slot < 0 || !cams[slot].queryChar) {
+    bleBusy = false;
+    sendJson(502, false, mac, "presets", "카메라 질의 특성을 찾지 못했거나 연결하지 못했습니다", "");
+    return;
+  }
+  const uint8_t body[] = {0xF5, 0x72, 0x18, 0x01, 0x20, 0x01};
+  uint8_t raw[480];
+  size_t rawLen = 0;
+  waitingSlot = slot;
+  const bool heard = gatherNotifies(cams[slot], cams[slot].queryChar, body, sizeof(body), raw, rawLen, sizeof(raw));
+  waitingSlot = -1;
+  bleBusy = false;
+  FoundPreset found[12];
+  const int count = heard ? collectPresets(raw, rawLen, found, 12) : 0;
+  String json = "{\"ok\":true,\"presets\":[";
+  for (int i = 0; i < count; i++) {
+    if (i) json += ",";
+    json += "{\"id\":" + String(found[i].id) + ",\"titleId\":" + String(found[i].titleId) + ",\"name\":\"" + jsonEscape(String(found[i].name)) + "\"}";
+  }
+  json += "]}";
+  server.send(200, "application/json", json);
+  Serial.printf("카메라 프리셋 %d개\n", count);
+}
+
+void handleCameraPresetLoad() {
+  if (!server.hasArg("mac") || !server.hasArg("id")) {
+    sendJson(400, false, "", "load", "mac 과 id 가 필요합니다", "");
+    return;
+  }
+  const String mac = normalizeMac(server.arg("mac"));
+  const int presetId = server.arg("id").toInt();
+  if (!mac.length() || bleBusy) {
+    sendJson(bleBusy ? 503 : 400, false, mac, "load", bleBusy ? "이미 카메라와 이야기하는 중입니다" : "맥 주소 형식이 아닙니다", "");
+    return;
+  }
+  bleBusy = true;
+  String detail;
+  int slot = -1;
+  if (!prepareSession(mac, slot, detail)) {
+    bleBusy = false;
+    sendJson(502, false, mac, "load", detail, "");
+    return;
+  }
+  const uint8_t body[] = {
+    0x40,
+    (uint8_t)((presetId >> 24) & 0xFF),
+    (uint8_t)((presetId >> 16) & 0xFF),
+    (uint8_t)((presetId >> 8) & 0xFF),
+    (uint8_t)(presetId & 0xFF),
+  };
+  String responseHex;
+  const bool notified = writeFramed(cams[slot], cams[slot].commandChar, body, sizeof(body), kCommandWaitMs, responseHex, true);
+  bleBusy = false;
+  sendJson(notified ? 200 : 502, notified, mac, "load", notified ? "카메라 프리셋을 불렀습니다" : "카메라가 프리셋 불러오기에 답하지 않았습니다", responseHex);
+}
+
+void handleCameraSetting() {
+  if (!server.hasArg("mac") || !server.hasArg("setting") || !server.hasArg("option")) {
+    sendJson(400, false, "", "setting", "mac, setting, option 이 필요합니다", "");
+    return;
+  }
+  const String mac = normalizeMac(server.arg("mac"));
+  const int setting = server.arg("setting").toInt();
+  const int option = server.arg("option").toInt();
+  if (!mac.length() || setting < 0 || setting > 255 || option < 0 || option > 255 || bleBusy) {
+    sendJson(400, false, mac, "setting", "설정 번호가 범위 밖이거나 지금 바쁠 수 있습니다", "");
+    return;
+  }
+  bleBusy = true;
+  String detail;
+  int slot = -1;
+  if (!prepareSession(mac, slot, detail) || !cams[slot].commandChar) {
+    bleBusy = false;
+    sendJson(502, false, mac, "setting", detail, "");
+    return;
+  }
+  const uint8_t body[] = {0x03, (uint8_t)setting, (uint8_t)option};
+  String responseHex;
+  const bool notified = writeFramed(cams[slot], cams[slot].commandChar, body, sizeof(body), kCommandWaitMs, responseHex, true);
+  bleBusy = false;
+  sendJson(notified ? 200 : 502, notified, mac, "setting", notified ? "카메라 설정을 보냈습니다" : "카메라가 설정에 답하지 않았습니다", responseHex);
+}
+
 void startServerOnce() {
   if (serverStarted) return;
   server.on("/", HTTP_GET, handleRoot);
   server.on("/shutter", HTTP_GET, handleShutter);
+  server.on("/presets", HTTP_GET, handleCameraPresets);
+  server.on("/preset/load", HTTP_GET, handleCameraPresetLoad);
+  server.on("/setting", HTTP_GET, handleCameraSetting);
+  server.on("/scan", HTTP_GET, handleScan);
   server.begin();
   serverStarted = true;
   Serial.println("HTTP 80번 포트를 열었습니다.");
-  Serial.printf("상태 주소: http://%s/\n", WiFi.localIP().toString().c_str());
+  Serial.printf("직접 연결 주소: http://%s/\n", directIpText().c_str());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("와이파이 주소: http://%s/\n", WiFi.localIP().toString().c_str());
+  }
+  publishBoard();
 }
 
 void setup() {
@@ -486,24 +958,26 @@ void setup() {
   Serial.println("액션5 브리지 시작");
   Serial.println("NimBLE로 고프로를 최대 4대까지 등록합니다. 8대 동기 촬영은 이 보드에서 되지 않습니다.");
   WiFi.persistent(false);
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);
-  delay(100);
-  shareRadio();
-  if (connectWifi()) startServerOnce();
+  WiFi.setAutoReconnect(true);
+  ensureDirect();
+  startServerOnce();
+  connectWifi();
   nextWifiTryMs = millis() + kWifiRetryGapMs;
 }
 
 void loop() {
+  ensureDirect();
+  if (!serverStarted) startServerOnce();
   if (WiFi.status() != WL_CONNECTED) {
+    stopBoardName();
     if ((int32_t)(millis() - nextWifiTryMs) >= 0) {
-      if (connectWifi()) startServerOnce();
+      connectWifi();
       nextWifiTryMs = millis() + kWifiRetryGapMs;
     }
-  } else if (!serverStarted) {
-    shareRadio();
-    startServerOnce();
+  } else if (!mdnsUp) {
+    publishBoard();
   }
   server.handleClient();
+  serviceScan();
   serviceKeepAlive();
 }
