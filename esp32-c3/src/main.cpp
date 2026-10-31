@@ -22,7 +22,8 @@
  * 1. WIFI_SSID_1
  * 2. 실패하면 WIFI_SSID_2
  * 집 공유기가 없어도 기판이 자기 이름 Ronin-C3 로 직접 연결을 엽니다.
- * 그 주소는 192.168.4.1 입니다. 직접 연결 비밀번호는 없습니다.
+ * 기판 주소는 192.168.100.200 입니다. 집 망에 붙을 때도 같은 주소입니다.
+ * 직접 연결 비밀번호는 없습니다. 카메라는 이 주소로 붙지 않고 블루투스로만 붙습니다.
  * 비밀번호는 시리얼로 찍지 않습니다.
  *
  * 아이패드 호출 예:
@@ -201,25 +202,35 @@ int registeredCount() {
   return n;
 }
 
+static const IPAddress kRelayIp(192, 168, 100, 200);
+static const IPAddress kRelayGateway(192, 168, 100, 1);
+static const IPAddress kRelayMask(255, 255, 255, 0);
+static const IPAddress kRelayDhcp(192, 168, 100, 201);
+
 void ensureDirect() {
   if (WiFi.getMode() != WIFI_AP_STA) WiFi.mode(WIFI_AP_STA);
-  const IPAddress now = WiFi.softAPIP();
-  if (now != IPAddress(0, 0, 0, 0)) return;
-  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  if (WiFi.softAPIP() == kRelayIp) return;
+  WiFi.softAPConfig(kRelayIp, kRelayIp, kRelayMask, kRelayDhcp);
   const bool up = WiFi.softAP(kDirectSsid);
+  if (WiFi.softAPIP() != kRelayIp) WiFi.softAPConfig(kRelayIp, kRelayIp, kRelayMask, kRelayDhcp);
   shareRadio();
-  Serial.printf("직접 연결 %s %s\n", kDirectSsid, up ? WiFi.softAPIP().toString().c_str() : "열지 못했습니다");
+  Serial.printf("직접 연결 %s %s\n", kDirectSsid, up ? kRelayIp.toString().c_str() : "열지 못했습니다");
+}
+
+void pinRelayAddress() {
+  WiFi.config(kRelayIp, kRelayGateway, kRelayMask, kRelayGateway);
 }
 
 String directIpText() {
   const IPAddress ip = WiFi.softAPIP();
-  if (ip == IPAddress(0, 0, 0, 0)) return "192.168.4.1";
+  if (ip == IPAddress(0, 0, 0, 0)) return kRelayIp.toString();
   return ip.toString();
 }
 
 bool joinOne(const char* ssid) {
   Serial.printf("Wi-Fi 연결 시도: %s\n", ssid);
   ensureDirect();
+  pinRelayAddress();
   shareRadio();
   WiFi.begin(ssid, WIFI_PASS);
   const uint32_t started = millis();
