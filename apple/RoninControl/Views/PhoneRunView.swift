@@ -44,7 +44,7 @@ struct PhoneRunView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("카메라 와이파이에는 붙지 않습니다. 기판이 블루투스로 카메라를 찾습니다.")
+            Text("카메라 와이파이 정보 화면에는 붙지 않습니다. 고프로는 장치 연결을 연 채로 두세요. 액션 5 프로에는 일반 블루투스 항목이 없습니다. 블루투스 리모컨 화면을 연 채로 두면, 그 동안 기판이 블루투스 리모컨으로 붙습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(connecting ? "연결 중" : "지금 연결") {
@@ -76,7 +76,7 @@ struct PhoneRunView: View {
             } else if found.isEmpty {
                 Text(emptyLine)
                     .font(.subheadline)
-                Text("카메라를 페어링에 둔 뒤 지금 연결을 다시 누르세요.")
+                Text("고프로는 장치 연결, 액션 5 프로는 블루투스 리모컨을 연 뒤 지금 연결을 다시 누르세요.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -96,7 +96,7 @@ struct PhoneRunView: View {
         case .unreachable:
             return "기판에 닿지 못했습니다."
         case .nonePairing:
-            return "기판에는 닿았고, 페어링 중인 카메라는 없습니다."
+            return "기판에는 닿았고, 장치 연결이나 블루투스 리모컨 화면의 카메라는 없습니다."
         case .cameras, .none:
             return "아직 찾지 않았습니다. 지금 연결을 누르세요."
         }
