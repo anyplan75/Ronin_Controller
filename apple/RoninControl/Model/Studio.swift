@@ -137,6 +137,55 @@ final class Studio: ObservableObject {
         }
     }
 
+    var roninC3: C3BoardRecord? {
+        profile.c3Boards.first { $0.duty == .ronin }
+    }
+
+    /// 올리멕스 ESP32-PoE 를 스튜디오 기판으로 등록합니다. 액션 카메라는 이 기판 블루투스입니다.
+    func registerOlimex() {
+        if profile.olimexRegistered {
+            note("올리멕스 ESP32-PoE 는 이미 등록되어 있습니다.")
+            return
+        }
+        profile.olimexRegistered = true
+        if !profile.devices.contains(where: { $0.kind == .ronin }) {
+            let device = DeviceRecord(
+                id: UUID(),
+                name: "올리멕스 ESP32-PoE",
+                kind: .ronin,
+                osmoModel: .unknown,
+                host: BoardLane.poe.host,
+                port: BoardLane.poe.port,
+                bleIdentifier: "",
+                enabled: true,
+                pairedOnce: false
+            )
+            profile.devices.append(device)
+            profile.groupIds.append(device.id)
+        }
+        note("올리멕스 ESP32-PoE 를 등록했습니다. PoE 또는 와이파이 웹소켓, 액션 카메라, 화면의 나머지를 이 기판이 맡습니다.")
+    }
+
+    /// C3 를 하나 등록합니다. 고른 일만 하고, 액션 카메라는 맡지 않습니다.
+    func registerC3(_ job: C3Job) {
+        if job == .ronin, roninC3 != nil {
+            note("로닌 제어 C3 는 한 대만 등록합니다.")
+            return
+        }
+        let board = C3BoardRecord(
+            id: UUID(),
+            name: job == .ronin ? "C3 로닌" : "C3 울란지 VL120BI",
+            job: job.rawValue
+        )
+        profile.c3Boards.append(board)
+        note("\(board.name) 을 등록했습니다. 이 C3 는 \(job.title)만 합니다.")
+    }
+
+    func deleteC3(_ id: UUID) {
+        profile.c3Boards.removeAll { $0.id == id }
+        note("C3 를 목록에서 뺐습니다.")
+    }
+
     func addDevice(_ product: DeviceProduct) {
         guard profile.devices.count < StudioProfile.maxDevices else {
             note("장치는 8대까지입니다.")
@@ -386,18 +435,22 @@ final class Studio: ObservableObject {
             note("연습: \(device.name) \(slot.role.title) \(start ? "촬영" : "정지")")
             return
         }
+        guard profile.olimexRegistered else {
+            note("액션 카메라는 올리멕스 기판에서만 녹화합니다. C3 는 그 일을 맡지 않습니다.")
+            return
+        }
         let ble = slot.role == .action5 ? "FFF0" : "FEA6"
         let ok = await boardSocket.send([
             "op": "record-one",
             "id": cameraId.uuidString,
-            "name": slot.advertisedName,
+            "name": slot.advertisedName.isEmpty ? slot.role.title : slot.advertisedName,
             "ble": ble,
             "start": start,
         ])
         if ok {
-            note("\(slot.role.title) \(start ? "녹화" : "정지")를 기판 소켓으로 보냈습니다.")
+            note("\(slot.role.title) \(start ? "녹화" : "정지")를 올리멕스 소켓으로 보냈습니다.")
         } else {
-            noteOffline("기판이 오프라인입니다. 이 카메라 녹화를 보내지 않았습니다.")
+            noteOffline("올리멕스가 오프라인입니다. 이 카메라 녹화를 보내지 않았습니다.")
         }
     }
 
@@ -442,6 +495,14 @@ final class Studio: ObservableObject {
     /// 휠이 가리키는 각도로 옮깁니다. 손을 떼도 그 각도에 남고, 중앙으로 되돌리지 않습니다.
     func roninPlace(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }
+        if let board = roninC3 {
+            noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 팬과 틸트를 보내지 않았습니다.")
+            return
+        }
+        guard profile.olimexRegistered else {
+            noteOffline("로닌은 올리멕스 기판 또는 로닌 담당 C3 가 있을 때 움직입니다.")
+            return
+        }
         let ok = await boardSocket.send([
             "op": "ronin",
             "id": device.id.uuidString,
@@ -457,6 +518,7 @@ final class Studio: ObservableObject {
     /// 오른쪽 휠의 위아래입니다. 성공 기록은 남기지 않습니다. 좌우는 아직 보내지 않습니다.
     func roninZoom(_ device: DeviceRecord, path: String) async {
         if profile.practice { return }
+        if roninC3 != nil || !profile.olimexRegistered { return }
         _ = await boardSocket.send([
             "op": "ronin",
             "id": device.id.uuidString,
@@ -467,6 +529,7 @@ final class Studio: ObservableObject {
     /// 스틱을 누르고 있는 동안 팬·틸트 속도를 다시 보냅니다. 성공 기록은 남기지 않습니다.
     func roninSpeed(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }
+        if roninC3 != nil || !profile.olimexRegistered { return }
         _ = await boardSocket.send([
             "op": "ronin",
             "id": device.id.uuidString,
@@ -479,6 +542,7 @@ final class Studio: ObservableObject {
     /// 휠을 누르는 동안만 보냅니다. 성공 기록은 남기지 않아 로그가 넘치지 않습니다.
     func roninHold(_ device: DeviceRecord, path: String?) async {
         if profile.practice { return }
+        if roninC3 != nil || !profile.olimexRegistered { return }
         _ = await boardSocket.send([
             "op": "ronin",
             "id": device.id.uuidString,
@@ -505,6 +569,14 @@ final class Studio: ObservableObject {
             note("연습: \(device.name) \(path)")
             return
         }
+        if let board = roninC3 {
+            noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 \(path) 를 보내지 않았습니다.")
+            return
+        }
+        guard profile.olimexRegistered else {
+            noteOffline("로닌 명령은 올리멕스 기판 또는 로닌 담당 C3 가 있을 때 보냅니다.")
+            return
+        }
         var payload: [String: Any] = [
             "op": "ronin",
             "id": device.id.uuidString,
@@ -526,6 +598,10 @@ final class Studio: ObservableObject {
         let label = group == "all" ? "모두" : group
         if profile.practice {
             note("연습: \(label) \(start ? "녹화" : "정지"). 기판에 보내지 않았습니다.")
+            return
+        }
+        guard profile.olimexRegistered else {
+            note("액션 카메라 녹화는 올리멕스 기판만 합니다. 먼저 올리멕스를 등록하세요.")
             return
         }
         let ids: [String]
@@ -551,9 +627,43 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// 액션 카메라 한 대의 녹화입니다. 올리멕스 웹소켓으로만 보냅니다.
+    func olimexCamera(_ camera: BoardCamera, start: Bool) async {
+        guard profile.olimexRegistered else {
+            note("액션 카메라는 올리멕스 기판에 있습니다. 먼저 등록하세요.")
+            return
+        }
+        let ok = await boardSocket.send([
+            "op": "record-one",
+            "id": camera.id,
+            "name": camera.name,
+            "kind": camera.kind,
+            "ble": camera.ble,
+            "start": start,
+        ])
+        if ok {
+            note("\(camera.name) \(start ? "녹화" : "정지")를 올리멕스 소켓으로 보냈습니다.")
+        } else {
+            noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
+        }
+    }
+
+    /// 조명 C3 만 받는 명령입니다. 연결이 없으면 보내지 않고, 연결됨으로 바꾸지 않습니다.
+    func setLight(_ id: UUID, brightness: Int, kelvin: Int, on: Bool) async {
+        guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
+            note("조명 담당 C3 를 찾지 못했습니다.")
+            return
+        }
+        note("\(board.name) 은 조명만 담당합니다. 연결이 없어 밝기 \(brightness), 색온도 \(kelvin)K, \(on ? "켜기" : "끄기")를 보내지 않았습니다.")
+    }
+
     func sendCameraSetting(id: String, kind: String, ble: String, setting: String, value: String) async {
         if profile.practice {
             note("연습: 카메라 설정을 보내지 않았습니다.")
+            return
+        }
+        guard profile.olimexRegistered else {
+            note("카메라 설정은 올리멕스 기판으로만 보냅니다. 먼저 등록하세요.")
             return
         }
         let ok = await boardSocket.send([

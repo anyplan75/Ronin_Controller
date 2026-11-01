@@ -8,6 +8,9 @@ struct PhoneRunView: View {
     @State private var showSettings = false
     @State private var fov = "와이드"
     @State private var resolution = "1080p"
+    @State private var askC3Job = false
+    @State private var lightLevel: [UUID: Double] = [:]
+    @State private var lightKelvin: [UUID: Double] = [:]
 
     private let canvas = StagePalette.paper
     private let rowFill = Color.white.opacity(0.72)
@@ -16,8 +19,12 @@ struct PhoneRunView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    controls
-                    names
+                    register
+                    if studio.profile.olimexRegistered {
+                        controls
+                        names
+                    }
+                    c3Jobs
                     LogList()
                         .padding(12)
                         .background(rowFill, in: RoundedRectangle(cornerRadius: 12))
@@ -32,10 +39,65 @@ struct PhoneRunView: View {
             .sheet(isPresented: $showSettings) {
                 settingsSheet
             }
+            .confirmationDialog("이 C3 의 일", isPresented: $askC3Job, titleVisibility: .visible) {
+                Button("로닌 제어") { studio.registerC3(.ronin) }
+                Button("조명 · 울란지 VL120BI") { studio.registerC3(.light) }
+                Button("취소", role: .cancel) {}
+            } message: {
+                Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
+            }
         }
         .background(canvas)
         .foregroundStyle(StagePalette.ink)
         .preferredColorScheme(.light)
+    }
+
+    private var register: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("기판 등록")
+                .font(.subheadline.weight(.semibold))
+            Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
+                .buttonStyle(.bordered)
+            Button("C3") { askC3Job = true }
+                .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(rowFill, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var c3Jobs: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(studio.profile.c3Boards) { board in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(board.name)
+                        .font(.subheadline.weight(.semibold))
+                    Text("이 C3 는 \(board.duty.title)만 합니다. 액션 카메라는 다루지 않습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if board.duty == .light {
+                        let level = lightLevel[board.id] ?? 40
+                        let kelvin = lightKelvin[board.id] ?? 4500
+                        Text("밝기 \(Int(level))  색온도 \(Int(kelvin))K")
+                            .font(.caption2)
+                        Slider(value: Binding(get: { lightLevel[board.id] ?? 40 }, set: { lightLevel[board.id] = $0 }), in: 0...100, step: 1)
+                        Slider(value: Binding(get: { lightKelvin[board.id] ?? 4500 }, set: { lightKelvin[board.id] = $0 }), in: 2500...6500, step: 100)
+                        HStack {
+                            Button("켜기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: true) } }
+                            Button("끄기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: false) } }
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Text("연결이 없으면 오프라인입니다. 로닌 팬과 틸트만 이 기판으로 갑니다.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
     }
 
     private var controls: some View {

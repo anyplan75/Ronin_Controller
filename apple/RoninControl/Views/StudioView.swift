@@ -24,6 +24,9 @@ struct StudioView: View {
     @State private var showSettings = false
     @State private var presetEditor: UUID?
     @State private var pendingPresetDelete: UUID?
+    @State private var askC3Job = false
+    @State private var lightLevel: [UUID: Double] = [:]
+    @State private var lightKelvin: [UUID: Double] = [:]
 
     var body: some View {
         NavigationSplitView {
@@ -34,19 +37,59 @@ struct StudioView: View {
                             .tag(StudioPick.device(device.id))
                     }
                 }
-                Section("액션 카메라 · 기판 블루투스") {
-                    ForEach(studio.profile.devices.filter { $0.kind != .ronin }) { device in
-                        deviceHeader(device)
-                            .tag(StudioPick.device(device.id))
-                        if device.kind == .goproBridge {
-                            ForEach(Array(device.cameras.enumerated()), id: \.element.id) { index, camera in
-                                cameraHeader(device, index: index, camera: camera)
-                                    .tag(StudioPick.camera(device.id, camera.id))
-                            }
-                            if device.cameras.count < 4 {
-                                Button("카메라 추가") { studio.addCamera(device.id) }
+                Section("등록한 기판") {
+                    if studio.profile.olimexRegistered {
+                        Text("올리멕스 ESP32-PoE")
+                        Text(link.state == .online ? link.detail : "오프라인")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(studio.profile.c3Boards) { board in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text(board.name)
+                                Spacer()
+                                Button("삭제", role: .destructive) { studio.deleteC3(board.id) }
                                     .buttonStyle(.borderless)
                             }
+                            Text("이 C3 는 \(board.duty.title)만 합니다.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if board.duty == .light {
+                                lightControls(board)
+                            } else {
+                                Text("로닌 팬과 틸트만 이 기판으로 갑니다. 액션 카메라와 PoE 는 움직이지 않습니다. 연결이 없으면 오프라인입니다.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Section("액션 카메라 · 올리멕스") {
+                    if !studio.profile.olimexRegistered {
+                        Text("올리멕스를 등록하면 액션 카메라가 여기 나옵니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if link.state != .online {
+                        Text("올리멕스 웹소켓이 오프라인입니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if link.cameras.isEmpty {
+                        Text("기판에는 닿았고, 블루투스로 붙은 카메라는 없습니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(link.cameras) { camera in
+                            HStack {
+                                Text(camera.name)
+                                Text(camera.ble)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("녹화") { Task { await studio.olimexCamera(camera, start: true) } }
+                                Button("정지") { Task { await studio.olimexCamera(camera, start: false) } }
+                            }
+                            .buttonStyle(.borderless)
                         }
                     }
                 }
@@ -66,6 +109,13 @@ struct StudioView: View {
         .preferredColorScheme(.light)
         .safeAreaInset(edge: .top) {
             transportBar
+        }
+        .confirmationDialog("이 C3 의 일", isPresented: $askC3Job, titleVisibility: .visible) {
+            Button("로닌 제어") { studio.registerC3(.ronin) }
+            Button("조명 · 울란지 VL120BI") { studio.registerC3(.light) }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
         }
         .alert("컴패니언 페이지", isPresented: $showCompanionNote) {
             Button("파일 저장") { showCompanion = true }
@@ -160,12 +210,10 @@ struct StudioView: View {
             }
         }
         ToolbarItem {
-            Menu("장치 추가") {
-                ForEach(DeviceProduct.addMenu) { product in
-                    Button(product.label) { studio.addDevice(product) }
-                }
+            Menu("기판 등록") {
+                Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
+                Button("C3") { askC3Job = true }
             }
-            .disabled(studio.profile.devices.count >= StudioProfile.maxDevices)
         }
         ToolbarItem {
             Menu("프리셋 추가") {
@@ -211,8 +259,14 @@ struct StudioView: View {
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 280)
-                Button(link.state == .connecting ? "연결 중" : "지금 연결") { link.connect() }
-                    .disabled(link.state == .connecting)
+                Button(link.state == .connecting ? "연결 중" : "지금 연결") {
+                    guard studio.profile.olimexRegistered else {
+                        studio.note("먼저 올리멕스 ESP32-PoE 를 등록하세요.")
+                        return
+                    }
+                    link.connect()
+                }
+                    .disabled(link.state == .connecting || !studio.profile.olimexRegistered)
                 Button("모두 녹화") { Task { await studio.fieldRecord(group: "all", start: true) } }
                 Button("모두 정지") { Task { await studio.fieldRecord(group: "all", start: false) } }
             }
@@ -227,6 +281,31 @@ struct StudioView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .background(.bar)
+    }
+
+    private func lightControls(_ board: C3BoardRecord) -> some View {
+        let level = lightLevel[board.id] ?? 40
+        let kelvin = lightKelvin[board.id] ?? 4500
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("밝기 \(Int(level))")
+                .font(.caption2)
+            Slider(value: Binding(
+                get: { lightLevel[board.id] ?? 40 },
+                set: { lightLevel[board.id] = $0 }
+            ), in: 0...100, step: 1)
+            Text("색온도 \(Int(kelvin))K")
+                .font(.caption2)
+            Slider(value: Binding(
+                get: { lightKelvin[board.id] ?? 4500 },
+                set: { lightKelvin[board.id] = $0 }
+            ), in: 2500...6500, step: 100)
+            HStack {
+                Button("켜기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: true) } }
+                Button("끄기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: false) } }
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+        }
     }
 
     private func prepareCompanion() {

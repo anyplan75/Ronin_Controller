@@ -572,6 +572,32 @@ struct StageSpot: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// C3 한 대가 맡는 일입니다. 한 대는 이 중 하나만 합니다.
+enum C3Job: String, Codable, CaseIterable, Identifiable, Sendable {
+    case ronin
+    case light
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ronin: return "로닌 제어"
+        case .light: return "조명 · 울란지 VL120BI"
+        }
+    }
+}
+
+/// 등록한 C3 입니다. 액션 카메라 기판이 아닙니다.
+struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var job: String
+
+    var duty: C3Job {
+        C3Job(rawValue: job) ?? .ronin
+    }
+}
+
 struct StudioProfile: Codable, Equatable, Sendable {
     static let maxDevices = 8
     static let storageKey = "[로닌컨트롤]_profile"
@@ -589,6 +615,10 @@ struct StudioProfile: Codable, Equatable, Sendable {
     var boardLane: String
     /// A, B, C 묶음입니다. 값은 장치 아이디입니다.
     var shootGroups: [String: [UUID]]
+    /// 스튜디오 화면의 올리멕스 ESP32-PoE 입니다. 액션 카메라는 이 기판에만 있습니다.
+    var olimexRegistered: Bool
+    /// 일을 하나씩 맡은 C3 입니다.
+    var c3Boards: [C3BoardRecord]
 
     init(
         version: Int,
@@ -601,7 +631,9 @@ struct StudioProfile: Codable, Equatable, Sendable {
         senderMac: [UInt8],
         stageSpots: [StageSpot] = [],
         boardLane: String = BoardLane.poe.rawValue,
-        shootGroups: [String: [UUID]] = [:]
+        shootGroups: [String: [UUID]] = [:],
+        olimexRegistered: Bool = false,
+        c3Boards: [C3BoardRecord] = []
     ) {
         self.version = version
         self.devices = devices
@@ -614,10 +646,12 @@ struct StudioProfile: Codable, Equatable, Sendable {
         self.stageSpots = stageSpots
         self.boardLane = boardLane
         self.shootGroups = shootGroups
+        self.olimexRegistered = olimexRegistered
+        self.c3Boards = c3Boards
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards
     }
 
     init(from decoder: Decoder) throws {
@@ -633,6 +667,8 @@ struct StudioProfile: Codable, Equatable, Sendable {
         stageSpots = try box.decodeIfPresent([StageSpot].self, forKey: .stageSpots) ?? []
         boardLane = try box.decodeIfPresent(String.self, forKey: .boardLane) ?? BoardLane.poe.rawValue
         shootGroups = try box.decodeIfPresent([String: [UUID]].self, forKey: .shootGroups) ?? [:]
+        olimexRegistered = try box.decodeIfPresent(Bool.self, forKey: .olimexRegistered) ?? false
+        c3Boards = try box.decodeIfPresent([C3BoardRecord].self, forKey: .c3Boards) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -648,6 +684,8 @@ struct StudioProfile: Codable, Equatable, Sendable {
         try box.encode(stageSpots, forKey: .stageSpots)
         try box.encode(boardLane, forKey: .boardLane)
         try box.encode(shootGroups, forKey: .shootGroups)
+        try box.encode(olimexRegistered, forKey: .olimexRegistered)
+        try box.encode(c3Boards, forKey: .c3Boards)
     }
 
     static func makeNew() -> StudioProfile {
