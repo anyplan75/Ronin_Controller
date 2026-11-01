@@ -492,6 +492,19 @@ final class Studio: ObservableObject {
         await refresh()
     }
 
+    /// 화면의 팬·틸트입니다. 로닌 담당 C3 가 있으면 올리멕스 소켓으로 보내지 않습니다.
+    func nudgeRonin(yaw: Double, pitch: Double) async {
+        if let device = profile.devices.first(where: { $0.kind == .ronin }) {
+            await roninPlace(device, yaw: yaw, pitch: pitch)
+            return
+        }
+        if let board = roninC3 {
+            noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 팬과 틸트를 보내지 않았습니다.")
+            return
+        }
+        noteOffline("로닌은 올리멕스 기판 또는 로닌 담당 C3 가 있을 때 움직입니다.")
+    }
+
     /// 휠이 가리키는 각도로 옮깁니다. 손을 떼도 그 각도에 남고, 중앙으로 되돌리지 않습니다.
     func roninPlace(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }

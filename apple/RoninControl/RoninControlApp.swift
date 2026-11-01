@@ -20,13 +20,7 @@ struct RootView: View {
     @EnvironmentObject private var studio: Studio
 
     var body: some View {
-        Group {
-            if FormFactor.phone {
-                PhoneRunView()
-            } else {
-                StudioView()
-            }
-        }
-        .task { await studio.refresh() }
+        StudioControlScreen()
+            .task { await studio.refresh() }
     }
 }
