@@ -12,7 +12,7 @@
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>오즈모 액션 카메라를 찾아 촬영 명령을 보냅니다.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>같은 와이파이에서 C3 중계 기판을 맥 주소로 찾아 바로 연결합니다. 로닌 기판에도 연결합니다.</string>
+	<string>올리멕스 ESP32-PoE 기판의 81번 웹소켓에 연결합니다. PoE는 192.168.0.150, 와이파이는 192.168.0.151 입니다.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_ronin-c3._tcp</string>

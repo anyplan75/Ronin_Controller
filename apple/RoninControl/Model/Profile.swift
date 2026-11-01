@@ -585,6 +585,10 @@ struct StudioProfile: Codable, Equatable, Sendable {
     var senderId: UInt32
     var senderMac: [UInt8]
     var stageSpots: [StageSpot]
+    /// poe 또는 wifi. 기판은 한 장이며 웹소켓 81번입니다.
+    var boardLane: String
+    /// A, B, C 묶음입니다. 값은 장치 아이디입니다.
+    var shootGroups: [String: [UUID]]
 
     init(
         version: Int,
@@ -595,7 +599,9 @@ struct StudioProfile: Codable, Equatable, Sendable {
         practice: Bool,
         senderId: UInt32,
         senderMac: [UInt8],
-        stageSpots: [StageSpot] = []
+        stageSpots: [StageSpot] = [],
+        boardLane: String = BoardLane.poe.rawValue,
+        shootGroups: [String: [UUID]] = [:]
     ) {
         self.version = version
         self.devices = devices
@@ -606,10 +612,12 @@ struct StudioProfile: Codable, Equatable, Sendable {
         self.senderId = senderId
         self.senderMac = senderMac
         self.stageSpots = stageSpots
+        self.boardLane = boardLane
+        self.shootGroups = shootGroups
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups
     }
 
     init(from decoder: Decoder) throws {
@@ -623,6 +631,8 @@ struct StudioProfile: Codable, Equatable, Sendable {
         senderId = try box.decode(UInt32.self, forKey: .senderId)
         senderMac = try box.decode([UInt8].self, forKey: .senderMac)
         stageSpots = try box.decodeIfPresent([StageSpot].self, forKey: .stageSpots) ?? []
+        boardLane = try box.decodeIfPresent(String.self, forKey: .boardLane) ?? BoardLane.poe.rawValue
+        shootGroups = try box.decodeIfPresent([String: [UUID]].self, forKey: .shootGroups) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -636,6 +646,8 @@ struct StudioProfile: Codable, Equatable, Sendable {
         try box.encode(senderId, forKey: .senderId)
         try box.encode(senderMac, forKey: .senderMac)
         try box.encode(stageSpots, forKey: .stageSpots)
+        try box.encode(boardLane, forKey: .boardLane)
+        try box.encode(shootGroups, forKey: .shootGroups)
     }
 
     static func makeNew() -> StudioProfile {

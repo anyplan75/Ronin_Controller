@@ -1,3 +1,4 @@
+import AVKit
 import SwiftUI
 
 /// 아이폰 무대입니다. 가운데 위는 방, 아래는 조작대, 오른쪽은 고른 장치입니다.
@@ -23,12 +24,12 @@ struct LiveStageView: View {
 /// 가운데를 위아래로 반씩 나눕니다. 위는 방, 아래 가운데는 조작대, 오른쪽은 상태입니다.
 struct StageConsole: View {
     @EnvironmentObject private var studio: Studio
+    @EnvironmentObject private var link: BoardSocket
     var initialId: UUID?
     @Binding var selected: UUID?
     @Binding var selectedCamera: UUID?
     @Binding var showSettings: Bool
 
-    @StateObject private var preview = GoProPreview()
     @State private var sticks: [UUID: CGSize] = [:]
     @State private var settingChoices: [Int: Int] = [:]
     @State private var osmoMode = 0x01
@@ -133,25 +134,6 @@ struct StageConsole: View {
             settingsSheet
                 .stagePopup()
         }
-        .task(id: device?.id) {
-            guard let device, device.kind.supportsLiveView else {
-                preview.stop()
-                return
-            }
-            if studio.profile.practice {
-                preview.stop()
-                preview.note = "연습 모드입니다. 미리보기를 받지 않습니다."
-                return
-            }
-            preview.open(device)
-            do {
-                while !Task.isCancelled {
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
-                }
-            } catch {
-                preview.stop()
-            }
-        }
     }
 
     /// 좁은 화면은 오른쪽을 조금 줄여 아래 휠이 남게 합니다.
@@ -164,19 +146,17 @@ struct StageConsole: View {
 
     private func bottomHalf(width: CGFloat, height: CGFloat) -> some View {
         VStack(spacing: 4) {
-            if let device, device.kind.supportsLiveView {
-                HStack(alignment: .center, spacing: 8) {
-                    livePicture(height: max(80, height - 16))
-                    shootControls
-                }
-            } else if let device, device.kind == .ronin {
-                roninController(device, height: max(72, height - 16))
+            if link.state != .online {
+                Text("오프라인. 기판 웹소켓이 열리기 전에는 실시간 그림을 열지 않습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if let device, device.kind == .ronin {
+                roninController(device, height: max(72, height - 28))
             } else {
                 HStack(alignment: .center, spacing: 8) {
-                    Text(bottomHint)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    MediaStrip(height: max(80, height - 28))
                     shootControls
                 }
             }
@@ -277,6 +257,8 @@ struct StageConsole: View {
             if let device {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
+                        Text(link.state == .online ? link.detail : "오프라인")
+                            .font(.caption.weight(.semibold))
                         GearHeader(device: device, camera: focusedCamera)
                         Text(device.name)
                             .font(.headline)
@@ -305,43 +287,15 @@ struct StageConsole: View {
         }
     }
 
-    private func livePicture(height: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("실시간 그림")
-                .font(.caption.weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-            ZStack {
-                StagePalette.paper
-                if let image = preview.image {
-                    Image(decorative: image, scale: 1)
-                        .resizable()
-                        .scaledToFit()
-                } else {
-                    Text(preview.note.isEmpty ? "카메라 영상을 기다리는 중입니다." : preview.note)
-                        .font(.caption2)
-                        .foregroundStyle(StagePalette.ink)
-                        .multilineTextAlignment(.center)
-                        .padding(8)
-                }
-            }
-            .overlay(Rectangle().stroke(StagePalette.ink.opacity(0.35), lineWidth: 1))
-            .frame(maxWidth: .infinity)
-            .frame(height: height)
-        }
-    }
-
     @ViewBuilder private func statusBlock(_ device: DeviceRecord) -> some View {
         switch device.kind {
         case .ronin:
-            if let status = studio.roninLive[device.id] {
-                Text("랜 \(status.ethLink == true ? "연결" : "끊김")  CAN \(status.twai ?? "-")")
-                Text(String(format: "요 %.1f  롤 %.1f  피치 %.1f", status.yaw ?? 0, status.roll ?? 0, status.pitch ?? 0))
-                Text("자세 \(status.attitudeValid == true ? "유효" : "없음")")
-                Text("녹화 명령 \(status.camRecording == true ? "시작" : "정지")")
-                Text("소니 녹화 \(status.sonyRecording == true ? "켜짐" : "꺼짐")")
+            if link.state != .online {
+                Text("오프라인")
+            } else if let yaw = link.yaw, let pitch = link.pitch {
+                Text(String(format: "팬 %.1f  틸트 %.1f", yaw, pitch))
             } else {
-                Text("아직 상태를 읽지 못했습니다.")
+                Text("소켓은 열려 있고, 각도는 아직 받지 못했습니다.")
             }
         case .goproBridge:
             Text(studio.bridgeWifiLine(device.id))
@@ -597,6 +551,69 @@ struct StageConsole: View {
                 Button("닫기") { showSettings = false }
             }
         }
+    }
+}
+
+/// 맥의 MediaMTX HLS 8888 입니다. 목록이 200이 아니면 그림을 열지 않습니다.
+struct MediaStrip: View {
+    @EnvironmentObject private var link: BoardSocket
+    var height: CGFloat
+    @State private var player: AVPlayer?
+    @State private var note = "조작만"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("실시간 그림")
+                .font(.caption.weight(.semibold))
+            ZStack {
+                StagePalette.paper
+                if let player {
+                    VideoPlayer(player: player)
+                } else {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(StagePalette.ink)
+                        .multilineTextAlignment(.center)
+                        .padding(8)
+                }
+            }
+            .overlay(Rectangle().stroke(StagePalette.ink.opacity(0.35), lineWidth: 1))
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+        }
+        .task(id: link.state) {
+            await load()
+        }
+    }
+
+    private func load() async {
+        player?.pause()
+        player = nil
+        guard link.state == .online else {
+            note = "오프라인"
+            return
+        }
+        #if os(macOS)
+        let stream = link.cameras.first?.id ?? "live"
+        guard let url = URL(string: "http://127.0.0.1:8888/\(stream)/index.m3u8") else {
+            note = "조작만"
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        request.httpMethod = "GET"
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            note = "맥 MediaMTX 8888 에 그림이 없습니다. 조작만 합니다."
+            return
+        }
+        let next = AVPlayer(url: url)
+        player = next
+        next.play()
+        note = ""
+        #else
+        note = "실시간 그림은 맥의 MediaMTX 8888 입니다. 여기서는 조작만 합니다."
+        #endif
     }
 }
 

@@ -101,6 +101,7 @@ final class Studio: ObservableObject {
     @Published var bridgePhase: [UUID: String] = [:]
     /// 와이파이 연결과 기판 직접 연결을 따로 둡니다. 숫자 주소는 프로필에 덮어쓰지 않습니다.
     @Published var bridgeLinks: [UUID: BridgeLinks] = [:]
+    let boardSocket = BoardSocket()
     let radio = OsmoRadio()
     private let c3 = C3Link()
     let frameOK = DjiRFrame.selfCheck()
@@ -122,6 +123,9 @@ final class Studio: ObservableObject {
             note("프레임 검사가 실패했습니다. 오즈모 명령 형식이 공식 예시와 다릅니다.")
         }
         applyFixedRoninAddress()
+        if let lane = BoardLane(rawValue: profile.boardLane) {
+            boardSocket.lane = lane
+        }
         Task { await bootBoards() }
         Task { await maintainGoProSessions() }
     }
@@ -167,6 +171,9 @@ final class Studio: ObservableObject {
         let name = profile.devices.first(where: { $0.id == id })?.name ?? "장치"
         profile.devices.removeAll { $0.id == id }
         profile.groupIds.removeAll { $0 == id }
+        for key in profile.shootGroups.keys {
+            profile.shootGroups[key]?.removeAll { $0 == id }
+        }
         profile.stageSpots.removeAll { $0.deviceId == id }
         for index in profile.presets.indices {
             profile.presets[index].deviceIds.removeAll { $0 == id }
@@ -366,62 +373,7 @@ final class Studio: ObservableObject {
     }
 
     func together(start: Bool) async {
-        let devices = grouped
-        guard !devices.isEmpty else {
-            note("선택된 장치가 없습니다.")
-            return
-        }
-        if profile.practice {
-            note("연습: 함께 \(start ? "시작" : "정지"). \(devices.map(\.name).joined(separator: ", ")). 장치에 보내지 않았습니다.")
-            return
-        }
-        let lead = min(10000, max(0, profile.leadMs))
-        let ronins = devices.filter { $0.kind == .ronin }
-        var samples: [UUID: ClockSample] = [:]
-        await withTaskGroup(of: (UUID, ClockSample)?.self) { group in
-            for device in ronins {
-                group.addTask { await GroupFire.clock(device) }
-            }
-            for await item in group {
-                if let item { samples[item.0] = item.1 }
-            }
-        }
-        let when = Date().addingTimeInterval(Double(max(lead, 50)) / 1000)
-        var lines: [String] = []
-        await withTaskGroup(of: String.self) { group in
-            for device in ronins {
-                let sample = samples[device.id]
-                group.addTask {
-                    await GroupFire.ronin(device, startRecording: start, when: when, sample: sample, lead: lead)
-                }
-            }
-            for device in devices where device.kind.isGoProFamily {
-                group.addTask { await GroupFire.gopro(device, startRecording: start, when: when) }
-            }
-            for await line in group { lines.append(line) }
-        }
-        lines.forEach(note)
-        let osmos = devices.filter { $0.kind == .osmoAction }
-        if osmos.count > 1 {
-            note("오즈모가 여러 대이면 블루투스 명령이 한 대씩 나가 시작이 조금 어긋날 수 있습니다.")
-        }
-        for device in osmos {
-            await GroupFire.wait(until: when)
-            note((await radio.record(device, start: start)).text)
-        }
-        let bridges = devices.filter { $0.kind == .goproBridge }
-        if bridges.contains(where: { $0.cameras.filter { BoardMac.isFull($0.mac) }.count > 1 }) {
-            note("C3 기판은 블루투스를 한 대씩만 쓰므로 카메라가 순서대로 출발합니다.")
-        }
-        for device in bridges {
-            await GroupFire.wait(until: when)
-            let lines = await GroupFire.bridge(commandDoor(device), startRecording: start)
-            lines.forEach(note)
-            await pullBoard(device)
-        }
-        for device in devices where device.kind == .osmoNoAPI {
-            note("\(device.name): 공개된 제어 API가 없어 함께 \(start ? "시작" : "정지")에서 빠졌습니다.")
-        }
+        await fieldRecord(group: "all", start: start)
     }
 
     /// 고른 카메라 한 대만 촬영합니다. 같은 기판의 다른 칸에는 보내지 않습니다.
@@ -434,31 +386,23 @@ final class Studio: ObservableObject {
             note("연습: \(device.name) \(slot.role.title) \(start ? "촬영" : "정지")")
             return
         }
-        guard BoardMac.isFull(slot.mac) else {
-            note("\(device.name) 고른 카메라의 맥 주소가 없습니다.")
-            return
-        }
-        let door = commandDoor(device)
-        guard !door.baseURLText.isEmpty else {
-            note("\(device.name) 와이파이와 직접 연결 모두 대답이 없습니다.")
-            return
-        }
-        do {
-            let text = try await C3Client.shutter(door, mac: slot.mac, start: start)
-            note("\(device.name) \(slot.role.title) \(text)")
-        } catch {
-            note("\(device.name) \(error.localizedDescription)")
+        let ble = slot.role == .action5 ? "FFF0" : "FEA6"
+        let ok = await boardSocket.send([
+            "op": "record-one",
+            "id": cameraId.uuidString,
+            "name": slot.advertisedName,
+            "ble": ble,
+            "start": start,
+        ])
+        if ok {
+            note("\(slot.role.title) \(start ? "녹화" : "정지")를 기판 소켓으로 보냈습니다.")
+        } else {
+            noteOffline("기판이 오프라인입니다. 이 카메라 녹화를 보내지 않았습니다.")
         }
     }
 
     func bridgeRecord(_ device: DeviceRecord, start: Bool) async {
-        if profile.practice {
-            note("연습: \(device.name) \(start ? "시작" : "정지")")
-            return
-        }
-        let lines = await GroupFire.bridge(commandDoor(device), startRecording: start)
-        lines.forEach(note)
-        await pullBoard(device)
+        await fieldRecord(group: "all", start: start)
     }
 
     func apply(_ preset: ShootPreset) async {
@@ -498,54 +442,48 @@ final class Studio: ObservableObject {
     /// 휠이 가리키는 각도로 옮깁니다. 손을 떼도 그 각도에 남고, 중앙으로 되돌리지 않습니다.
     func roninPlace(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }
-        do {
-            _ = try await RoninClient.command(device, path: "/move", query: [
-                "yaw": String(format: "%.2f", RoninTravel.clampYaw(yaw)),
-                "roll": "0",
-                "pitch": String(format: "%.2f", RoninTravel.clampPitch(pitch)),
-                "time": "0.35",
-            ])
-        } catch {
-            note("\(device.name) \(error.localizedDescription)")
+        let ok = await boardSocket.send([
+            "op": "ronin",
+            "id": device.id.uuidString,
+            "path": "/move",
+            "yaw": RoninTravel.clampYaw(yaw),
+            "pitch": RoninTravel.clampPitch(pitch),
+        ])
+        if !ok {
+            noteOffline("\(device.name) 기판이 오프라인입니다. 팬과 틸트를 보내지 않았습니다.")
         }
     }
 
     /// 오른쪽 휠의 위아래입니다. 성공 기록은 남기지 않습니다. 좌우는 아직 보내지 않습니다.
     func roninZoom(_ device: DeviceRecord, path: String) async {
         if profile.practice { return }
-        do {
-            _ = try await RoninClient.command(device, path: path)
-        } catch {
-            note("\(device.name) \(error.localizedDescription)")
-        }
+        _ = await boardSocket.send([
+            "op": "ronin",
+            "id": device.id.uuidString,
+            "path": path,
+        ])
     }
 
     /// 스틱을 누르고 있는 동안 팬·틸트 속도를 다시 보냅니다. 성공 기록은 남기지 않습니다.
     func roninSpeed(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }
-        do {
-            _ = try await RoninClient.command(device, path: "/speed", query: [
-                "yaw": String(format: "%.1f", yaw),
-                "roll": "0",
-                "pitch": String(format: "%.1f", pitch),
-            ])
-        } catch {
-            note("\(device.name) \(error.localizedDescription)")
-        }
+        _ = await boardSocket.send([
+            "op": "ronin",
+            "id": device.id.uuidString,
+            "path": "/speed",
+            "yaw": yaw,
+            "pitch": pitch,
+        ])
     }
 
     /// 휠을 누르는 동안만 보냅니다. 성공 기록은 남기지 않아 로그가 넘치지 않습니다.
     func roninHold(_ device: DeviceRecord, path: String?) async {
         if profile.practice { return }
-        do {
-            if let path {
-                _ = try await RoninClient.command(device, path: path, query: ["speed": "30"])
-            } else {
-                _ = try await RoninClient.command(device, path: "/stop")
-            }
-        } catch {
-            note("\(device.name) \(error.localizedDescription)")
-        }
+        _ = await boardSocket.send([
+            "op": "ronin",
+            "id": device.id.uuidString,
+            "path": path ?? "/stop",
+        ])
     }
 
     /// 고른 로닌 한 대에만 이 프리셋의 짐벌 동작을 보냅니다.
@@ -567,12 +505,101 @@ final class Studio: ObservableObject {
             note("연습: \(device.name) \(path)")
             return
         }
-        do {
-            let text = try await RoninClient.command(device, path: path, query: query)
-            note("\(device.name) \(path) \(text)")
-        } catch {
-            note("\(device.name) \(error.localizedDescription)")
+        var payload: [String: Any] = [
+            "op": "ronin",
+            "id": device.id.uuidString,
+            "path": path,
+        ]
+        if !query.isEmpty {
+            payload["query"] = query
         }
+        let ok = await boardSocket.send(payload)
+        if ok {
+            note("\(device.name) \(path) 를 기판 소켓으로 보냈습니다.")
+        } else {
+            noteOffline("\(device.name) 기판이 오프라인입니다. \(path) 를 보내지 않았습니다.")
+        }
+    }
+
+    /// 모두 녹화이거나 A·B·C 묶음 녹화입니다. 소켓이 열려 있을 때만 보냅니다.
+    func fieldRecord(group: String, start: Bool) async {
+        let label = group == "all" ? "모두" : group
+        if profile.practice {
+            note("연습: \(label) \(start ? "녹화" : "정지"). 기판에 보내지 않았습니다.")
+            return
+        }
+        let ids: [String]
+        if group == "all" {
+            ids = profile.devices.map(\.id.uuidString)
+        } else {
+            ids = (profile.shootGroups[group] ?? []).map(\.uuidString)
+            if ids.isEmpty {
+                note("\(label) 묶음이 비어 있습니다. 명령을 보내지 않았습니다.")
+                return
+            }
+        }
+        let ok = await boardSocket.send([
+            "op": "record",
+            "group": group,
+            "start": start,
+            "ids": ids,
+        ])
+        if ok {
+            note("\(label) \(start ? "녹화" : "정지")를 기판 소켓으로 보냈습니다.")
+        } else {
+            noteOffline("기판이 오프라인입니다. \(label) \(start ? "녹화" : "정지")를 보내지 않았습니다.")
+        }
+    }
+
+    func sendCameraSetting(id: String, kind: String, ble: String, setting: String, value: String) async {
+        if profile.practice {
+            note("연습: 카메라 설정을 보내지 않았습니다.")
+            return
+        }
+        let ok = await boardSocket.send([
+            "op": "camera",
+            "id": id,
+            "kind": kind,
+            "ble": ble,
+            "setting": setting,
+            "value": value,
+        ])
+        if ok {
+            note("카메라 설정을 기판 소켓으로 보냈습니다.")
+        } else {
+            noteOffline("기판이 오프라인입니다. 카메라 설정을 보내지 않았습니다.")
+        }
+    }
+
+    func chooseLane(_ lane: BoardLane) {
+        profile.boardLane = lane.rawValue
+        boardSocket.lane = lane
+        if boardSocket.state != .offline {
+            boardSocket.disconnect()
+            note("길을 바꿔 오프라인입니다. 지금 연결을 다시 누르세요.")
+        }
+    }
+
+    func toggleShootGroup(_ name: String, deviceId: UUID) {
+        var list = profile.shootGroups[name] ?? []
+        if list.contains(deviceId) {
+            list.removeAll { $0 == deviceId }
+        } else {
+            list.append(deviceId)
+        }
+        profile.shootGroups[name] = list
+    }
+
+    func memberOf(_ name: String, deviceId: UUID) -> Bool {
+        profile.shootGroups[name]?.contains(deviceId) == true
+    }
+
+    private var lastOfflineNote = Date.distantPast
+
+    private func noteOffline(_ text: String) {
+        if Date().timeIntervalSince(lastOfflineNote) < 2 { return }
+        lastOfflineNote = Date()
+        note(text)
     }
 
     func sonyConnect(_ device: DeviceRecord, ssid: String, password: String, host: String) async {

@@ -9,6 +9,7 @@ enum StudioPick: Hashable {
 
 struct StudioView: View {
     @EnvironmentObject private var studio: Studio
+    @EnvironmentObject private var link: BoardSocket
     @State private var selection: StudioPick?
     @State private var companionFile: ExportFile?
     @State private var profileFile: ExportFile?
@@ -27,8 +28,14 @@ struct StudioView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                Section("장치 \(studio.profile.devices.count)/\(StudioProfile.maxDevices)") {
-                    ForEach(studio.profile.devices) { device in
+                Section("로닌 · 같은 기판") {
+                    ForEach(studio.profile.devices.filter { $0.kind == .ronin }) { device in
+                        deviceHeader(device)
+                            .tag(StudioPick.device(device.id))
+                    }
+                }
+                Section("액션 카메라 · 기판 블루투스") {
+                    ForEach(studio.profile.devices.filter { $0.kind != .ronin }) { device in
                         deviceHeader(device)
                             .tag(StudioPick.device(device.id))
                         if device.kind == .goproBridge {
@@ -57,10 +64,8 @@ struct StudioView: View {
         }
         .background(StagePalette.paper)
         .preferredColorScheme(.light)
-        .safeAreaInset(edge: .bottom) {
-            GroupBar(compact: false)
-                .padding()
-                .background(.bar)
+        .safeAreaInset(edge: .top) {
+            transportBar
         }
         .alert("컴패니언 페이지", isPresented: $showCompanionNote) {
             Button("파일 저장") { showCompanion = true }
@@ -190,6 +195,40 @@ struct StudioView: View {
         }
     }
 
+    private var transportBar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(link.state == .online ? "확인해 준 녹화 \(link.reportedRecording ?? 0)" : "오프라인")
+                    .font(.subheadline.weight(.semibold))
+                Text(link.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("길", selection: Binding(get: { link.lane }, set: { studio.chooseLane($0) })) {
+                    ForEach(BoardLane.allCases) { lane in
+                        Text(lane.title).tag(lane)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 280)
+                Button(link.state == .connecting ? "연결 중" : "지금 연결") { link.connect() }
+                    .disabled(link.state == .connecting)
+                Button("모두 녹화") { Task { await studio.fieldRecord(group: "all", start: true) } }
+                Button("모두 정지") { Task { await studio.fieldRecord(group: "all", start: false) } }
+            }
+            HStack(spacing: 8) {
+                ForEach(["A", "B", "C"], id: \.self) { name in
+                    Button("\(name) 녹화") { Task { await studio.fieldRecord(group: name, start: true) } }
+                    Button("\(name) 정지") { Task { await studio.fieldRecord(group: name, start: false) } }
+                }
+            }
+            .font(.caption)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
     private func prepareCompanion() {
         do {
             let (data, note) = try CompanionExport.page(profile: studio.profile)
@@ -231,14 +270,14 @@ struct StudioView: View {
             }
             .buttonStyle(.borderless)
         }
-            if device.kind == .goproBridge {
-                Text(studio.bridgeWifiLine(device.id))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(studio.bridgeDirectLine(device.id))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            Menu("묶음") {
+                ForEach(["A", "B", "C"], id: \.self) { name in
+                    Button(studio.memberOf(name, deviceId: device.id) ? "\(name) 빼기" : "\(name)에 넣기") {
+                        studio.toggleShootGroup(name, deviceId: device.id)
+                    }
+                }
             }
+            .buttonStyle(.borderless)
         }
     }
 
@@ -252,6 +291,8 @@ struct StudioView: View {
             Text(BoardMac.isFull(camera.mac) ? BoardMac.normalize(camera.mac) : "맥 없음")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Button("녹화") { Task { await studio.bridgeSlot(device, cameraId: camera.id, start: true) } }
+                .buttonStyle(.borderless)
             Button("설정") {
                 stageSelection = device.id
                 selectedCamera = camera.id

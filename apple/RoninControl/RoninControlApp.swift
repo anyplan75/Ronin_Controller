@@ -8,6 +8,7 @@ struct RoninControlApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(studio)
+                .environmentObject(studio.boardSocket)
         }
         #if os(macOS)
         .defaultSize(width: 1180, height: 800)
