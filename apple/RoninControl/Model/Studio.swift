@@ -122,7 +122,7 @@ final class Studio: ObservableObject {
         if !frameOK {
             note("프레임 검사가 실패했습니다. 오즈모 명령 형식이 공식 예시와 다릅니다.")
         }
-        applyFixedRoninAddress()
+        dropSeparateRoninBoards()
         if let lane = BoardLane(rawValue: profile.boardLane) {
             boardSocket.lane = lane
         }
@@ -148,22 +148,7 @@ final class Studio: ObservableObject {
             return
         }
         profile.olimexRegistered = true
-        if !profile.devices.contains(where: { $0.kind == .ronin }) {
-            let device = DeviceRecord(
-                id: UUID(),
-                name: "올리멕스 ESP32-PoE",
-                kind: .ronin,
-                osmoModel: .unknown,
-                host: BoardLane.poe.host,
-                port: BoardLane.poe.port,
-                bleIdentifier: "",
-                enabled: true,
-                pairedOnce: false
-            )
-            profile.devices.append(device)
-            profile.groupIds.append(device.id)
-        }
-        note("올리멕스 ESP32-PoE 를 등록했습니다. PoE 또는 와이파이 웹소켓, 액션 카메라, 화면의 나머지를 이 기판이 맡습니다.")
+        note("올리멕스 ESP32-PoE 를 등록했습니다. PoE 또는 와이파이 웹소켓과 액션 카메라를 이 기판이 맡습니다. 로닌 짐벌은 로닌 제어 C3 가 맡습니다.")
     }
 
     /// C3 를 하나 등록합니다. 고른 일만 하고, 액션 카메라는 맡지 않습니다.
@@ -187,6 +172,10 @@ final class Studio: ObservableObject {
     }
 
     func addDevice(_ product: DeviceProduct) {
+        if product.kind == .ronin {
+            note("로닌은 따로 있는 기판이 아닙니다. C3 를 로닌 제어로 등록하세요.")
+            return
+        }
         guard profile.devices.count < StudioProfile.maxDevices else {
             note("장치는 8대까지입니다.")
             return
@@ -383,9 +372,7 @@ final class Studio: ObservableObject {
         for device in profile.devices where device.enabled && !device.baseURLText.isEmpty {
             switch device.kind {
             case .ronin:
-                if let status = try? await RoninClient.status(device) {
-                    roninLive[device.id] = status
-                }
+                break
             case .gopro, .goproAction5:
                 if let live = try? await GoProClient.state(device) {
                     rememberGoPro(device, live)
@@ -403,12 +390,7 @@ final class Studio: ObservableObject {
         for device in profile.devices where device.enabled {
             switch device.kind {
             case .ronin:
-                if let status = try? await RoninClient.status(device) {
-                    roninLive[device.id] = status
-                }
-                if let names = try? await shotList(device), !names.isEmpty {
-                    shotNames = names
-                }
+                break
             case .gopro, .goproAction5:
                 if let live = try? await GoProClient.state(device) {
                     rememberGoPro(device, live)
@@ -492,75 +474,39 @@ final class Studio: ObservableObject {
         await refresh()
     }
 
-    /// 화면의 팬·틸트입니다. 로닌 담당 C3 가 있으면 올리멕스 소켓으로 보내지 않습니다.
+    /// 화면의 팬·틸트입니다. 로닌 제어 C3 만 맡고, 그 연결이 없으면 보내지 않습니다.
     func nudgeRonin(yaw: Double, pitch: Double) async {
-        if let device = profile.devices.first(where: { $0.kind == .ronin }) {
-            await roninPlace(device, yaw: yaw, pitch: pitch)
+        guard let board = roninC3 else {
+            noteOffline("짐벌은 로닌 제어로 고른 C3 가 움직입니다. 그 C3 를 먼저 등록하세요.")
             return
         }
-        if let board = roninC3 {
-            noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 팬과 틸트를 보내지 않았습니다.")
-            return
-        }
-        noteOffline("로닌은 올리멕스 기판 또는 로닌 담당 C3 가 있을 때 움직입니다.")
+        _ = (yaw, pitch)
+        noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 팬과 틸트를 보내지 않았습니다.")
     }
 
     /// 휠이 가리키는 각도로 옮깁니다. 손을 떼도 그 각도에 남고, 중앙으로 되돌리지 않습니다.
     func roninPlace(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }
-        if let board = roninC3 {
-            noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 팬과 틸트를 보내지 않았습니다.")
-            return
-        }
-        guard profile.olimexRegistered else {
-            noteOffline("로닌은 올리멕스 기판 또는 로닌 담당 C3 가 있을 때 움직입니다.")
-            return
-        }
-        let ok = await boardSocket.send([
-            "op": "ronin",
-            "id": device.id.uuidString,
-            "path": "/move",
-            "yaw": RoninTravel.clampYaw(yaw),
-            "pitch": RoninTravel.clampPitch(pitch),
-        ])
-        if !ok {
-            noteOffline("\(device.name) 기판이 오프라인입니다. 팬과 틸트를 보내지 않았습니다.")
-        }
+        _ = device
+        await nudgeRonin(yaw: yaw, pitch: pitch)
     }
 
     /// 오른쪽 휠의 위아래입니다. 성공 기록은 남기지 않습니다. 좌우는 아직 보내지 않습니다.
     func roninZoom(_ device: DeviceRecord, path: String) async {
         if profile.practice { return }
-        if roninC3 != nil || !profile.olimexRegistered { return }
-        _ = await boardSocket.send([
-            "op": "ronin",
-            "id": device.id.uuidString,
-            "path": path,
-        ])
+        _ = (device, path)
     }
 
     /// 스틱을 누르고 있는 동안 팬·틸트 속도를 다시 보냅니다. 성공 기록은 남기지 않습니다.
     func roninSpeed(_ device: DeviceRecord, yaw: Double, pitch: Double) async {
         if profile.practice { return }
-        if roninC3 != nil || !profile.olimexRegistered { return }
-        _ = await boardSocket.send([
-            "op": "ronin",
-            "id": device.id.uuidString,
-            "path": "/speed",
-            "yaw": yaw,
-            "pitch": pitch,
-        ])
+        _ = (device, yaw, pitch)
     }
 
     /// 휠을 누르는 동안만 보냅니다. 성공 기록은 남기지 않아 로그가 넘치지 않습니다.
     func roninHold(_ device: DeviceRecord, path: String?) async {
         if profile.practice { return }
-        if roninC3 != nil || !profile.olimexRegistered { return }
-        _ = await boardSocket.send([
-            "op": "ronin",
-            "id": device.id.uuidString,
-            "path": path ?? "/stop",
-        ])
+        _ = (device, path)
     }
 
     /// 고른 로닌 한 대에만 이 프리셋의 짐벌 동작을 보냅니다.
@@ -582,28 +528,12 @@ final class Studio: ObservableObject {
             note("연습: \(device.name) \(path)")
             return
         }
+        _ = (device, query)
         if let board = roninC3 {
             noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 \(path) 를 보내지 않았습니다.")
             return
         }
-        guard profile.olimexRegistered else {
-            noteOffline("로닌 명령은 올리멕스 기판 또는 로닌 담당 C3 가 있을 때 보냅니다.")
-            return
-        }
-        var payload: [String: Any] = [
-            "op": "ronin",
-            "id": device.id.uuidString,
-            "path": path,
-        ]
-        if !query.isEmpty {
-            payload["query"] = query
-        }
-        let ok = await boardSocket.send(payload)
-        if ok {
-            note("\(device.name) \(path) 를 기판 소켓으로 보냈습니다.")
-        } else {
-            noteOffline("\(device.name) 기판이 오프라인입니다. \(path) 를 보내지 않았습니다.")
-        }
+        noteOffline("짐벌은 로닌 제어로 고른 C3 가 움직입니다. 그 C3 를 먼저 등록하세요.")
     }
 
     /// 모두 녹화이거나 A·B·C 묶음 녹화입니다. 소켓이 열려 있을 때만 보냅니다.
@@ -1051,19 +981,15 @@ final class Studio: ObservableObject {
         return BoardProbe(live: nil, wrongBoard: true)
     }
 
-    /// 로닌 기판은 항상 192.168.100.100 입니다. 다른 주소가 저장돼 있으면 그 주소로 바꿉니다.
-    private func applyFixedRoninAddress() {
-        var changed = false
-        for index in profile.devices.indices where profile.devices[index].kind == .ronin {
-            if profile.devices[index].host != RoninBoard.host || profile.devices[index].port != 80 {
-                profile.devices[index].host = RoninBoard.host
-                profile.devices[index].port = 80
-                changed = true
-            }
-        }
-        if changed {
-            note("로닌 기판 주소를 192.168.100.100 으로 맞췄습니다.")
-        }
+    /// 예전 프로필의 로닌 기판은 연결 대상이 아닙니다. 목록에서 빼고 주소를 다시 쓰지 않습니다.
+    private func dropSeparateRoninBoards() {
+        let gone = Set(profile.devices.filter { $0.kind == .ronin }.map(\.id))
+        guard !gone.isEmpty else { return }
+        profile.devices.removeAll { gone.contains($0.id) }
+        profile.groupIds.removeAll { gone.contains($0) }
+        profile.stageSpots.removeAll { gone.contains($0.deviceId) }
+        profile.shootGroups = profile.shootGroups.mapValues { $0.filter { !gone.contains($0) } }
+        note("로닌은 따로 있는 기판이 아닙니다. 목록에서 뺐습니다. 짐벌은 로닌 제어로 고른 C3 가 맡습니다.")
     }
 
     private func pullBoard(_ device: DeviceRecord) async {

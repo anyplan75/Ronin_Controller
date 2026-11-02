@@ -269,8 +269,8 @@ enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// 새로 넣는 장치만 여기 있습니다. 고프로 와이파이와 단독 액션 5 프로는 더 이상 만들지 않습니다.
-    static let addMenu: [DeviceProduct] = [.ronin, .goproBridge, .osmoActionBluetooth, .osmo360Bluetooth]
+    /// 새로 넣는 장치만 여기 있습니다. 로닌 기판, 고프로 와이파이, 단독 액션 5 프로는 만들지 않습니다.
+    static let addMenu: [DeviceProduct] = [.goproBridge, .osmoActionBluetooth, .osmo360Bluetooth]
 
     static func matching(_ device: DeviceRecord) -> DeviceProduct? {
         switch device.kind {

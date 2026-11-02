@@ -186,11 +186,11 @@ struct StudioControlScreen: View {
 
     private var floor: some View {
         FloorPlan(
-            ronins: studio.profile.devices.filter { $0.kind == .ronin },
+            gimbal: studio.roninC3,
             cameras: link.cameras,
             spots: cameraSpots,
             onMoveCamera: { id, point in cameraSpots[id] = point },
-            onMoveRonin: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) }
+            onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) }
         )
         .background(canvas)
     }
@@ -259,7 +259,7 @@ struct StudioControlScreen: View {
             Text("올리멕스 ESP32-PoE")
                 .font(.headline)
             Text(studio.profile.olimexRegistered ? (link.state == .online ? "연결됨 \(link.endpoint)" : "오프라인") : "등록 전")
-            Text("PoE 192.168.0.150:81 또는 와이파이 192.168.0.151:81. 액션 카메라는 이 기판 블루투스입니다. 고프로 FEA6, 오즈모 FFF0, 인스타360 CE80.")
+            Text("PoE 192.168.0.150:81 또는 와이파이 192.168.0.151:81. 액션 카메라는 이 기판 블루투스입니다. 고프로 FEA6, 오즈모 FFF0, 인스타360 CE80. 로닌 짐벌은 이 기판이 아니라 로닌 제어 C3 가 맡습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("웹소켓이 열리기 전에는 연결됨으로 두지 않습니다.")
@@ -275,7 +275,7 @@ struct StudioControlScreen: View {
             Text("오프라인")
                 .font(.caption.weight(.semibold))
             if board.duty == .ronin {
-                Text("팬과 틸트만 이 기판으로 갑니다. 액션 카메라와 PoE 웹소켓으로는 보내지 않습니다.")
+                Text("짐벌은 이 C3만 움직입니다. 로닌 기판을 따로 고르지 않고, 올리멕스 소켓으로도 보내지 않습니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("팬 \(Int(yaw))°")
@@ -342,11 +342,11 @@ private enum DeskPick: Hashable {
 /// 어두운 2차원 평면도입니다. 북쪽은 팬 0° 입니다. 그림 미리보기를 그리지 않습니다.
 private struct FloorPlan: View {
     @EnvironmentObject private var studio: Studio
-    var ronins: [DeviceRecord]
+    var gimbal: C3BoardRecord?
     var cameras: [BoardCamera]
     var spots: [String: CGPoint]
     var onMoveCamera: (String, CGPoint) -> Void
-    var onMoveRonin: (UUID, Double, Double) -> Void
+    var onMoveGimbal: (UUID, Double, Double) -> Void
     @State private var drag: String?
 
     var body: some View {
@@ -371,11 +371,11 @@ private struct FloorPlan: View {
                     at: CGPoint(x: size.width / 2, y: 14),
                     anchor: .center
                 )
-                for device in ronins {
-                    let spot = studio.stageSpot(for: device.id)
+                if let gimbal {
+                    let spot = studio.stageSpot(for: gimbal.id)
                     let at = plan(x: spot.x, y: spot.y, size: size)
                     wedge(context: context, at: at, yaw: spot.aimYaw, degrees: 70, size: size)
-                    mark(context: context, at: at, title: device.name)
+                    mark(context: context, at: at, title: gimbal.name)
                 }
                 for (index, camera) in cameras.enumerated() {
                     let at = spots[camera.id] ?? defaultCamera(index, count: cameras.count, size: size)
@@ -390,9 +390,9 @@ private struct FloorPlan: View {
                             drag = hit(value.startLocation, size: geo.size)
                         }
                         guard let drag else { return }
-                        if let id = UUID(uuidString: drag), ronins.contains(where: { $0.id == id }) {
+                        if let id = UUID(uuidString: drag), gimbal?.id == id {
                             let room = unplan(value.location, size: geo.size)
-                            onMoveRonin(id, room.x, room.y)
+                            onMoveGimbal(id, room.x, room.y)
                         } else {
                             onMoveCamera(drag, value.location)
                         }
@@ -446,10 +446,10 @@ private struct FloorPlan: View {
     }
 
     private func hit(_ point: CGPoint, size: CGSize) -> String? {
-        for device in ronins {
-            let spot = studio.stageSpot(for: device.id)
+        if let gimbal {
+            let spot = studio.stageSpot(for: gimbal.id)
             let at = plan(x: spot.x, y: spot.y, size: size)
-            if hypot(at.x - point.x, at.y - point.y) < 22 { return device.id.uuidString }
+            if hypot(at.x - point.x, at.y - point.y) < 22 { return gimbal.id.uuidString }
         }
         for (index, camera) in cameras.enumerated() {
             let at = spots[camera.id] ?? defaultCamera(index, count: cameras.count, size: size)
