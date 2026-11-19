@@ -126,6 +126,10 @@ final class Studio: ObservableObject {
         dropSeparateRoninBoards()
         let lane = BoardLane(stored: profile.boardLane)
         boardSocket.lane = lane
+        if !profile.olimexLanHost.isEmpty {
+            boardSocket.reportedHost = profile.olimexLanHost
+            boardSocket.reportedPort = 81
+        }
         Task { await bootBoards() }
         Task { await maintainGoProSessions() }
     }
@@ -160,10 +164,66 @@ final class Studio: ObservableObject {
         let board = C3BoardRecord(
             id: UUID(),
             name: job == .ronin ? "C3 로닌" : "C3 울란지 VL120BI",
-            job: job.rawValue
+            job: job.rawValue,
+            lanHost: profile.lastC3Host
         )
         profile.c3Boards.append(board)
         note("\(board.name) 을 등록했습니다. 이 C3 는 \(job.title)만 합니다.")
+    }
+
+    /// 블루투스 처음 설정이 알려 준 집 망 주소로 웹소켓을 엽니다.
+    func adoptLan(_ kind: SeenBoard.Kind, host: String, port: Int) {
+        switch kind {
+        case .olimex:
+            profile.olimexRegistered = true
+            profile.olimexLanHost = host
+            profile.boardLane = BoardLane.lan.rawValue
+            boardSocket.lane = .lan
+            boardSocket.reportedHost = host
+            boardSocket.reportedPort = port
+            boardSocket.connect()
+            note("올리멕스가 \(host):\(port) 로 집 망에 붙었다고 답했습니다. 그 주소의 웹소켓을 엽니다.")
+        case .c3:
+            profile.lastC3Host = host
+            if let index = profile.c3Boards.firstIndex(where: { $0.duty == .ronin }) ?? profile.c3Boards.indices.first {
+                profile.c3Boards[index].lanHost = host
+                profile.c3Boards[index].linkMode = BoardLane.lan.rawValue
+                note("\(profile.c3Boards[index].name) 주소를 \(host):\(port) 로 저장했습니다. 명령을 보내면 그 주소로 붙습니다.")
+            } else {
+                note("C3 가 \(host):\(port) 로 붙었다고 답했습니다. C3 역할을 등록하면 그 주소를 씁니다.")
+            }
+        }
+    }
+
+    func addPtz(host: String, username: String, password: String) {
+        let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.hasPrefix("192.168.10."), clean.split(separator: ".").count == 4 else {
+            note("PTZ 주소는 192.168.10.x 만 됩니다.")
+            return
+        }
+        if let existing = profile.ptzCameras.first(where: { $0.host == clean }) {
+            FieldSecret.save(password, account: existing.id.uuidString)
+            if !username.isEmpty {
+                if let index = profile.ptzCameras.firstIndex(where: { $0.id == existing.id }) {
+                    profile.ptzCameras[index].username = username
+                }
+            }
+            note("\(clean) 은 이미 목록에 있습니다.")
+            return
+        }
+        let camera = PtzRecord(id: UUID(), name: "PTZ \(clean)", host: clean, username: username)
+        profile.ptzCameras.append(camera)
+        FieldSecret.save(password, account: camera.id.uuidString)
+        let index = profile.ptzCameras.count
+        moveStage(deviceId: camera.id, x: -3 + Double(index) * 1.4, y: 6, z: 1.6)
+        note("PTZ \(clean) 을 무대에 넣었습니다. ONVIF 가 답하기 전에는 오프라인입니다.")
+    }
+
+    func deletePtz(_ id: UUID) {
+        profile.ptzCameras.removeAll { $0.id == id }
+        profile.stageSpots.removeAll { $0.deviceId == id }
+        FieldSecret.save("", account: id.uuidString)
+        note("PTZ 를 목록에서 뺐습니다.")
     }
 
     func deleteC3(_ id: UUID) {

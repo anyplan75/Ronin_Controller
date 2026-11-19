@@ -30,8 +30,8 @@ enum BoardLane: String, Codable, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
-        case .lan: return "192.168.0.151:81"
-        case .poe: return "192.168.0.150:81"
+        case .lan: return "192.168.10.151:81"
+        case .poe: return "192.168.10.150:81"
         case .ap: return "Ronin-Olimex · 192.168.4.1:81"
         case .usb: return "플래시와 시리얼. 촬영 명령은 나가지 않습니다."
         }
@@ -40,7 +40,7 @@ enum BoardLane: String, Codable, CaseIterable, Identifiable {
     /// C3 제어 소켓입니다. PoE는 올리멕스만 씁니다.
     var c3Detail: String {
         switch self {
-        case .lan: return "192.168.0.152:82"
+        case .lan: return "192.168.10.152:82"
         case .ap: return "Ronin-C3 · 192.168.4.1:82"
         case .usb, .poe: return "USB는 펌웨어와 점검입니다. 촬영 명령은 나가지 않습니다."
         }
@@ -48,8 +48,8 @@ enum BoardLane: String, Codable, CaseIterable, Identifiable {
 
     var host: String {
         switch self {
-        case .lan: return "192.168.0.151"
-        case .poe: return "192.168.0.150"
+        case .lan: return "192.168.10.151"
+        case .poe: return "192.168.10.150"
         case .ap: return "192.168.4.1"
         case .usb: return ""
         }
@@ -59,7 +59,7 @@ enum BoardLane: String, Codable, CaseIterable, Identifiable {
 
     var c3Host: String {
         switch self {
-        case .lan: return "192.168.0.152"
+        case .lan: return "192.168.10.152"
         case .ap: return "192.168.4.1"
         default: return ""
         }
@@ -315,8 +315,9 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         let token = generation
         boardId = board.id
         state = .connecting
-        detail = "\(board.link.c3Host):\(board.link.c3Port) 에 붙는 중"
-        let url = URL(string: "ws://\(board.link.c3Host):\(board.link.c3Port)")!
+        let host = board.socketHost
+        detail = "\(host):\(board.link.c3Port) 에 붙는 중"
+        let url = URL(string: "ws://\(host):\(board.link.c3Port)")!
         let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: .main)
         self.session = session
         let task = session.webSocketTask(with: url)

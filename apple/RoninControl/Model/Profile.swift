@@ -604,14 +604,23 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         return lane == .poe ? .lan : lane
     }
 
-    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue) {
+    /// 블루투스로 받은 집 망 주소입니다. 비어 있으면 192.168.10.152 를 씁니다.
+    var lanHost: String
+
+    var socketHost: String {
+        let saved = lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        return saved.isEmpty ? link.c3Host : saved
+    }
+
+    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "") {
         self.id = id
         self.name = name
         self.job = job
         self.linkMode = linkMode
+        self.lanHost = lanHost
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, job, linkMode }
+    enum CodingKeys: String, CodingKey { case id, name, job, linkMode, lanHost }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -619,7 +628,25 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         name = try box.decode(String.self, forKey: .name)
         job = try box.decode(String.self, forKey: .job)
         linkMode = try box.decodeIfPresent(String.self, forKey: .linkMode) ?? BoardLane.lan.rawValue
+        lanHost = try box.decodeIfPresent(String.self, forKey: .lanHost) ?? ""
     }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(id, forKey: .id)
+        try box.encode(name, forKey: .name)
+        try box.encode(job, forKey: .job)
+        try box.encode(linkMode, forKey: .linkMode)
+        try box.encode(lanHost, forKey: .lanHost)
+    }
+}
+
+/// 같은 망의 ONVIF PTZ 입니다. 비밀번호는 프로필에 넣지 않습니다.
+struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var host: String
+    var username: String
 }
 
 struct StudioProfile: Codable, Equatable, Sendable {
@@ -643,6 +670,11 @@ struct StudioProfile: Codable, Equatable, Sendable {
     var olimexRegistered: Bool
     /// 일을 하나씩 맡은 C3 입니다.
     var c3Boards: [C3BoardRecord]
+    /// 블루투스로 받은 올리멕스 집 망 주소입니다. 비어 있으면 192.168.10.151 입니다.
+    var olimexLanHost: String
+    /// 블루투스로 받은 C3 주소입니다. 아직 C3 를 등록하지 않았을 때 보관합니다.
+    var lastC3Host: String
+    var ptzCameras: [PtzRecord]
 
     init(
         version: Int,
@@ -657,7 +689,10 @@ struct StudioProfile: Codable, Equatable, Sendable {
         boardLane: String = BoardLane.lan.rawValue,
         shootGroups: [String: [UUID]] = [:],
         olimexRegistered: Bool = false,
-        c3Boards: [C3BoardRecord] = []
+        c3Boards: [C3BoardRecord] = [],
+        olimexLanHost: String = "",
+        lastC3Host: String = "",
+        ptzCameras: [PtzRecord] = []
     ) {
         self.version = version
         self.devices = devices
@@ -672,10 +707,13 @@ struct StudioProfile: Codable, Equatable, Sendable {
         self.shootGroups = shootGroups
         self.olimexRegistered = olimexRegistered
         self.c3Boards = c3Boards
+        self.olimexLanHost = olimexLanHost
+        self.lastC3Host = lastC3Host
+        self.ptzCameras = ptzCameras
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, ptzCameras
     }
 
     init(from decoder: Decoder) throws {
@@ -693,6 +731,9 @@ struct StudioProfile: Codable, Equatable, Sendable {
         shootGroups = try box.decodeIfPresent([String: [UUID]].self, forKey: .shootGroups) ?? [:]
         olimexRegistered = try box.decodeIfPresent(Bool.self, forKey: .olimexRegistered) ?? false
         c3Boards = try box.decodeIfPresent([C3BoardRecord].self, forKey: .c3Boards) ?? []
+        olimexLanHost = try box.decodeIfPresent(String.self, forKey: .olimexLanHost) ?? ""
+        lastC3Host = try box.decodeIfPresent(String.self, forKey: .lastC3Host) ?? ""
+        ptzCameras = try box.decodeIfPresent([PtzRecord].self, forKey: .ptzCameras) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -710,6 +751,9 @@ struct StudioProfile: Codable, Equatable, Sendable {
         try box.encode(shootGroups, forKey: .shootGroups)
         try box.encode(olimexRegistered, forKey: .olimexRegistered)
         try box.encode(c3Boards, forKey: .c3Boards)
+        try box.encode(olimexLanHost, forKey: .olimexLanHost)
+        try box.encode(lastC3Host, forKey: .lastC3Host)
+        try box.encode(ptzCameras, forKey: .ptzCameras)
     }
 
     static func makeNew() -> StudioProfile {

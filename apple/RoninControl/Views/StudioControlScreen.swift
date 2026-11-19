@@ -16,6 +16,15 @@ struct StudioControlScreen: View {
     @State private var lightKelvin: [UUID: Double] = [:]
     /// 카메라 자리입니다. x는 좌우 미터, y는 무대에서 객석 쪽 깊이 미터입니다.
     @State private var cameraMeters: [String: CGPoint] = [:]
+    @State private var showJoin = false
+    @State private var showPtz = false
+    @State private var ptzHost = "192.168.10.203"
+    @State private var ptzUser = ""
+    @State private var ptzPassword = ""
+    @State private var ptzFound: [Onvif.Found] = []
+    @State private var ptzSearching = false
+    @State private var ptzPose: [UUID: PtzPose] = [:]
+    @State private var ptzOnline: Set<UUID> = []
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -58,6 +67,14 @@ struct StudioControlScreen: View {
         } message: {
             Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
         }
+        .sheet(isPresented: $showJoin) {
+            FirstJoinSheet { kind, host, port in
+                studio.adoptLan(kind, host: host, port: port)
+            }
+        }
+        .sheet(isPresented: $showPtz) {
+            ptzSheet
+        }
     }
 
     private var transport: some View {
@@ -98,7 +115,9 @@ struct StudioControlScreen: View {
                 Menu("기판 등록") {
                     Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
                     Button("C3") { askC3Job = true }
+                    Button("PTZ 카메라") { showPtz = true }
                 }
+                Button("처음 연결") { showJoin = true }
             }
             .font(.caption)
         }
@@ -151,6 +170,29 @@ struct StudioControlScreen: View {
                     }
                 }
             }
+            Section("PTZ") {
+                if studio.profile.ptzCameras.isEmpty {
+                    Text("192.168.10.203 또는 같은 망 검색으로 넣습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(studio.profile.ptzCameras) { camera in
+                    Button {
+                        pick = .ptz(camera.id)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(camera.name)
+                            Text("\(camera.host) · \(ptzOnline.contains(camera.id) ? "온라인" : "오프라인") · 대기 · HDMI 모름")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions {
+                        Button("삭제", role: .destructive) { studio.deletePtz(camera.id) }
+                    }
+                }
+            }
             Section("액션 카메라") {
                 if !studio.profile.olimexRegistered {
                     Text("올리멕스를 등록하면 여기 나옵니다.")
@@ -191,6 +233,7 @@ struct StudioControlScreen: View {
         case .olimex: return nil
         case .c3(let id): return id.uuidString
         case .camera(let id): return id
+        case .ptz(let id): return id.uuidString
         }
     }
 
@@ -204,7 +247,11 @@ struct StudioControlScreen: View {
             liveYaw: yaw,
             livePitch: pitch,
             onMoveCamera: { id, x, y in cameraMeters[id] = CGPoint(x: x, y: y) },
-            onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) }
+            onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) },
+            ptz: studio.profile.ptzCameras,
+            ptzPose: ptzPose,
+            ptzOnline: ptzOnline,
+            onMovePtz: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) }
         )
         .onChange(of: link.tallyNote) { _, note in
             if !note.isEmpty { studio.note(note) }
@@ -260,6 +307,10 @@ struct StudioControlScreen: View {
                 case .camera(let id):
                     if let camera = link.cameras.first(where: { $0.id == id }) {
                         cameraInspector(camera)
+                    }
+                case .ptz(let id):
+                    if let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
+                        ptzInspector(camera)
                     }
                 }
                 LogList()
@@ -373,12 +424,112 @@ struct StudioControlScreen: View {
                 .foregroundStyle(.secondary)
         }
     }
+
+    private func setPose(_ id: UUID, yaw: Double? = nil, pitch: Double? = nil, zoom: Double? = nil) {
+        var pose = ptzPose[id] ?? PtzPose()
+        if let yaw { pose.yaw = yaw }
+        if let pitch { pose.pitch = pitch }
+        if let zoom { pose.zoom = zoom }
+        ptzPose[id] = pose
+    }
+
+    private func ptzInspector(_ camera: PtzRecord) -> some View {
+        let pose = ptzPose[camera.id] ?? PtzPose()
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(camera.name).font(.headline)
+            Text("\(camera.host) · ONVIF · \(ptzOnline.contains(camera.id) ? "온라인" : "오프라인")")
+                .font(.caption.weight(.semibold))
+            Text("팬·틸트·줌은 카메라가 명령을 받았을 때만 성공입니다. 고른 동안 무대 화각은 이 슬라이더를 미터 눈금으로 그립니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("팬 \(Int(pose.yaw))°")
+            Slider(value: Binding(get: { ptzPose[camera.id]?.yaw ?? 0 }, set: { setPose(camera.id, yaw: $0) }), in: -180...180, step: 1)
+            Text("틸트 \(Int(pose.pitch))°")
+            Slider(value: Binding(get: { ptzPose[camera.id]?.pitch ?? 0 }, set: { setPose(camera.id, pitch: $0) }), in: -45...45, step: 1)
+            Text("줌 \(Int((ptzPose[camera.id]?.zoom ?? 0) * 100))%")
+            Slider(value: Binding(get: { ptzPose[camera.id]?.zoom ?? 0 }, set: { setPose(camera.id, zoom: $0) }), in: 0...1)
+            Button("이 방향으로 보내기") {
+                Task {
+                    let password = FieldSecret.load(account: camera.id.uuidString)
+                    let note = await Onvif.move(
+                        host: camera.host,
+                        user: camera.username,
+                        password: password,
+                        pan: pose.yaw,
+                        tilt: pose.pitch,
+                        zoom: pose.zoom
+                    )
+                    if note.contains("받았습니다") { ptzOnline.insert(camera.id) }
+                    studio.note(note)
+                }
+            }
+            Button("상태 확인") {
+                Task {
+                    let password = FieldSecret.load(account: camera.id.uuidString)
+                    let note = await Onvif.check(host: camera.host, user: camera.username, password: password)
+                    if note.contains("답했습니다") { ptzOnline.insert(camera.id) } else { ptzOnline.remove(camera.id) }
+                    studio.note(note)
+                }
+            }
+        }
+    }
+
+    private var ptzSheet: some View {
+        NavigationStack {
+            Form {
+                Section("주소로 추가") {
+                    TextField("192.168.10.203", text: $ptzHost)
+                    TextField("사용자 이름, 없으면 비움", text: $ptzUser)
+                    SecureField("비밀번호, 없으면 비움", text: $ptzPassword)
+                    Button("이 주소 추가") {
+                        studio.addPtz(host: ptzHost, username: ptzUser, password: ptzPassword)
+                        ptzPassword = ""
+                        showPtz = false
+                    }
+                }
+                Section("같은 망에서 찾기") {
+                    Button(ptzSearching ? "찾는 중" : "ONVIF 찾기") {
+                        Task {
+                            ptzSearching = true
+                            ptzFound = await Onvif.discover()
+                            ptzSearching = false
+                        }
+                    }
+                    .disabled(ptzSearching)
+                    if ptzFound.isEmpty {
+                        Text("WS-Discovery 와 192.168.10.200–230 의 ONVIF 응답을 봅니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(ptzFound) { found in
+                        Button(found.host) {
+                            ptzHost = found.host
+                            studio.addPtz(host: found.host, username: ptzUser, password: ptzPassword)
+                            ptzPassword = ""
+                            showPtz = false
+                        }
+                    }
+                }
+            }
+            .navigationTitle("PTZ")
+            .toolbar {
+                Button("닫기") { showPtz = false }
+            }
+        }
+    }
+}
+
+private struct PtzPose {
+    var yaw = 0.0
+    var pitch = 0.0
+    var zoom = 0.0
 }
 
 private enum DeskPick: Hashable {
     case olimex
     case c3(UUID)
     case camera(String)
+    case ptz(UUID)
 }
 
 /// 렌즈 프리셋입니다. 카메라가 각도를 알려 주지 않으면 이 표의 각만 씁니다.
@@ -412,6 +563,10 @@ private struct FloorPlan: View {
     var livePitch: Double
     var onMoveCamera: (String, Double, Double) -> Void
     var onMoveGimbal: (UUID, Double, Double) -> Void
+    var ptz: [PtzRecord]
+    var ptzPose: [UUID: PtzPose]
+    var ptzOnline: Set<UUID>
+    var onMovePtz: (UUID, Double, Double) -> Void
     @State private var drag: String?
 
     var body: some View {
@@ -466,6 +621,26 @@ private struct FloorPlan: View {
                         useLens: chosen
                     )
                 }
+                for camera in ptz {
+                    let spot = studio.stageSpot(for: camera.id)
+                    let pose = ptzPose[camera.id] ?? PtzPose()
+                    let chosen = selected == camera.id.uuidString
+                    paint(
+                        context: context,
+                        size: size,
+                        x: spot.x,
+                        y: spot.y,
+                        aim: pose.yaw,
+                        pitch: pose.pitch,
+                        title: camera.name,
+                        asset: nil,
+                        chosen: chosen,
+                        useLens: chosen,
+                        degrees: chosen ? max(12, 60 - pose.zoom * 45) : 0,
+                        throwMeters: chosen ? 8 : 1.8,
+                        online: ptzOnline.contains(camera.id)
+                    )
+                }
                 for (index, camera) in cameras.enumerated() {
                     let place = cameraPlace(camera.id, index: index, count: cameras.count)
                     let chosen = selected == camera.id
@@ -491,6 +666,8 @@ private struct FloorPlan: View {
                         let room = unplan(value.location, size: geo.size)
                         if let id = UUID(uuidString: drag), gimbal?.id == id {
                             onMoveGimbal(id, room.x, room.y)
+                        }                         else if let id = UUID(uuidString: drag), ptz.contains(where: { $0.id == id }) {
+                            onMovePtz(id, room.x, room.y)
                         } else {
                             onMoveCamera(drag, room.x, room.y)
                         }
@@ -503,13 +680,15 @@ private struct FloorPlan: View {
     private let pad: CGFloat = 28
     private let brass = Color(red: 0.54, green: 0.42, blue: 0.20)
 
-    private func paint(context: GraphicsContext, size: CGSize, x: Double, y: Double, aim: Double, pitch: Double, title: String, asset: String?, chosen: Bool, useLens: Bool) {
+    private func paint(context: GraphicsContext, size: CGSize, x: Double, y: Double, aim: Double, pitch: Double, title: String, asset: String?, chosen: Bool, useLens: Bool, degrees: Double? = nil, throwMeters: Double? = nil, online: Bool = true) {
         let at = plan(x: x, y: y, size: size)
-        let reach = useLens ? lens.throwMeters * max(0.2, cos(pitch * .pi / 180)) : 1.8
+        let fov = degrees ?? lens.degrees
+        let reachBase = throwMeters ?? lens.throwMeters
+        let reach = useLens ? reachBase * max(0.2, cos(pitch * .pi / 180)) : 1.8
         if useLens {
             var path = Path()
             path.move(to: at)
-            let half = lens.degrees / 2
+            let half = fov / 2
             for step in 0...12 {
                 let deg = aim - half + (half * 2) * Double(step) / 12
                 let end = offset(x: x, y: y, degrees: deg, meters: reach)
@@ -534,6 +713,12 @@ private struct FloorPlan: View {
         if chosen {
             let ring = Path(ellipseIn: CGRect(x: at.x - width / 2 - 4, y: at.y - height / 2 - 4, width: width + 8, height: height + 8))
             context.stroke(ring, with: .color(.white), lineWidth: 1.5)
+        }
+        if asset == nil {
+            let box = Path(roundedRect: CGRect(x: at.x - width / 2, y: at.y - height / 2, width: width, height: height), cornerRadius: 4)
+            context.fill(box, with: .color(Color(red: 0.48, green: 0.18, blue: 0.22)))
+            context.draw(Text("PTZ").font(.caption2.weight(.bold)).foregroundStyle(.white), at: at, anchor: .center)
+            context.draw(Text(online ? "온라인" : "오프라인").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: at.x, y: at.y + height / 2 + 4), anchor: .top)
         }
         context.draw(Text(title).font(.caption2.weight(chosen ? .bold : .regular)).foregroundStyle(.white), at: CGPoint(x: at.x, y: at.y - height / 2 - 4), anchor: .bottom)
     }
@@ -605,6 +790,11 @@ private struct FloorPlan: View {
             let place = cameraPlace(camera.id, index: index, count: cameras.count)
             let at = plan(x: place.x, y: place.y, size: size)
             if hypot(at.x - point.x, at.y - point.y) < 28 { return camera.id }
+        }
+        for camera in ptz {
+            let spot = studio.stageSpot(for: camera.id)
+            let at = plan(x: spot.x, y: spot.y, size: size)
+            if hypot(at.x - point.x, at.y - point.y) < 28 { return camera.id.uuidString }
         }
         return nil
     }
