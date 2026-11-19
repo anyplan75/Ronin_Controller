@@ -110,24 +110,23 @@ enum Onvif {
     }
 
     /// 슬라이더의 절대 각도입니다. 카메라가 받았을 때만 성공 문장입니다.
-    static func move(host: String, endpoint: String, user: String, password: String, pan: Double, tilt: Double, zoom: Double) async -> (String, String) {
-        guard let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) else {
-            return ("\(host) 프로필을 읽지 못했습니다. 팬·틸트·줌을 보내지 않았습니다.", "")
+    static func move(host: String, endpoint: String, user: String, password: String, pan: Double, tilt: Double, zoom: Double, viscaPort: Int = 1259) async -> (String, String) {
+        if let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) {
+            let x = max(-1, min(1, pan / 180))
+            let y = max(-1, min(1, tilt / 45))
+            let z = max(0, min(1, zoom))
+            let body = """
+            <tptz:AbsoluteMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:Position><tt:PanTilt x="\(x)" y="\(y)" xmlns:tt="http://www.onvif.org/ver10/schema"/><tt:Zoom x="\(z)" xmlns:tt="http://www.onvif.org/ver10/schema"/></tptz:Position></tptz:AbsoluteMove>
+            """
+            let reply = await post(url: token.ptz, user: user, password: password, body: body)
+            if reply.ok && !reply.fault {
+                return ("\(host) 가 팬 \(Int(pan))°, 틸트 \(Int(tilt))°, 줌 \(Int(z * 100))% 명령을 받았습니다.", token.device)
+            }
         }
-        let x = max(-1, min(1, pan / 180))
-        let y = max(-1, min(1, tilt / 45))
-        let z = max(0, min(1, zoom))
-        let body = """
-        <tptz:AbsoluteMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:Position><tt:PanTilt x="\(x)" y="\(y)" xmlns:tt="http://www.onvif.org/ver10/schema"/><tt:Zoom x="\(z)" xmlns:tt="http://www.onvif.org/ver10/schema"/></tptz:Position></tptz:AbsoluteMove>
-        """
-        let reply = await post(url: token.ptz, user: user, password: password, body: body)
-        if reply.fault {
-            return ("\(host) 가 그 각도를 거절했습니다. 움직이지 않은 것으로 둡니다.", token.device)
+        if await Visca.absolute(host: host, port: UInt16(viscaPort), pan: pan, tilt: tilt, zoom: zoom) {
+            return ("\(host) Visca \(viscaPort)가 팬 \(Int(pan))°, 틸트 \(Int(tilt))° 명령을 받았습니다.", endpoint)
         }
-        if reply.ok {
-            return ("\(host) 가 팬 \(Int(pan))°, 틸트 \(Int(tilt))°, 줌 \(Int(z * 100))% 명령을 받았습니다.", token.device)
-        }
-        return ("\(host) 가 응답하지 않았습니다. 명령을 성공으로 두지 않습니다.", token.device)
+        return ("\(host) 가 그 절대각을 받지 않았습니다. 움직이지 않은 것으로 둡니다.", "")
     }
 
     private struct Profile {

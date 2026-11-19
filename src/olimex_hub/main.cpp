@@ -6,6 +6,8 @@
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_netif.h>
+#include <esp_wifi.h>
 
 #include "dji_ble.h"
 #include "gopro_ble_frame.h"
@@ -67,10 +69,13 @@ static void publish() {
     row["kind"] = cam.kind;
     row["ble"] = cam.ble;
   }
-  if (ethReady) {
-    doc["host"] = ETH.localIP().toString();
-  } else if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {
+    doc["wifiHost"] = WiFi.localIP().toString();
     doc["host"] = WiFi.localIP().toString();
+  }
+  if (ethReady) {
+    doc["ethHost"] = ETH.localIP().toString();
+    if (WiFi.status() != WL_CONNECTED) doc["host"] = ETH.localIP().toString();
   }
   doc["port"] = 81;
   doc["wifiMac"] = WiFi.macAddress();
@@ -316,9 +321,14 @@ static const char* kProvChar = "7b1e9c11-5a20-4c31-8d10-726f6e696e31";
 static Preferences wifiStore;
 static NimBLECharacteristic* provChar = nullptr;
 static bool joinAsked = false;
+static bool staWanted = false;
 static String joinSsid;
 static String joinPass;
 static String joinIp;
+static int staChannel = 0;
+static uint8_t staBssid[6] = {};
+static bool staLocked = false;
+static uint32_t nextStaTry = 0;
 
 static bool fixedLan(const String& text, IPAddress* out) {
   IPAddress ip;
@@ -383,23 +393,133 @@ static void startProvision() {
   Serial.println("블루투스 이름 Ronin-Olimex. 처음 설정은 이 이름으로 받습니다.");
 }
 
-static bool beginStation(const String& ssid, const String& pass, const String& ipText) {
-  IPAddress ip;
+static void allowKoreaChannels() {
+  wifi_country_t country = {};
+  memcpy(country.cc, "KR", 3);
+  country.schan = 1;
+  country.nchan = 13;
+  country.policy = WIFI_COUNTRY_POLICY_MANUAL;
+  esp_wifi_set_country(&country);
+}
+
+static void pinAddress(const IPAddress& ip) {
+  esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  if (netif == nullptr) return;
+  esp_netif_dhcpc_stop(netif);
+  esp_netif_ip_info_t info = {};
+  info.ip.addr = static_cast<uint32_t>(ip);
+  info.gw.addr = static_cast<uint32_t>(IPAddress(192, 168, 10, 1));
+  info.netmask.addr = static_cast<uint32_t>(IPAddress(255, 255, 255, 0));
+  esp_netif_set_ip_info(netif, &info);
+}
+
+static void startHotspot(int channel) {
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
-  WiFi.softAP("Ronin-Olimex");
-  if (fixedLan(ipText, &ip)) {
-    WiFi.config(ip, IPAddress(192, 168, 10, 1), IPAddress(255, 255, 255, 0));
+  if (channel >= 1 && channel <= 13) WiFi.softAP("Ronin-Olimex", nullptr, channel);
+  else WiFi.softAP("Ronin-Olimex");
+}
+
+/// 핫스팟을 먼저 켜면 라디오가 1번 채널에 고정됩니다. 집 2.4GHz는 다른 채널이라 붙지 못합니다.
+static bool beginStation(const String& ssid, const String& pass, const String& ipText) {
+  staWanted = true;
+  joinSsid = ssid;
+  joinPass = pass;
+  IPAddress parsed;
+  String useIp = ipText;
+  if (!fixedLan(useIp, &parsed)) {
+    useIp = "192.168.10.151";
+    Serial.println("고정 주소가 없어 192.168.10.151 을 씁니다.");
+  }
+  joinIp = useIp;
+  if (ssid.isEmpty()) {
+    startHotspot(0);
+    nextStaTry = millis() + 15000;
+    return false;
+  }
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_STA);
+  allowKoreaChannels();
+  IPAddress ip;
+  if (fixedLan(useIp, &ip)) {
+    WiFi.config(ip, IPAddress(192, 168, 10, 1), IPAddress(255, 255, 255, 0), IPAddress(192, 168, 10, 1));
   } else {
-    WiFi.config(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
+    WiFi.config((uint32_t)0, (uint32_t)0, (uint32_t)0, (uint32_t)0);
   }
-  WiFi.begin(ssid.c_str(), pass.c_str());
+  staLocked = false;
+  const int found = WiFi.scanNetworks();
+  int bestRssi = -127;
+  int bestChannel = 0;
+  uint8_t best[6] = {};
+  if (found > 0) {
+    for (int i = 0; i < found; i++) {
+      if (WiFi.SSID(i) != ssid) continue;
+      const int channel = WiFi.channel(i);
+      if (channel < 1 || channel > 13) continue;
+      if (WiFi.RSSI(i) > bestRssi) {
+        bestRssi = WiFi.RSSI(i);
+        bestChannel = channel;
+        const uint8_t* bssid = WiFi.BSSID(i);
+        if (bssid != nullptr) memcpy(best, bssid, 6);
+      }
+    }
+  }
+  WiFi.scanDelete();
   Serial.println("와이파이에 붙는 중입니다. 비밀번호는 찍지 않습니다.");
-  const uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) {
-    delay(200);
+  if (bestChannel == 0) {
+    Serial.println("2.4GHz에서 그 이름을 찾지 못했습니다. 이 기판은 5GHz에 붙지 못합니다.");
+    WiFi.begin(ssid.c_str(), pass.c_str());
+  } else {
+    staChannel = bestChannel;
+    memcpy(staBssid, best, 6);
+    staLocked = true;
+    Serial.print("2.4GHz 채널 ");
+    Serial.println(bestChannel);
+    WiFi.begin(ssid.c_str(), pass.c_str(), bestChannel, staBssid);
   }
-  return WiFi.status() == WL_CONNECTED;
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) delay(200);
+  bool ok = WiFi.status() == WL_CONNECTED;
+  startHotspot(bestChannel);
+  IPAddress wanted;
+  if (fixedLan(useIp, &wanted)) {
+    Serial.print("USEIP ");
+    Serial.println(useIp);
+    pinAddress(wanted);
+  }
+  if (fixedLan(useIp, &wanted) && WiFi.localIP() != wanted) {
+    WiFi.config(wanted, IPAddress(192, 168, 10, 1), IPAddress(255, 255, 255, 0), IPAddress(192, 168, 10, 1));
+    if (staLocked) WiFi.begin(ssid.c_str(), pass.c_str(), staChannel, staBssid);
+    else WiFi.begin(ssid.c_str(), pass.c_str());
+    const uint32_t again = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - again < 10000) delay(200);
+    ok = WiFi.status() == WL_CONNECTED;
+    Serial.print("요청 주소 ");
+    Serial.println(useIp);
+  } else if (ok && WiFi.status() != WL_CONNECTED && staLocked) {
+    WiFi.begin(ssid.c_str(), pass.c_str(), staChannel, staBssid);
+    const uint32_t again = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - again < 8000) delay(200);
+    ok = WiFi.status() == WL_CONNECTED;
+  }
+  wifiStore.putString("ip", useIp);
+  if (ok) {
+    Serial.print("같은 와이파이 주소 ");
+    Serial.println(WiFi.localIP());
+  } else if (WiFi.status() == WL_CONNECT_FAILED) {
+    Serial.println("2.4GHz에 비밀번호가 맞지 않습니다. 처음 연결에서 다시 넣으세요.");
+  } else {
+    Serial.println("2.4GHz에 붙지 못했습니다. 핫스팟은 켜 둡니다.");
+  }
+  nextStaTry = millis() + 15000;
+  return ok;
+}
+
+static void keepStation() {
+  if (!staWanted || joinSsid.isEmpty() || WiFi.status() == WL_CONNECTED) return;
+  if (millis() < nextStaTry) return;
+  beginStation(joinSsid, joinPass, joinIp);
 }
 
 static void finishJoin() {
@@ -435,18 +555,18 @@ void setup() {
   NimBLEDevice::init("Ronin-Olimex");
   wifiStore.begin("olimex-wifi", false);
   startProvision();
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
-  WiFi.softAP("Ronin-Olimex");
   const String savedSsid = wifiStore.isKey("ssid") ? wifiStore.getString("ssid", "") : "";
   if (!savedSsid.isEmpty()) {
-    beginStation(savedSsid, wifiStore.getString("pass", ""), wifiStore.getString("ip", ""));
+    String savedIp = wifiStore.getString("ip", "");
+    if (savedIp.isEmpty() || savedIp == "192.168.10.204") savedIp = "192.168.10.151";
+    beginStation(savedSsid, wifiStore.getString("pass", ""), savedIp);
   } else {
 #if HUB_HAS_WIFI
     Serial.println("저장된 설정이 없어 비밀 파일의 와이파이로 붙습니다. 비밀번호는 찍지 않습니다.");
     beginStation(WIFI_SSID_1, WIFI_PASS, "192.168.10.151");
 #else
     Serial.println("저장된 와이파이가 없습니다. 블루투스 Ronin-Olimex 로 처음 설정을 받으세요.");
+    startHotspot(0);
 #endif
   }
   WiFi.onEvent([](arduino_event_id_t event) {
@@ -461,6 +581,9 @@ void setup() {
   } else {
     Serial.println("이더넷 초기화에 실패했습니다.");
   }
+  if (staWanted && WiFi.status() != WL_CONNECTED && !joinSsid.isEmpty()) {
+    beginStation(joinSsid, joinPass, joinIp);
+  }
   showIdentity();
   Serial.print("와이파이 MAC ");
   Serial.println(WiFi.macAddress());
@@ -472,6 +595,7 @@ void setup() {
 
 void loop() {
   if (joinAsked) finishJoin();
+  else keepStation();
   pump();
   socket.cleanupClients();
   delay(20);

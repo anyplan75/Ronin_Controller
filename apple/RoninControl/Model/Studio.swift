@@ -592,7 +592,7 @@ final class Studio: ObservableObject {
     }
 
     /// 화면의 팬·틸트입니다. 로닌 제어 C3 만 맡고, 그 연결이 없으면 보내지 않습니다.
-    func nudgeRonin(yaw: Double, pitch: Double) async {
+    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false) async {
         guard let board = roninC3 else {
             noteOffline("짐벌은 로닌 제어로 고른 C3 가 움직입니다. 그 C3 를 먼저 등록하세요.")
             return
@@ -603,13 +603,14 @@ final class Studio: ObservableObject {
         }
         if c3Socket.boardId != board.id || c3Socket.state != .online {
             c3Socket.connect(board)
-            note("\(board.name) 에 붙는 중입니다. 붙기 전에는 팬과 틸트를 보내지 않습니다.")
+            if !quiet { note("\(board.name) 에 붙는 중입니다. 붙기 전에는 팬과 틸트를 보내지 않습니다.") }
             return
         }
         let result = await c3Socket.command(["op": "ronin", "yaw": yaw, "pitch": pitch])
+        if quiet && result.ack { return }
         if result.ack {
             note("\(board.name) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 받았다고 답했습니다.")
-        } else {
+        } else if !quiet {
             note(result.sent ? result.reason : "\(board.name) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
         }
     }
@@ -781,8 +782,41 @@ final class Studio: ObservableObject {
         if lane == .usb {
             note("올리멕스 USB는 펌웨어와 시리얼 점검입니다. 촬영 명령은 나가지 않습니다.")
         } else {
-            note("올리멕스 연결을 \(lane.title) 로 바꿨습니다. 지금 연결을 다시 누르세요.")
+            note("올리멕스 연결을 \(lane.title) 로 바꿨습니다.")
+            reconnectOlimex(quiet: true)
         }
+    }
+
+    /// 고른 길의 주소로 바로 웹소켓을 엽니다. 다른 길의 주소를 섞지 않습니다.
+    func reconnectOlimex(quiet: Bool = false) {
+        guard profile.olimexRegistered else {
+            if !quiet { note("먼저 올리멕스 ESP32-PoE 를 등록하세요.") }
+            return
+        }
+        switch boardSocket.lane {
+        case .usb:
+            if !quiet { note("올리멕스 USB는 펌웨어와 시리얼 점검입니다. 촬영 명령은 나가지 않습니다.") }
+            return
+        case .poe:
+            boardSocket.reportedHost = "192.168.10.150"
+            boardSocket.reportedPort = 81
+        case .ap:
+            boardSocket.reportedHost = "192.168.4.1"
+            boardSocket.reportedPort = 81
+        case .lan:
+            var saved = profile.olimexLanHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            if saved.isEmpty || saved == "192.168.10.204" { saved = "192.168.10.151" }
+            boardSocket.reportedHost = saved.hasPrefix("192.168.10.") ? saved : "192.168.10.151"
+            boardSocket.reportedPort = 81
+        }
+        boardSocket.connect()
+    }
+
+    func reconnectC3(_ id: UUID? = nil) {
+        let board = profile.c3Boards.first { $0.id == id } ?? profile.c3Boards.first { $0.duty == .ronin && $0.link.shoots } ?? profile.c3Boards.first { $0.link.shoots }
+        guard let board else { return }
+        guard board.link.shoots else { return }
+        c3Socket.connect(board)
     }
 
     func chooseC3Mode(_ id: UUID, _ lane: BoardLane) {
@@ -820,7 +854,7 @@ final class Studio: ObservableObject {
 
     func setHomeAim(_ id: UUID, yaw: Double, pitch: Double) {
         moveStage(deviceId: id, homeYaw: yaw, homePitch: pitch)
-        note("기준 방향을 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 로 저장했습니다. 이후 움직임은 이 기준에서의 차이입니다.")
+        note("기본 시선을 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 에 고정했습니다. 이후 시선은 이 방향에서의 절대각입니다.")
     }
 
     func toggleShootGroup(_ name: String, deviceId: UUID) {
@@ -955,7 +989,21 @@ final class Studio: ObservableObject {
         }
         c3.start()
         await connectRegisteredBoards()
+        Task { await keepFieldLinks() }
         await watchBoards()
+    }
+
+    /// 등록된 올리멕스와 C3 가 오프라인이면 저장된 192.168.10 주소로 다시 엽니다.
+    private func keepFieldLinks() async {
+        while !Task.isCancelled {
+            if profile.olimexRegistered && boardSocket.state == .offline && boardSocket.lane.shoots {
+                reconnectOlimex(quiet: true)
+            }
+            if c3Socket.state == .offline {
+                reconnectC3()
+            }
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+        }
     }
 
     private func adoptBoard(mac: String, host: String, port: Int) {

@@ -611,8 +611,16 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
     var apMac: String
 
     var socketHost: String {
-        let saved = lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        return saved.isEmpty ? link.c3Host : saved
+        switch link {
+        case .ap:
+            return "192.168.4.1"
+        case .lan:
+            let saved = lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            if saved.isEmpty || saved == "192.168.10.205" { return "192.168.10.152" }
+            return saved.hasPrefix("192.168.10.") ? saved : "192.168.10.152"
+        case .poe, .usb:
+            return ""
+        }
     }
 
     init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "", wifiMac: String = "", apMac: String = "") {

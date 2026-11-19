@@ -32,6 +32,11 @@ struct StudioControlScreen: View {
     @State private var floorTool: FloorTool = .look
     @State private var ptzDrive: Task<Void, Never>?
     @State private var ptzSent = Date.distantPast
+    @State private var stickSpeed = 0.45
+    @State private var absoluteTask: Task<Void, Never>?
+    @State private var absolutePending: (PtzRecord, Double, Double, Double)?
+    @State private var roninTask: Task<Void, Never>?
+    @State private var roninPending: (Double, Double)?
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -110,11 +115,7 @@ struct StudioControlScreen: View {
                 }
                 .pickerStyle(.menu)
                 Button(link.state == .connecting ? "연결 중" : "지금 연결") {
-                    guard studio.profile.olimexRegistered else {
-                        studio.note("먼저 올리멕스 ESP32-PoE 를 등록하세요.")
-                        return
-                    }
-                    link.connect()
+                    studio.reconnectOlimex()
                 }
                 .buttonStyle(DeskButtonStyle(selected: link.state == .online || link.state == .connecting))
                 .disabled(link.state == .connecting || !studio.profile.olimexRegistered || !link.lane.shoots)
@@ -286,7 +287,8 @@ struct StudioControlScreen: View {
             ptz: studio.profile.ptzCameras,
             ptzPose: ptzPose,
             ptzOnline: ptzOnline,
-            onMovePtz: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) }
+            onMovePtz: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) },
+            onAim: { id, heading in aimOnStage(id, heading: heading) }
         )
         .onChange(of: link.tallyNote) { _, note in
             if !note.isEmpty { studio.note(note) }
@@ -424,25 +426,41 @@ struct StudioControlScreen: View {
                     Text(lane.title).tag(lane)
                 }
             }
+            Button(c3Link.boardId == board.id && c3Link.state == .connecting ? "연결 중" : "지금 연결") {
+                studio.reconnectC3(board.id)
+            }
+            .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
+            .disabled(c3Link.state == .connecting || !board.link.shoots)
             if board.duty == .ronin {
                 let spot = studio.stageSpot(for: board.id)
-                Text("기준 팬 \(Int(spot.homeYaw))°, 틸트 \(Int(spot.homePitch))°. 슬라이더는 그 기준에서의 차이입니다. 무대 화각은 기준과 이 차이를 더해 미터 눈금으로 그립니다.")
+                Text("조이스틱은 누르는 동안만 움직입니다. 슬라이더는 바로 그 각도로 갑니다. 무대에서 시선을 끌어도 그 절대 방향입니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("차이 팬 \(Int(yaw))°")
-                Slider(value: $yaw, in: -180...180, step: 1)
-                Text("틸트 \(Int(pitch))°")
-                Slider(value: $pitch, in: -56...90, step: 1)
-                Button("이 차이를 보내기") {
-                    Task { await studio.nudgeRonin(yaw: yaw, pitch: pitch) }
+                Text("기본 시선 팬 \(Int(spot.homeYaw))°, 틸트 \(Int(spot.homePitch))°")
+                    .font(.caption.weight(.semibold))
+                PtzStick { x, y in
+                    steerRonin(pan: x * stickSpeed, tilt: -y * stickSpeed)
+                } onEnd: {
+                    Task { await studio.nudgeRonin(yaw: yaw, pitch: pitch, quiet: true) }
                 }
-                .buttonStyle(DeskButtonStyle(selected: true, expand: true))
-                Button("지금 각도를 기준으로") {
-                    studio.setHomeAim(board.id, yaw: spot.homeYaw + yaw, pitch: spot.homePitch + pitch)
+                HStack {
+                    holdNudge("왼쪽") { steerRonin(pan: -stickSpeed, tilt: 0) }
+                    holdNudge("오른쪽") { steerRonin(pan: stickSpeed, tilt: 0) }
+                    holdNudge("위") { steerRonin(pan: 0, tilt: stickSpeed) }
+                    holdNudge("아래") { steerRonin(pan: 0, tilt: -stickSpeed) }
+                }
+                Text("팬 \(Int(wrapDegrees(spot.homeYaw + yaw)))°")
+                Slider(value: Binding(get: { yaw }, set: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -180...180, step: 1)
+                Text("틸트 \(Int(spot.homePitch + pitch))°")
+                Slider(value: Binding(get: { pitch }, set: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -56...90, step: 1)
+                Text("속도 \(Int(stickSpeed * 100))%")
+                Slider(value: $stickSpeed, in: 0.15...1)
+                Button("기본 시선 고정") {
+                    studio.setHomeAim(board.id, yaw: wrapDegrees(spot.homeYaw + yaw), pitch: spot.homePitch + pitch)
                     yaw = 0
                     pitch = 0
                 }
-                .buttonStyle(DeskButtonStyle(expand: true))
+                .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             } else {
                 let level = lightLevel[board.id] ?? 40
                 let kelvin = lightKelvin[board.id] ?? 4500
@@ -530,43 +548,44 @@ struct StudioControlScreen: View {
             Text(camera.endpoint.isEmpty ? "ONVIF 주소를 찾는 중입니다." : camera.endpoint)
                 .font(.caption)
                 .textSelection(.enabled)
-            Text("스틱을 누르는 동안 팬·틸트가 움직입니다. 손을 떼면 멈춥니다. 카메라가 명령을 받았을 때만 성공입니다.")
+            Text("조이스틱과 끝 버튼은 누르는 동안만 움직입니다. 팬·틸트·줌 슬라이더는 바로 그 각도로 갑니다. 무대 시선도 절대 방향입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            let spot = studio.stageSpot(for: camera.id)
+            Text("기본 시선 \(Int(spot.homeYaw))°")
+                .font(.caption.weight(.semibold))
             PtzStick { x, y in
-                let pan = x
-                let tilt = -y
-                setPose(camera.id, yaw: pan * 180, pitch: tilt * 45)
-                steer(camera, pan: pan, tilt: tilt, zoom: 0)
+                steer(camera, pan: x * stickSpeed, tilt: -y * stickSpeed, zoom: 0)
             } onEnd: {
                 halt(camera)
             }
             HStack {
-                zoomButton("줌 인", camera: camera, zoom: 0.45)
-                zoomButton("줌 아웃", camera: camera, zoom: -0.45)
+                holdNudge("왼쪽", onChange: { steer(camera, pan: -stickSpeed, tilt: 0, zoom: 0) }, onEnd: { halt(camera) })
+                holdNudge("오른쪽", onChange: { steer(camera, pan: stickSpeed, tilt: 0, zoom: 0) }, onEnd: { halt(camera) })
+                holdNudge("위", onChange: { steer(camera, pan: 0, tilt: stickSpeed, zoom: 0) }, onEnd: { halt(camera) })
+                holdNudge("아래", onChange: { steer(camera, pan: 0, tilt: -stickSpeed, zoom: 0) }, onEnd: { halt(camera) })
             }
-            Text("팬 \(Int(pose.yaw))°")
-            Slider(value: Binding(get: { ptzPose[camera.id]?.yaw ?? 0 }, set: { setPose(camera.id, yaw: $0) }), in: -180...180, step: 1)
+            Text("팬 \(Int(wrapDegrees(spot.homeYaw + pose.yaw)))°")
+            Slider(value: Binding(get: { ptzPose[camera.id]?.yaw ?? 0 }, set: {
+                setPose(camera.id, yaw: $0)
+                sendAbsolute(camera)
+            }), in: -180...180, step: 1)
             Text("틸트 \(Int(pose.pitch))°")
-            Slider(value: Binding(get: { ptzPose[camera.id]?.pitch ?? 0 }, set: { setPose(camera.id, pitch: $0) }), in: -45...45, step: 1)
+            Slider(value: Binding(get: { ptzPose[camera.id]?.pitch ?? 0 }, set: {
+                setPose(camera.id, pitch: $0)
+                sendAbsolute(camera)
+            }), in: -45...45, step: 1)
             Text("줌 \(Int((ptzPose[camera.id]?.zoom ?? 0) * 100))%")
-            Slider(value: Binding(get: { ptzPose[camera.id]?.zoom ?? 0 }, set: { setPose(camera.id, zoom: $0) }), in: 0...1)
-            Button("이 각도로 보내기") {
-                Task {
-                    let password = FieldSecret.load(account: camera.id.uuidString)
-                    let result = await Onvif.move(
-                        host: camera.host,
-                        endpoint: camera.endpoint,
-                        user: camera.username,
-                        password: password,
-                        pan: pose.yaw,
-                        tilt: pose.pitch,
-                        zoom: pose.zoom
-                    )
-                    if !result.1.isEmpty { studio.rememberPtzEndpoint(camera.id, result.1) }
-                    if result.0.contains("받았습니다") { ptzOnline.insert(camera.id) }
-                    studio.note(result.0)
-                }
+            Slider(value: Binding(get: { ptzPose[camera.id]?.zoom ?? 0 }, set: {
+                setPose(camera.id, zoom: $0)
+                sendAbsolute(camera)
+            }), in: 0...1)
+            Text("속도 \(Int(stickSpeed * 100))%")
+            Slider(value: $stickSpeed, in: 0.15...1)
+            Button("기본 시선 고정") {
+                let current = ptzPose[camera.id] ?? PtzPose()
+                studio.setHomeAim(camera.id, yaw: wrapDegrees(spot.homeYaw + current.yaw), pitch: spot.homePitch + current.pitch)
+                setPose(camera.id, yaw: 0, pitch: 0)
             }
             .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             Button("상태 확인") {
@@ -577,19 +596,105 @@ struct StudioControlScreen: View {
         .task(id: camera.id) { await refreshPtz(camera) }
     }
 
-    private func zoomButton(_ title: String, camera: PtzRecord, zoom: Double) -> some View {
+    private func holdNudge(_ title: String, onChange: @escaping () -> Void, onEnd: @escaping () -> Void = {}) -> some View {
         Text(title)
             .font(.caption.weight(.bold))
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 8)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
             .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { _ in steer(camera, pan: 0, tilt: 0, zoom: zoom) }
-                    .onEnded { _ in halt(camera) }
+                    .onChanged { _ in onChange() }
+                    .onEnded { _ in onEnd() }
             )
+    }
+
+    private func wrapDegrees(_ value: Double) -> Double {
+        var next = value
+        while next > 180 { next -= 360 }
+        while next < -180 { next += 360 }
+        return next
+    }
+
+    private func aimOnStage(_ id: String, heading: Double) {
+        guard let uuid = UUID(uuidString: id) else { return }
+        let spot = studio.stageSpot(for: uuid)
+        let relative = wrapDegrees(heading - spot.homeYaw)
+        if let camera = studio.profile.ptzCameras.first(where: { $0.id == uuid }) {
+            setPose(uuid, yaw: relative)
+            sendAbsolute(camera)
+            return
+        }
+        if studio.roninC3?.id == uuid {
+            yaw = relative
+            queueRonin(yaw: yaw, pitch: pitch)
+        }
+    }
+
+    private func sendAbsolute(_ camera: PtzRecord) {
+        let pose = ptzPose[camera.id] ?? PtzPose()
+        absolutePending = (camera, pose.yaw, pose.pitch, pose.zoom)
+        guard absoluteTask == nil else { return }
+        absoluteTask = Task {
+            while let next = absolutePending {
+                absolutePending = nil
+                let password = FieldSecret.load(account: next.0.id.uuidString)
+                let result = await Onvif.move(
+                    host: next.0.host,
+                    endpoint: next.0.endpoint,
+                    user: next.0.username,
+                    password: password,
+                    pan: next.1,
+                    tilt: next.2,
+                    zoom: next.3,
+                    viscaPort: next.0.viscaPort
+                )
+                if !result.1.isEmpty { studio.rememberPtzEndpoint(next.0.id, result.1) }
+                if result.0.contains("받았습니다") {
+                    ptzOnline.insert(next.0.id)
+                } else {
+                    ptzOnline.remove(next.0.id)
+                    studio.note(result.0)
+                }
+                try? await Task.sleep(nanoseconds: 220_000_000)
+            }
+            absoluteTask = nil
+            if absolutePending != nil, let pending = absolutePending {
+                sendAbsolute(pending.0)
+            }
+        }
+    }
+
+    private func steerRonin(pan: Double, tilt: Double, absolute: Bool = false) {
+        if absolute {
+            yaw = pan
+            pitch = tilt
+        } else {
+            let now = Date()
+            if now.timeIntervalSince(ptzSent) < 0.16 { return }
+            ptzSent = now
+            yaw = wrapDegrees(yaw + pan * 8)
+            pitch = min(90, max(-56, pitch + tilt * 4))
+        }
+        queueRonin(yaw: yaw, pitch: pitch)
+    }
+
+    private func queueRonin(yaw: Double, pitch: Double) {
+        roninPending = (yaw, pitch)
+        guard roninTask == nil else { return }
+        roninTask = Task {
+            while let next = roninPending {
+                roninPending = nil
+                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true)
+                try? await Task.sleep(nanoseconds: 220_000_000)
+            }
+            roninTask = nil
+            if let pending = roninPending {
+                queueRonin(yaw: pending.0, pitch: pending.1)
+            }
+        }
     }
 
     private func steer(_ camera: PtzRecord, pan: Double, tilt: Double, zoom: Double) {
@@ -816,7 +921,9 @@ private struct FloorPlan: View {
     var ptzPose: [UUID: PtzPose]
     var ptzOnline: Set<UUID>
     var onMovePtz: (UUID, Double, Double) -> Void
+    var onAim: (String, Double) -> Void
     @State private var drag: String?
+    @State private var dragAim = false
     @State private var draft: FloorMark?
 
     private var stageMark: FloorMark {
@@ -908,7 +1015,7 @@ private struct FloorPlan: View {
                         size: size,
                         x: spot.x,
                         y: spot.y,
-                        aim: pose.yaw,
+                        aim: spot.homeYaw + pose.yaw,
                         pitch: pose.pitch,
                         title: camera.name,
                         mark: "arrow.up.and.down.and.arrow.left.and.right",
@@ -946,9 +1053,29 @@ private struct FloorPlan: View {
                             draft = FloorMark(x: min(a.x, b.x), y: min(a.y, b.y), w: abs(a.x - b.x), d: abs(a.y - b.y))
                             return
                         }
-                        if drag == nil { drag = hit(value.startLocation, size: geo.size) }
+                        if drag == nil {
+                            let body = hit(value.startLocation, size: geo.size)
+                            if let body, body != selected || !canAim(body) {
+                                drag = body
+                                dragAim = false
+                            } else if let selected, canAim(selected) {
+                                let at = bodyPoint(selected, size: geo.size)
+                                let inside = body == selected && hypot(at.x - value.startLocation.x, at.y - value.startLocation.y) < 22
+                                drag = selected
+                                dragAim = !inside
+                            } else {
+                                drag = body
+                                dragAim = false
+                            }
+                        }
                         guard let drag else { return }
                         let room = unplan(value.location, size: geo.size)
+                        if dragAim, let id = UUID(uuidString: drag) {
+                            let spot = studio.stageSpot(for: id)
+                            let heading = atan2(room.x - spot.x, room.y - spot.y) * 180 / .pi
+                            onAim(drag, heading)
+                            return
+                        }
                         if let id = UUID(uuidString: drag), gimbal?.id == id || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
                             onMoveGimbal(id, room.x, room.y)
                         } else if let id = UUID(uuidString: drag), ptz.contains(where: { $0.id == id }) {
@@ -964,6 +1091,7 @@ private struct FloorPlan: View {
                         }
                         draft = nil
                         drag = nil
+                        dragAim = false
                     }
             )
             .overlay(alignment: .topLeading) {
@@ -1078,6 +1206,18 @@ private struct FloorPlan: View {
         if text.contains("insta") || camera.ble == "CE80" { return "pano" }
         if text.contains("osmo") || camera.ble == "FFF0" { return "video.fill" }
         return "camera.fill"
+    }
+
+    private func canAim(_ id: String) -> Bool {
+        guard let uuid = UUID(uuidString: id) else { return false }
+        if gimbal?.id == uuid { return true }
+        return ptz.contains { $0.id == uuid }
+    }
+
+    private func bodyPoint(_ id: String, size: CGSize) -> CGPoint {
+        guard let uuid = UUID(uuidString: id) else { return .zero }
+        let spot = studio.stageSpot(for: uuid)
+        return plan(x: spot.x, y: spot.y, size: size)
     }
 
     private func hit(_ point: CGPoint, size: CGSize) -> String? {

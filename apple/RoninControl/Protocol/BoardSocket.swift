@@ -138,7 +138,7 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         task.resume()
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.generation == token, self.state == .connecting else { return }
-            self.fail("기판이 81번 문을 열지 않았습니다.")
+            self.fail("\(self.endpoint) 이 열리지 않았습니다. 기판은 2.4GHz만 붙습니다.")
         }
     }
 
@@ -251,15 +251,12 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if let tally = object["tally"] as? [String: Any], let note = tally["note"] as? String {
             tallyNote = note
         }
-        if let host = object["host"] as? String {
-            let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !clean.isEmpty {
-                reportedHost = clean
-                if let port = object["port"] as? Int, port > 0 {
-                    reportedPort = port
-                }
-                detail = "연결됨 \(endpoint)"
+        if let picked = hostForLane(object) {
+            reportedHost = picked
+            if let port = object["port"] as? Int, port > 0 {
+                reportedPort = port
             }
+            detail = "연결됨 \(endpoint)"
         }
         if let mac = object["wifiMac"] as? String, !mac.isEmpty { wifiMac = mac }
         if let mac = object["ethMac"] as? String, !mac.isEmpty { ethMac = mac }
@@ -284,6 +281,26 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         yaw = nil
         pitch = nil
         reportedRecording = nil
+    }
+
+    /// 고른 길과 다른 주소로 바꾸지 않습니다. 와이파이 중인데 이더넷 주소로 갈아타면 다시 끊깁니다.
+    private func hostForLane(_ object: [String: Any]) -> String? {
+        let wifi = (object["wifiHost"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let eth = (object["ethHost"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let host = (object["host"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch lane {
+        case .lan:
+            if wifi.hasPrefix("192.168.10.") { return wifi }
+            if host.hasPrefix("192.168.10.") { return host }
+        case .poe:
+            if eth == "192.168.10.150" { return eth }
+            if host == "192.168.10.150" { return host }
+        case .ap:
+            if host == "192.168.4.1" || wifi == "192.168.4.1" { return "192.168.4.1" }
+        case .usb:
+            break
+        }
+        return nil
     }
 
     private func endpointURL() -> URL {
@@ -333,7 +350,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         task.resume()
         DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.generation == token, self.state == .connecting else { return }
-            self.fail("C3 가 82번 문을 열지 않았습니다.")
+            self.fail("\(host):\(board.link.c3Port) 이 열리지 않았습니다. C3 는 2.4GHz만 붙습니다.")
         }
     }
 

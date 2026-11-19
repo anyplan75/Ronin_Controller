@@ -20,10 +20,37 @@ enum Visca {
         return ok
     }
 
+    /// 무대 시선의 절대각입니다. 1단계는 0.075° 이고, 90 41 이 올 때만 성공입니다.
+    static func absolute(host: String, port: UInt16 = 1259, pan: Double, tilt: Double, zoom: Double) async -> Bool {
+        let panSteps = Int((max(-170, min(170, pan)) / 0.075).rounded())
+        let tiltSteps = Int((max(-90, min(90, tilt)) / 0.075).rounded())
+        var bytes: [UInt8] = [0x81, 0x01, 0x06, 0x02, 0x14, 0x12]
+        bytes.append(contentsOf: nibbles(panSteps))
+        bytes.append(contentsOf: nibbles(tiltSteps))
+        bytes.append(0xFF)
+        let moved = await send(host: host, port: port, bytes: bytes)
+        let zoomSteps = Int((max(0, min(1, zoom)) * 0x4000).rounded())
+        var zoomBytes: [UInt8] = [0x81, 0x01, 0x04, 0x47]
+        zoomBytes.append(contentsOf: nibbles(zoomSteps))
+        zoomBytes.append(0xFF)
+        let zoomed = await send(host: host, port: port, bytes: zoomBytes)
+        return moved || zoomed
+    }
+
     static func stop(host: String, port: UInt16 = 1259) async -> Bool {
         let pan = await send(host: host, port: port, bytes: [0x81, 0x01, 0x06, 0x01, 0x01, 0x01, 0x03, 0x03, 0xFF])
         let zoom = await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x07, 0x00, 0xFF])
         return pan || zoom
+    }
+
+    private static func nibbles(_ value: Int) -> [UInt8] {
+        let bits = UInt16(bitPattern: Int16(clamping: value))
+        return [
+            UInt8((bits >> 12) & 0x0F),
+            UInt8((bits >> 8) & 0x0F),
+            UInt8((bits >> 4) & 0x0F),
+            UInt8(bits & 0x0F),
+        ]
     }
 
     private static func speed(_ amount: Double, limit: UInt8) -> UInt8 {
