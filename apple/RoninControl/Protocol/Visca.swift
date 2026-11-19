@@ -4,25 +4,25 @@ import Foundation
 enum Visca {
     static let port: UInt16 = 1259
 
-    static func drive(host: String, pan: Double, tilt: Double, zoom: Double) async -> Bool {
+    static func drive(host: String, port: UInt16 = 1259, pan: Double, tilt: Double, zoom: Double) async -> Bool {
         let panSpeed = speed(abs(pan), limit: 0x14)
         let tiltSpeed = speed(abs(tilt), limit: 0x10)
         let panDir: UInt8 = pan > 0.08 ? 0x02 : (pan < -0.08 ? 0x01 : 0x03)
         let tiltDir: UInt8 = tilt > 0.08 ? 0x01 : (tilt < -0.08 ? 0x02 : 0x03)
         var ok = true
         if panDir != 0x03 || tiltDir != 0x03 {
-            ok = await send(host: host, bytes: [0x81, 0x01, 0x06, 0x01, panSpeed, tiltSpeed, panDir, tiltDir, 0xFF])
+            ok = await send(host: host, port: port, bytes: [0x81, 0x01, 0x06, 0x01, panSpeed, tiltSpeed, panDir, tiltDir, 0xFF])
         }
         if abs(zoom) > 0.08 {
             let zoomByte: UInt8 = zoom > 0 ? 0x02 : 0x03
-            ok = await send(host: host, bytes: [0x81, 0x01, 0x04, 0x07, zoomByte, 0xFF]) && ok
+            ok = await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x07, zoomByte, 0xFF]) && ok
         }
         return ok
     }
 
-    static func stop(host: String) async -> Bool {
-        let pan = await send(host: host, bytes: [0x81, 0x01, 0x06, 0x01, 0x01, 0x01, 0x03, 0x03, 0xFF])
-        let zoom = await send(host: host, bytes: [0x81, 0x01, 0x04, 0x07, 0x00, 0xFF])
+    static func stop(host: String, port: UInt16 = 1259) async -> Bool {
+        let pan = await send(host: host, port: port, bytes: [0x81, 0x01, 0x06, 0x01, 0x01, 0x01, 0x03, 0x03, 0xFF])
+        let zoom = await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x07, 0x00, 0xFF])
         return pan || zoom
     }
 
@@ -32,15 +32,15 @@ enum Visca {
     }
 
     /// 카메라가 90 41(받음) 또는 90 50(완료)으로 답할 때만 성공입니다.
-    private static func send(host: String, bytes: [UInt8]) async -> Bool {
+    private static func send(host: String, port: UInt16, bytes: [UInt8]) async -> Bool {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: exchange(host: host, bytes: bytes))
+                continuation.resume(returning: exchange(host: host, port: port, bytes: bytes))
             }
         }
     }
 
-    private static func exchange(host: String, bytes: [UInt8]) -> Bool {
+    private static func exchange(host: String, port: UInt16, bytes: [UInt8]) -> Bool {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         if fd < 0 { return false }
         defer { close(fd) }

@@ -664,21 +664,25 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var name: String
     var host: String
     var username: String
-    /// 카메라가 알려 준 ONVIF 주소입니다. 비어 있으면 호스트로 다시 찾습니다.
+    /// 카메라가 알려 준 ONVIF 주소입니다. 비어 있으면 호스트와 ONVIF 포트로 만듭니다.
     var endpoint: String
-    /// 공유기에서 보는 카메라 MAC 입니다.
+    /// 공유기에서 보는 카메라 MAC 입니다. 비워도 등록됩니다.
     var mac: String
+    var onvifPort: Int
+    var viscaPort: Int
 
-    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "") {
+    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "", onvifPort: Int = 2000, viscaPort: Int = 1259) {
         self.id = id
         self.name = name
         self.host = host
         self.username = username
         self.endpoint = endpoint
         self.mac = mac
+        self.onvifPort = onvifPort
+        self.viscaPort = viscaPort
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac }
+    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac, onvifPort, viscaPort }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -688,6 +692,8 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         username = try box.decodeIfPresent(String.self, forKey: .username) ?? ""
         endpoint = try box.decodeIfPresent(String.self, forKey: .endpoint) ?? ""
         mac = try box.decodeIfPresent(String.self, forKey: .mac) ?? ""
+        onvifPort = try box.decodeIfPresent(Int.self, forKey: .onvifPort) ?? 2000
+        viscaPort = try box.decodeIfPresent(Int.self, forKey: .viscaPort) ?? 1259
     }
 
     func encode(to encoder: Encoder) throws {
@@ -698,6 +704,8 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         try box.encode(username, forKey: .username)
         try box.encode(endpoint, forKey: .endpoint)
         try box.encode(mac, forKey: .mac)
+        try box.encode(onvifPort, forKey: .onvifPort)
+        try box.encode(viscaPort, forKey: .viscaPort)
     }
 }
 

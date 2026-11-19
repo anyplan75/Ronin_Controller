@@ -246,30 +246,34 @@ final class Studio: ObservableObject {
         }
     }
 
-    func addPtz(host: String, username: String, password: String, endpoint: String = "", mac: String = "") {
+    func addPtz(host: String, username: String, password: String, name: String = "", onvifPort: Int = 2000, viscaPort: Int = 1259, mac: String = "") {
         let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clean.hasPrefix("192.168.10."), clean.split(separator: ".").count == 4 else {
             note("PTZ 주소는 192.168.10.x 만 됩니다.")
             return
         }
-        if let existing = profile.ptzCameras.first(where: { $0.host == clean }) {
-            FieldSecret.save(password, account: existing.id.uuidString)
-            rememberPtzEndpoint(existing.id, endpoint)
-            rememberPtzMac(existing.id, mac)
-            if !username.isEmpty {
-                if let index = profile.ptzCameras.firstIndex(where: { $0.id == existing.id }) {
-                    profile.ptzCameras[index].username = username
-                }
-            }
-            note("\(clean) 은 이미 목록에 있습니다.")
+        let onvif = (1...65535).contains(onvifPort) ? onvifPort : 2000
+        let visca = (1...65535).contains(viscaPort) ? viscaPort : 1259
+        let endpoint = "http://\(clean):\(onvif)/onvif/device_service"
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = title.isEmpty ? "PTZ \(clean)" : title
+        if let index = profile.ptzCameras.firstIndex(where: { $0.host == clean }) {
+            FieldSecret.save(password, account: profile.ptzCameras[index].id.uuidString)
+            profile.ptzCameras[index].endpoint = endpoint
+            profile.ptzCameras[index].onvifPort = onvif
+            profile.ptzCameras[index].viscaPort = visca
+            profile.ptzCameras[index].name = display
+            if !mac.isEmpty { profile.ptzCameras[index].mac = mac }
+            if !username.isEmpty { profile.ptzCameras[index].username = username }
+            note("\(display) 설정을 바로 저장했습니다. ONVIF \(onvif), Visca \(visca).")
             return
         }
-        let camera = PtzRecord(id: UUID(), name: "PTZ \(clean)", host: clean, username: username, endpoint: endpoint, mac: mac)
+        let camera = PtzRecord(id: UUID(), name: display, host: clean, username: username, endpoint: endpoint, mac: mac, onvifPort: onvif, viscaPort: visca)
         profile.ptzCameras.append(camera)
         FieldSecret.save(password, account: camera.id.uuidString)
         let index = profile.ptzCameras.count
         moveStage(deviceId: camera.id, x: -3 + Double(index) * 1.4, y: 6, z: 1.6)
-        note("PTZ \(clean) 을 무대에 넣었습니다. ONVIF 가 답하기 전에는 오프라인입니다.")
+        note("\(display) 을 바로 등록했습니다. ONVIF \(onvif), Visca \(visca). 찾기를 기다리지 않습니다.")
     }
 
     func deletePtz(_ id: UUID) {

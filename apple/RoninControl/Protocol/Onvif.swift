@@ -67,7 +67,7 @@ enum Onvif {
     }
 
     /// 스틱이 누르는 동안 연속으로 움직입니다. 성공 응답이 있을 때만 빈 실패 문장이 아닙니다.
-    static func drive(host: String, endpoint: String, user: String, password: String, pan: Double, tilt: Double, zoom: Double) async -> (String, String) {
+    static func drive(host: String, endpoint: String, user: String, password: String, pan: Double, tilt: Double, zoom: Double, viscaPort: Int = 1259) async -> (String, String) {
         if let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) {
             let x = max(-1, min(1, pan))
             let y = max(-1, min(1, tilt))
@@ -80,13 +80,14 @@ enum Onvif {
                 return ("\(host) ONVIF 2000이 조이스틱 명령을 받았습니다.", token.device)
             }
         }
-        if await Visca.drive(host: host, pan: pan, tilt: tilt, zoom: zoom) {
-            return ("\(host) Visca 1259가 조이스틱 명령을 받았습니다.", endpoint)
+        let visca = UInt16(viscaPort)
+        if await Visca.drive(host: host, port: visca, pan: pan, tilt: tilt, zoom: zoom) {
+            return ("\(host) Visca \(viscaPort)가 조이스틱 명령을 받았습니다.", endpoint)
         }
         return ("\(host) ONVIF와 Visca가 조이스틱을 받지 않았습니다. 움직이지 않은 것으로 둡니다.", "")
     }
 
-    static func stop(host: String, endpoint: String, user: String, password: String) async -> String {
+    static func stop(host: String, endpoint: String, user: String, password: String, viscaPort: Int = 1259) async -> String {
         if let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) {
             let body = """
             <tptz:Stop xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>
@@ -94,8 +95,8 @@ enum Onvif {
             let reply = await post(url: token.ptz, user: user, password: password, body: body)
             if reply.ok { return "\(host) ONVIF 2000이 멈춤을 받았습니다." }
         }
-        if await Visca.stop(host: host) {
-            return "\(host) Visca 1259가 멈춤을 받았습니다."
+        if await Visca.stop(host: host, port: UInt16(viscaPort)) {
+            return "\(host) Visca \(viscaPort)가 멈춤을 받았습니다."
         }
         return "\(host) 가 멈춤에 답하지 않았습니다."
     }
