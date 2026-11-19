@@ -28,6 +28,21 @@ struct SeenBoard: Identifiable {
     }
 }
 
+/// 기판이 알려 준 MAC 입니다. 공유기 고정 주소 예약에 씁니다.
+struct BoardRadios: Equatable {
+    var wifi = ""
+    var ethernet = ""
+    var hotspot = ""
+
+    static func parse(_ object: [String: Any]) -> BoardRadios {
+        BoardRadios(
+            wifi: (object["wifiMac"] as? String) ?? "",
+            ethernet: (object["ethMac"] as? String) ?? "",
+            hotspot: (object["apMac"] as? String) ?? ""
+        )
+    }
+}
+
 /// 기판 블루투스에 와이파이 이름과 비밀번호를 넣고, 붙은 주소를 받습니다.
 final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     static let service = CBUUID(string: "7b1e9c10-5a20-4c31-8d10-726f6e696e31")
@@ -35,9 +50,11 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
 
     @Published private(set) var boards: [SeenBoard] = []
     @Published private(set) var phase = "블루투스를 준비하는 중입니다."
+    @Published private(set) var radios = BoardRadios()
     private var manager: CBCentralManager?
-    private var pending: [(CBPeripheral, CBCharacteristic)] = []
-    private var waiter: ((Bool, String, Int) -> Void)?
+    private var waiter: ((Bool, String, Int, BoardRadios) -> Void)?
+    private enum Purpose { case idle, readMac, join }
+    private var purpose = Purpose.idle
 
     func start() {
         if manager == nil {
@@ -51,19 +68,38 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
         manager?.stopScan()
     }
 
-    func send(board: SeenBoard, ssid: String, password: String, ip: String) async -> (ok: Bool, host: String, port: Int) {
-        guard let manager, manager.state == .poweredOn else {
-            return (false, "", 0)
+    func identify(board: SeenBoard) async -> BoardRadios {
+        guard let manager, manager.state == .poweredOn else { return BoardRadios() }
+        phase = "\(board.name) 의 MAC 을 읽는 중입니다."
+        purpose = .readMac
+        target = board.peripheral
+        board.peripheral.delegate = self
+        return await withCheckedContinuation { continuation in
+            waiter = { _, _, _, radios in
+                continuation.resume(returning: radios)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                guard let self, self.waiter != nil, self.purpose == .readMac else { return }
+                self.finish(ok: false, host: "", port: 0, note: "MAC 은 기판이 알려 주기 전에는 비어 있습니다.")
+            }
+            manager.connect(board.peripheral, options: nil)
         }
-        phase = "\(board.name) 에 붙는 중입니다."
+    }
+
+    func send(board: SeenBoard, ssid: String, password: String, ip: String) async -> (ok: Bool, host: String, port: Int, radios: BoardRadios) {
+        guard let manager, manager.state == .poweredOn else {
+            return (false, "", 0, radios)
+        }
+        phase = "\(board.name) 에 집 와이파이를 넣는 중입니다."
+        purpose = .join
         pendingSSID = ssid
         pendingPass = password
         pendingIP = ip
         target = board.peripheral
         board.peripheral.delegate = self
         return await withCheckedContinuation { continuation in
-            waiter = { ok, host, port in
-                continuation.resume(returning: (ok, host, port))
+            waiter = { ok, host, port, radios in
+                continuation.resume(returning: (ok, host, port, radios))
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
                 guard let self, self.waiter != nil else { return }
@@ -134,6 +170,10 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
             return
         }
         peripheral.setNotifyValue(true, for: characteristic)
+        if purpose == .readMac {
+            peripheral.readValue(for: characteristic)
+            return
+        }
         let payload: [String: String] = ["ssid": pendingSSID, "pass": pendingPass, "ip": pendingIP]
         guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
             finish(ok: false, host: "", port: 0, note: "설정을 만들지 못했습니다.")
@@ -145,25 +185,32 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard let data = characteristic.value,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let parsed = BoardRadios.parse(object)
+        if !parsed.wifi.isEmpty || !parsed.ethernet.isEmpty { radios = parsed }
+        if purpose == .readMac, object["ok"] == nil {
+            finish(ok: true, host: "", port: 0, note: parsed.wifi.isEmpty ? "MAC 이 비어 있습니다." : "MAC 을 읽었습니다.")
+            return
+        }
         let ok = object["ok"] as? Bool ?? false
         let host = object["ip"] as? String ?? ""
         let port = object["port"] as? Int ?? 0
         let reason = object["reason"] as? String ?? ""
-        finish(ok: ok, host: host, port: port, note: ok ? "\(host):\(port)" : reason)
+        finish(ok: ok, host: host, port: port, note: ok ? "\(host):\(port) 로 붙었습니다." : reason)
     }
 
     private func finish(ok: Bool, host: String, port: Int, note: String) {
         phase = note.isEmpty ? (ok ? "망에 붙었습니다." : "붙지 못했습니다.") : note
         let pending = waiter
         waiter = nil
+        purpose = .idle
         if let target {
             manager?.cancelPeripheralConnection(target)
         }
-        pending?(ok, host, port)
+        pending?(ok, host, port, radios)
     }
 }
 
-/// 처음 연결 창입니다. 비밀번호는 기판에만 보내고 화면 소스에는 없습니다.
+/// 처음 연결 창입니다. 한 단계에 할 일이 하나이고, 비밀번호는 기판에만 보냅니다.
 struct FirstJoinSheet: View {
     @StateObject private var radio = BoardProvision()
     @State private var picked: UUID?
@@ -171,51 +218,107 @@ struct FirstJoinSheet: View {
     @State private var password = ""
     @State private var ip = ""
     @State private var busy = false
-    var onReady: (SeenBoard.Kind, String, Int) -> Void
+    @State private var reading = false
+    var onReady: (SeenBoard.Kind, String, Int, BoardRadios) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("찾은 기판") {
+                Section {
+                    Text("기판 전원만 켜세요. USB 선은 펌웨어를 넣을 때만 씁니다. 이 단계에서 앱은 블루투스 이름 Ronin-Olimex 와 Ronin-C3 를 찾습니다.")
+                        .font(.caption)
                     if radio.boards.isEmpty {
                         Text(radio.phase)
                     }
                     ForEach(radio.boards) { board in
                         Button {
-                            picked = board.id
-                            if ip.isEmpty { ip = board.kind.suggestedIP }
+                            choose(board)
                         } label: {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(board.name)
-                                    Text(board.kind.title).font(.caption).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label(board.kind == .olimex ? "올리멕스 ESP32-PoE" : "C3 기판", systemImage: board.kind == .olimex ? "server.rack" : "dot.radiowaves.left.and.right")
+                                    .font(.headline)
+                                Text(board.kind == .olimex
+                                     ? "하는 일: 액션 카메라입니다. 고프로, 오즈모, 인스타를 이 기판 블루투스로 붙입니다. 로닌 짐벌은 움직이지 않습니다."
+                                     : "하는 일: 로닌 짐벌 또는 울란지 조명입니다. 어떤 일을 맡길지는 스튜디오의 기판 등록에서 하나만 고릅니다. 지금은 와이파이에 넣기만 합니다.")
+                                    .font(.caption)
+                                Text("블루투스 이름 \(board.name)")
+                                    .font(.caption.weight(.semibold))
+                                if picked == board.id {
+                                    Text(reading ? "MAC 을 읽는 중입니다." : macLine(radio.radios, kind: board.kind))
+                                        .font(.caption.monospaced())
+                                        .textSelection(.enabled)
                                 }
-                                Spacer()
-                                if picked == board.id { Image(systemName: "checkmark") }
                             }
                         }
+                        .buttonStyle(DeskButtonStyle(selected: picked == board.id, expand: true))
                     }
+                } header: {
+                    Text("1. 기판 찾기")
                 }
-                Section("집 와이파이") {
-                    TextField("이름", text: $ssid)
-                    SecureField("비밀번호", text: $password)
-                    TextField("고정 주소, 비우면 공유기가 줍니다", text: $ip)
-                    Text("고정 주소는 192.168.10.x 만 됩니다. 올리멕스 기본은 192.168.10.151, C3 기본은 192.168.10.152 입니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+
+                if let board = radio.boards.first(where: { $0.id == picked }) {
+                    Section {
+                        Text("공유기의 MAC 예약에 아래 주소를 적으면 이 기판이 항상 같은 192.168.10 번호를 받습니다. 와이파이로 쓸 때는 와이파이 MAC, 올리멕스를 랜 케이블로 쓸 때는 이더넷 MAC 입니다.")
+                            .font(.caption)
+                        Text(macLine(radio.radios, kind: board.kind))
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                        Text("제안 주소 \(board.kind.suggestedIP). 고정 주소를 비우면 공유기가 번호를 줍니다.")
+                            .font(.caption)
+                    } header: {
+                        Text("2. 고른 기판의 주소표")
+                    }
+
+                    Section {
+                        Text("이 \(board.kind == .olimex ? "올리멕스" : "C3") 를 집 공유기 JMEDIA 에 넣습니다. 비밀번호는 기판 저장소로만 가고, 앱 화면 소스에는 적지 않습니다.")
+                            .font(.caption)
+                        TextField("와이파이 이름", text: $ssid)
+                        SecureField("와이파이 비밀번호", text: $password)
+                        TextField("고정 주소, 비우면 공유기가 줍니다", text: $ip)
+                    } header: {
+                        Text("3. 집 와이파이에 넣기")
+                    }
+
+                    Section {
+                        Button(busy ? "넣는 중" : "이 기판을 망에 넣기") {
+                            Task { await send() }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+                        .disabled(busy || ssid.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Text(radio.phase)
+                            .font(.caption)
+                    }
                 }
             }
             .navigationTitle("처음 연결")
             .toolbar {
                 Button("닫기") { dismiss() }
-                Button(busy ? "넣는 중" : "이 망에 넣기") {
-                    Task { await send() }
-                }
-                .disabled(busy || picked == nil || ssid.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .buttonStyle(DeskButtonStyle())
             }
             .onAppear { radio.start() }
             .onDisappear { radio.stop() }
+        }
+    }
+
+    private func macLine(_ radios: BoardRadios, kind: SeenBoard.Kind) -> String {
+        if radios.wifi.isEmpty && radios.ethernet.isEmpty {
+            return "MAC 은 기판이 알려 주면 여기에 나타납니다."
+        }
+        var lines = ["와이파이 MAC \(radios.wifi.isEmpty ? "없음" : radios.wifi)"]
+        if kind == .olimex {
+            lines.append("이더넷 MAC \(radios.ethernet.isEmpty ? "없음" : radios.ethernet)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func choose(_ board: SeenBoard) {
+        picked = board.id
+        if ip.isEmpty { ip = board.kind.suggestedIP }
+        reading = true
+        Task {
+            _ = await radio.identify(board: board)
+            reading = false
         }
     }
 
@@ -231,7 +334,8 @@ struct FirstJoinSheet: View {
         busy = false
         password = ""
         guard result.ok, !result.host.isEmpty else { return }
-        onReady(board.kind, result.host, result.port == 0 ? (board.kind == .olimex ? 81 : 82) : result.port)
+        let port = result.port == 0 ? (board.kind == .olimex ? 81 : 82) : result.port
+        onReady(board.kind, result.host, port, result.radios)
         dismiss()
     }
 }

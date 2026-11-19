@@ -103,6 +103,9 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     /// 기판이 알려 준 주소입니다. 없으면 고른 길의 기본 주소를 씁니다.
     @Published var reportedHost = ""
     @Published var reportedPort = 81
+    @Published private(set) var wifiMac = ""
+    @Published private(set) var ethMac = ""
+    @Published private(set) var apMac = ""
 
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
@@ -258,6 +261,9 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
                 detail = "연결됨 \(endpoint)"
             }
         }
+        if let mac = object["wifiMac"] as? String, !mac.isEmpty { wifiMac = mac }
+        if let mac = object["ethMac"] as? String, !mac.isEmpty { ethMac = mac }
+        if let mac = object["apMac"] as? String, !mac.isEmpty { apMac = mac }
     }
 
     private func fail(_ text: String) {
@@ -299,6 +305,8 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     @Published private(set) var state: BoardLinkState = .offline
     @Published private(set) var boardId: UUID?
     @Published private(set) var detail = "오프라인"
+    @Published private(set) var wifiMac = ""
+    @Published private(set) var apMac = ""
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var generation = 0
@@ -421,6 +429,11 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     private func ingest(_ text: String) {
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        if let mac = object["wifiMac"] as? String, !mac.isEmpty { wifiMac = mac }
+        if let mac = object["apMac"] as? String, !mac.isEmpty { apMac = mac }
+        if let host = object["host"] as? String, !host.isEmpty {
+            detail = state == .online ? "연결됨 \(host)" : detail
+        }
         if let ack = object["ack"] as? Bool {
             let reason = (object["reason"] as? String) ?? (ack ? "응답을 받았습니다." : "기판이 실패라고 답했습니다.")
             finish(ack: ack, reason: reason)

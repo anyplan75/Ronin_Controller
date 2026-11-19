@@ -171,13 +171,52 @@ final class Studio: ObservableObject {
         note("\(board.name) 을 등록했습니다. 이 C3 는 \(job.title)만 합니다.")
     }
 
+    var olimexTitle: String {
+        let name = profile.olimexName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "올리멕스" : name
+    }
+
+    func renameOlimex(_ name: String) {
+        profile.olimexName = name
+    }
+
+    func renameC3(_ id: UUID, _ name: String) {
+        guard let index = profile.c3Boards.firstIndex(where: { $0.id == id }) else { return }
+        profile.c3Boards[index].name = name
+    }
+
+    func renamePtz(_ id: UUID, _ name: String) {
+        guard let index = profile.ptzCameras.firstIndex(where: { $0.id == id }) else { return }
+        profile.ptzCameras[index].name = name
+    }
+
+    func rememberOlimex(wifi: String, ethernet: String, hotspot: String) {
+        if !wifi.isEmpty, profile.olimexWifiMac != wifi { profile.olimexWifiMac = wifi }
+        if !ethernet.isEmpty, profile.olimexEthMac != ethernet { profile.olimexEthMac = ethernet }
+        if !hotspot.isEmpty, profile.olimexApMac != hotspot { profile.olimexApMac = hotspot }
+    }
+
+    func rememberC3(_ id: UUID, wifi: String, hotspot: String) {
+        guard let index = profile.c3Boards.firstIndex(where: { $0.id == id }) else { return }
+        if !wifi.isEmpty { profile.c3Boards[index].wifiMac = wifi }
+        if !hotspot.isEmpty { profile.c3Boards[index].apMac = hotspot }
+    }
+
+    func rememberPtzEndpoint(_ id: UUID, _ endpoint: String) {
+        guard !endpoint.isEmpty, let index = profile.ptzCameras.firstIndex(where: { $0.id == id }) else { return }
+        if profile.ptzCameras[index].endpoint != endpoint {
+            profile.ptzCameras[index].endpoint = endpoint
+        }
+    }
+
     /// 블루투스 처음 설정이 알려 준 집 망 주소로 웹소켓을 엽니다.
-    func adoptLan(_ kind: SeenBoard.Kind, host: String, port: Int) {
+    func adoptLan(_ kind: SeenBoard.Kind, host: String, port: Int, radios: BoardRadios = BoardRadios()) {
         switch kind {
         case .olimex:
             profile.olimexRegistered = true
             profile.olimexLanHost = host
             profile.boardLane = BoardLane.lan.rawValue
+            rememberOlimex(wifi: radios.wifi, ethernet: radios.ethernet, hotspot: radios.hotspot)
             boardSocket.lane = .lan
             boardSocket.reportedHost = host
             boardSocket.reportedPort = port
@@ -188,6 +227,7 @@ final class Studio: ObservableObject {
             if let index = profile.c3Boards.firstIndex(where: { $0.duty == .ronin }) ?? profile.c3Boards.indices.first {
                 profile.c3Boards[index].lanHost = host
                 profile.c3Boards[index].linkMode = BoardLane.lan.rawValue
+                rememberC3(profile.c3Boards[index].id, wifi: radios.wifi, hotspot: radios.hotspot)
                 note("\(profile.c3Boards[index].name) 주소를 \(host):\(port) 로 저장했습니다. 명령을 보내면 그 주소로 붙습니다.")
             } else {
                 note("C3 가 \(host):\(port) 로 붙었다고 답했습니다. C3 역할을 등록하면 그 주소를 씁니다.")
@@ -195,7 +235,7 @@ final class Studio: ObservableObject {
         }
     }
 
-    func addPtz(host: String, username: String, password: String) {
+    func addPtz(host: String, username: String, password: String, endpoint: String = "") {
         let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clean.hasPrefix("192.168.10."), clean.split(separator: ".").count == 4 else {
             note("PTZ 주소는 192.168.10.x 만 됩니다.")
@@ -203,6 +243,7 @@ final class Studio: ObservableObject {
         }
         if let existing = profile.ptzCameras.first(where: { $0.host == clean }) {
             FieldSecret.save(password, account: existing.id.uuidString)
+            rememberPtzEndpoint(existing.id, endpoint)
             if !username.isEmpty {
                 if let index = profile.ptzCameras.firstIndex(where: { $0.id == existing.id }) {
                     profile.ptzCameras[index].username = username
@@ -211,7 +252,7 @@ final class Studio: ObservableObject {
             note("\(clean) 은 이미 목록에 있습니다.")
             return
         }
-        let camera = PtzRecord(id: UUID(), name: "PTZ \(clean)", host: clean, username: username)
+        let camera = PtzRecord(id: UUID(), name: "PTZ \(clean)", host: clean, username: username, endpoint: endpoint)
         profile.ptzCameras.append(camera)
         FieldSecret.save(password, account: camera.id.uuidString)
         let index = profile.ptzCameras.count

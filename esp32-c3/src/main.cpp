@@ -25,6 +25,9 @@ static void reply(uint8_t num, bool ack, const char* reason) {
   doc["ack"] = ack;
   doc["reason"] = reason;
   doc["job"] = job;
+  doc["wifiMac"] = WiFi.macAddress();
+  doc["apMac"] = WiFi.softAPmacAddress();
+  if (WiFi.status() == WL_CONNECTED) doc["host"] = WiFi.localIP().toString();
   String out;
   serializeJson(doc, out);
   socket.sendTXT(num, out);
@@ -51,6 +54,16 @@ static void tellProvision(const char* json) {
   if (provChar == nullptr) return;
   provChar->setValue(json);
   provChar->notify();
+}
+
+static void showIdentity() {
+  if (provChar == nullptr) return;
+  JsonDocument doc;
+  doc["wifiMac"] = WiFi.macAddress();
+  doc["apMac"] = WiFi.softAPmacAddress();
+  String out;
+  serializeJson(doc, out);
+  provChar->setValue(out.c_str());
 }
 
 class ProvCallbacks : public NimBLECharacteristicCallbacks {
@@ -82,7 +95,7 @@ static void startProvision() {
   NimBLEServer* server = NimBLEDevice::createServer();
   NimBLEService* service = server->createService(kProvService);
   provChar = service->createCharacteristic(
-      kProvChar, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 240);
+      kProvChar, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 240);
   provChar->setCallbacks(new ProvCallbacks());
   service->start();
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
@@ -121,7 +134,7 @@ static void finishJoin() {
     return;
   }
   const String ip = WiFi.localIP().toString();
-  String note = "{\"ok\":true,\"ip\":\"" + ip + "\",\"port\":82}";
+  String note = "{\"ok\":true,\"ip\":\"" + ip + "\",\"port\":82,\"wifiMac\":\"" + WiFi.macAddress() + "\",\"apMac\":\"" + WiFi.softAPmacAddress() + "\"}";
   tellProvision(note.c_str());
   Serial.print("같은 와이파이 주소 ");
   Serial.println(ip);
@@ -221,6 +234,9 @@ void setup() {
   startProvision();
   String mode = prefs.isKey("mode") ? prefs.getString("mode", "lan") : "lan";
   applyMode(mode.c_str());
+  showIdentity();
+  Serial.print("와이파이 MAC ");
+  Serial.println(WiFi.macAddress());
   socket.begin();
   socket.onEvent(onEvent);
   Serial.println("웹소켓 82번을 열었습니다.");

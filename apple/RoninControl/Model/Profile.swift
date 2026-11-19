@@ -606,21 +606,26 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
 
     /// 블루투스로 받은 집 망 주소입니다. 비어 있으면 192.168.10.152 를 씁니다.
     var lanHost: String
+    /// 공유기에서 고정 주소를 예약할 때 쓰는 와이파이 MAC 입니다.
+    var wifiMac: String
+    var apMac: String
 
     var socketHost: String {
         let saved = lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
         return saved.isEmpty ? link.c3Host : saved
     }
 
-    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "") {
+    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "", wifiMac: String = "", apMac: String = "") {
         self.id = id
         self.name = name
         self.job = job
         self.linkMode = linkMode
         self.lanHost = lanHost
+        self.wifiMac = wifiMac
+        self.apMac = apMac
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, job, linkMode, lanHost }
+    enum CodingKeys: String, CodingKey { case id, name, job, linkMode, lanHost, wifiMac, apMac }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -629,6 +634,8 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         job = try box.decode(String.self, forKey: .job)
         linkMode = try box.decodeIfPresent(String.self, forKey: .linkMode) ?? BoardLane.lan.rawValue
         lanHost = try box.decodeIfPresent(String.self, forKey: .lanHost) ?? ""
+        wifiMac = try box.decodeIfPresent(String.self, forKey: .wifiMac) ?? ""
+        apMac = try box.decodeIfPresent(String.self, forKey: .apMac) ?? ""
     }
 
     func encode(to encoder: Encoder) throws {
@@ -638,7 +645,17 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         try box.encode(job, forKey: .job)
         try box.encode(linkMode, forKey: .linkMode)
         try box.encode(lanHost, forKey: .lanHost)
+        try box.encode(wifiMac, forKey: .wifiMac)
+        try box.encode(apMac, forKey: .apMac)
     }
+}
+
+/// 평면도에서 손가락으로 그린 사각형입니다. x,y는 왼쪽 아래, w는 가로, d는 깊이 미터입니다.
+struct FloorMark: Codable, Equatable, Sendable {
+    var x: Double
+    var y: Double
+    var w: Double
+    var d: Double
 }
 
 /// 같은 망의 ONVIF PTZ 입니다. 비밀번호는 프로필에 넣지 않습니다.
@@ -647,6 +664,36 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var name: String
     var host: String
     var username: String
+    /// 카메라가 알려 준 ONVIF 주소입니다. 비어 있으면 호스트로 다시 찾습니다.
+    var endpoint: String
+
+    init(id: UUID, name: String, host: String, username: String, endpoint: String = "") {
+        self.id = id
+        self.name = name
+        self.host = host
+        self.username = username
+        self.endpoint = endpoint
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id = try box.decode(UUID.self, forKey: .id)
+        name = try box.decode(String.self, forKey: .name)
+        host = try box.decode(String.self, forKey: .host)
+        username = try box.decodeIfPresent(String.self, forKey: .username) ?? ""
+        endpoint = try box.decodeIfPresent(String.self, forKey: .endpoint) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var box = encoder.container(keyedBy: CodingKeys.self)
+        try box.encode(id, forKey: .id)
+        try box.encode(name, forKey: .name)
+        try box.encode(host, forKey: .host)
+        try box.encode(username, forKey: .username)
+        try box.encode(endpoint, forKey: .endpoint)
+    }
 }
 
 struct StudioProfile: Codable, Equatable, Sendable {
@@ -675,6 +722,14 @@ struct StudioProfile: Codable, Equatable, Sendable {
     /// 블루투스로 받은 C3 주소입니다. 아직 C3 를 등록하지 않았을 때 보관합니다.
     var lastC3Host: String
     var ptzCameras: [PtzRecord]
+    /// 사용자가 붙인 올리멕스 이름입니다. 비어 있으면 올리멕스로 보여 줍니다.
+    var olimexName: String
+    var olimexWifiMac: String
+    var olimexEthMac: String
+    var olimexApMac: String
+    /// 사용자가 그린 무대와 FOH 입니다. 없으면 화면이 기본 사각형을 그립니다.
+    var stageMark: FloorMark?
+    var fohMark: FloorMark?
 
     init(
         version: Int,
@@ -692,7 +747,13 @@ struct StudioProfile: Codable, Equatable, Sendable {
         c3Boards: [C3BoardRecord] = [],
         olimexLanHost: String = "",
         lastC3Host: String = "",
-        ptzCameras: [PtzRecord] = []
+        ptzCameras: [PtzRecord] = [],
+        olimexName: String = "",
+        olimexWifiMac: String = "",
+        olimexEthMac: String = "",
+        olimexApMac: String = "",
+        stageMark: FloorMark? = nil,
+        fohMark: FloorMark? = nil
     ) {
         self.version = version
         self.devices = devices
@@ -710,10 +771,16 @@ struct StudioProfile: Codable, Equatable, Sendable {
         self.olimexLanHost = olimexLanHost
         self.lastC3Host = lastC3Host
         self.ptzCameras = ptzCameras
+        self.olimexName = olimexName
+        self.olimexWifiMac = olimexWifiMac
+        self.olimexEthMac = olimexEthMac
+        self.olimexApMac = olimexApMac
+        self.stageMark = stageMark
+        self.fohMark = fohMark
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, ptzCameras
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, ptzCameras, olimexName, olimexWifiMac, olimexEthMac, olimexApMac, stageMark, fohMark
     }
 
     init(from decoder: Decoder) throws {
@@ -734,6 +801,12 @@ struct StudioProfile: Codable, Equatable, Sendable {
         olimexLanHost = try box.decodeIfPresent(String.self, forKey: .olimexLanHost) ?? ""
         lastC3Host = try box.decodeIfPresent(String.self, forKey: .lastC3Host) ?? ""
         ptzCameras = try box.decodeIfPresent([PtzRecord].self, forKey: .ptzCameras) ?? []
+        olimexName = try box.decodeIfPresent(String.self, forKey: .olimexName) ?? ""
+        olimexWifiMac = try box.decodeIfPresent(String.self, forKey: .olimexWifiMac) ?? ""
+        olimexEthMac = try box.decodeIfPresent(String.self, forKey: .olimexEthMac) ?? ""
+        olimexApMac = try box.decodeIfPresent(String.self, forKey: .olimexApMac) ?? ""
+        stageMark = try box.decodeIfPresent(FloorMark.self, forKey: .stageMark)
+        fohMark = try box.decodeIfPresent(FloorMark.self, forKey: .fohMark)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -754,6 +827,12 @@ struct StudioProfile: Codable, Equatable, Sendable {
         try box.encode(olimexLanHost, forKey: .olimexLanHost)
         try box.encode(lastC3Host, forKey: .lastC3Host)
         try box.encode(ptzCameras, forKey: .ptzCameras)
+        try box.encode(olimexName, forKey: .olimexName)
+        try box.encode(olimexWifiMac, forKey: .olimexWifiMac)
+        try box.encode(olimexEthMac, forKey: .olimexEthMac)
+        try box.encode(olimexApMac, forKey: .olimexApMac)
+        try box.encodeIfPresent(stageMark, forKey: .stageMark)
+        try box.encodeIfPresent(fohMark, forKey: .fohMark)
     }
 
     static func makeNew() -> StudioProfile {
