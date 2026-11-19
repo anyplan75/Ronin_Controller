@@ -37,6 +37,13 @@ enum Visca {
         return moved || zoomed
     }
 
+    /// 카메라 안에 장면을 넣거나 부릅니다. 번호는 1–10 이고, 90 41 이 올 때만 성공입니다.
+    static func memory(host: String, port: UInt16 = 1259, number: Int, recall: Bool) async -> Bool {
+        let preset = UInt8(max(0, min(9, number - 1)))
+        let mode: UInt8 = recall ? 0x02 : 0x01
+        return await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x3F, mode, preset, 0xFF])
+    }
+
     static func stop(host: String, port: UInt16 = 1259) async -> Bool {
         let pan = await send(host: host, port: port, bytes: [0x81, 0x01, 0x06, 0x01, 0x01, 0x01, 0x03, 0x03, 0xFF])
         let zoom = await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x07, 0x00, 0xFF])

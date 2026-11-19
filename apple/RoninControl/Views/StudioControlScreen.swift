@@ -535,6 +535,7 @@ struct StudioControlScreen: View {
         if let pitch { pose.pitch = pitch }
         if let zoom { pose.zoom = zoom }
         ptzPose[id] = pose
+        studio.rememberPtzAim(id, pan: pose.yaw, tilt: pose.pitch, zoom: pose.zoom)
     }
 
     private func ptzInspector(_ camera: PtzRecord) -> some View {
@@ -595,6 +596,37 @@ struct StudioControlScreen: View {
             }), in: 0...1)
             Text("속도 \(Int(stickSpeed * 100))%")
             Slider(value: $stickSpeed, in: 0.15...1)
+            Text("장면 1–10. 이름은 바꿔도 번호는 고정입니다. 저장은 지금 각도이고, 부르기는 그 각도로 갑니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(PtzScene.ten(camera.scenes)) { scene in
+                HStack(spacing: 6) {
+                    Text("\(scene.number)")
+                        .font(.caption.weight(.bold))
+                        .frame(width: 18)
+                    TextField("이름", text: Binding(
+                        get: { scene.name },
+                        set: { studio.renamePtzScene(camera.id, number: scene.number, name: $0) }
+                    ))
+                    .textFieldStyle(.roundedBorder)
+                    Button("저장") {
+                        let current = ptzPose[camera.id] ?? PtzPose()
+                        Task { await studio.savePtzScene(camera.id, number: scene.number, pan: current.yaw, tilt: current.pitch, zoom: current.zoom) }
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                    Button("부르기") {
+                        let saved = PtzScene.ten(camera.scenes).first { $0.number == scene.number }
+                        guard let saved, saved.saved else {
+                            studio.note("\(scene.stableId) 은 아직 저장되지 않았습니다.")
+                            return
+                        }
+                        setPose(camera.id, yaw: saved.pan, pitch: saved.tilt, zoom: saved.zoom)
+                        Task { _ = await studio.recallPtzScene(camera.id, number: scene.number) }
+                    }
+                    .buttonStyle(DeskButtonStyle(selected: scene.saved))
+                    .disabled(!scene.saved)
+                }
+            }
             Button("기본 시선 고정") {
                 let current = ptzPose[camera.id] ?? PtzPose()
                 studio.setHomeAim(camera.id, yaw: wrapDegrees(spot.homeYaw + current.yaw), pitch: spot.homePitch + current.pitch)
@@ -605,6 +637,10 @@ struct StudioControlScreen: View {
                 Task { await refreshPtz(camera) }
             }
             .buttonStyle(DeskButtonStyle(expand: true))
+        }
+        .onChange(of: studio.ptzRecallTick) { _, _ in
+            guard let aim = studio.ptzLive[camera.id] else { return }
+            setPose(camera.id, yaw: aim.pan, pitch: aim.tilt, zoom: aim.zoom)
         }
         .task(id: camera.id) { await refreshPtz(camera) }
     }

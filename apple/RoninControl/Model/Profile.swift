@@ -666,6 +666,41 @@ struct FloorMark: Codable, Equatable, Sendable {
     var d: Double
 }
 
+/// 장면 번호는 1부터 10까지 고정입니다. 이름을 바꿔도 `ptz-scene-3` 같은 아이디는 그대로입니다.
+struct PtzScene: Codable, Equatable, Sendable, Identifiable {
+    var number: Int
+    var name: String
+    var pan: Double
+    var tilt: Double
+    var zoom: Double
+    var saved: Bool
+
+    var id: Int { number }
+    var stableId: String { "ptz-scene-\(number)" }
+
+    struct Aim: Equatable {
+        var pan = 0.0
+        var tilt = 0.0
+        var zoom = 0.0
+    }
+
+    static func empty(_ number: Int) -> PtzScene {
+        PtzScene(number: number, name: "장면 \(number)", pan: 0, tilt: 0, zoom: 0, saved: false)
+    }
+
+    static func ten(_ raw: [PtzScene] = []) -> [PtzScene] {
+        var rows = (1...10).map(empty)
+        for scene in raw where (1...10).contains(scene.number) {
+            var copy = scene
+            if copy.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                copy.name = "장면 \(copy.number)"
+            }
+            rows[copy.number - 1] = copy
+        }
+        return rows
+    }
+}
+
 /// 같은 망의 ONVIF PTZ 입니다. 비밀번호는 프로필에 넣지 않습니다.
 struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
@@ -678,8 +713,10 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var mac: String
     var onvifPort: Int
     var viscaPort: Int
+    /// 장면 1–10 입니다. 번호는 바뀌지 않습니다.
+    var scenes: [PtzScene]
 
-    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "", onvifPort: Int = 2000, viscaPort: Int = 1259) {
+    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "", onvifPort: Int = 2000, viscaPort: Int = 1259, scenes: [PtzScene] = []) {
         self.id = id
         self.name = name
         self.host = host
@@ -688,9 +725,10 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         self.mac = mac
         self.onvifPort = onvifPort
         self.viscaPort = viscaPort
+        self.scenes = PtzScene.ten(scenes)
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac, onvifPort, viscaPort }
+    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac, onvifPort, viscaPort, scenes }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -702,6 +740,7 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         mac = try box.decodeIfPresent(String.self, forKey: .mac) ?? ""
         onvifPort = try box.decodeIfPresent(Int.self, forKey: .onvifPort) ?? 2000
         viscaPort = try box.decodeIfPresent(Int.self, forKey: .viscaPort) ?? 1259
+        scenes = PtzScene.ten(try box.decodeIfPresent([PtzScene].self, forKey: .scenes) ?? [])
     }
 
     func encode(to encoder: Encoder) throws {
@@ -714,6 +753,7 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         try box.encode(mac, forKey: .mac)
         try box.encode(onvifPort, forKey: .onvifPort)
         try box.encode(viscaPort, forKey: .viscaPort)
+        try box.encode(PtzScene.ten(scenes), forKey: .scenes)
     }
 }
 

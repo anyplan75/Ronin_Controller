@@ -103,6 +103,11 @@ final class Studio: ObservableObject {
     @Published var bridgeLinks: [UUID: BridgeLinks] = [:]
     let boardSocket = BoardSocket()
     let c3Socket = C3JobSocket()
+    /// 화면이 지금 보여주는 팬·틸트·줌입니다. 컴패니언 저장이 이 값을 넣습니다.
+    @Published var ptzLive: [UUID: PtzScene.Aim] = [:]
+    /// 장면 부르기가 화면 슬라이더를 따라가게 하는 번호입니다.
+    @Published var ptzRecallTick = 0
+    private let sceneDoor = PtzSceneDoor()
     let radio = OsmoRadio()
     private let c3 = C3Link()
     let frameOK = DjiRFrame.selfCheck()
@@ -132,6 +137,10 @@ final class Studio: ObservableObject {
         }
         Task { await bootBoards() }
         Task { await maintainGoProSessions() }
+        sceneDoor.onRequest = { [weak self] method, target, body in
+            await self?.handlePtzDoor(method: method, target: target, body: body) ?? "{\"ok\":false,\"reason\":\"앱이 없습니다.\"}"
+        }
+        sceneDoor.start()
     }
 
     func note(_ text: String) {
@@ -274,6 +283,142 @@ final class Studio: ObservableObject {
         let index = profile.ptzCameras.count
         moveStage(deviceId: camera.id, x: -3 + Double(index) * 1.4, y: 6, z: 1.6)
         note("\(display) 을 바로 등록했습니다. ONVIF \(onvif), Visca \(visca). 찾기를 기다리지 않습니다.")
+    }
+
+    func rememberPtzAim(_ id: UUID, pan: Double, tilt: Double, zoom: Double) {
+        ptzLive[id] = PtzScene.Aim(pan: pan, tilt: tilt, zoom: zoom)
+    }
+
+    func renamePtzScene(_ cameraId: UUID, number: Int, name: String) {
+        guard var scene = scene(cameraId, number) else { return }
+        scene.name = name.isEmpty ? "장면 \(number)" : name
+        write(scene, cameraId: cameraId)
+    }
+
+    func savePtzScene(_ cameraId: UUID, number: Int, pan: Double, tilt: Double, zoom: Double) async {
+        guard var scene = scene(cameraId, number), let camera = profile.ptzCameras.first(where: { $0.id == cameraId }) else { return }
+        scene.pan = pan
+        scene.tilt = tilt
+        scene.zoom = zoom
+        scene.saved = true
+        write(scene, cameraId: cameraId)
+        let stored = await Visca.memory(host: camera.host, port: UInt16(camera.viscaPort), number: number, recall: false)
+        note("\(camera.name) \(scene.stableId) 에 팬 \(Int(pan))°, 틸트 \(Int(tilt))°, 줌 \(Int(zoom * 100))% 를 넣었습니다.\(stored ? " 카메라도 그 번호를 받았습니다." : "")")
+    }
+
+    func recallPtzScene(_ cameraId: UUID, number: Int) async -> String {
+        guard let scene = scene(cameraId, number), let camera = profile.ptzCameras.first(where: { $0.id == cameraId }) else {
+            return "그 장면이 없습니다."
+        }
+        guard scene.saved else {
+            let text = "\(scene.stableId) 은 아직 저장되지 않았습니다."
+            note(text)
+            return text
+        }
+        rememberPtzAim(cameraId, pan: scene.pan, tilt: scene.tilt, zoom: scene.zoom)
+        ptzRecallTick += 1
+        let password = FieldSecret.load(account: camera.id.uuidString)
+        let moved = await Onvif.move(
+            host: camera.host,
+            endpoint: camera.endpoint,
+            user: camera.username,
+            password: password,
+            pan: scene.pan,
+            tilt: scene.tilt,
+            zoom: scene.zoom,
+            viscaPort: camera.viscaPort
+        )
+        if moved.0.contains("받았습니다") {
+            if !moved.1.isEmpty { rememberPtzEndpoint(camera.id, moved.1) }
+            note(moved.0)
+            return moved.0
+        }
+        if await Visca.memory(host: camera.host, port: UInt16(camera.viscaPort), number: number, recall: true) {
+            let text = "\(camera.host) Visca가 \(scene.stableId) 을 불러왔습니다."
+            note(text)
+            return text
+        }
+        note(moved.0)
+        return moved.0
+    }
+
+    func handlePtzDoor(method: String, target: String, body: String) async -> String {
+        let pieces = target.split(separator: "?", maxSplits: 1).map(String.init)
+        let path = pieces.first ?? "/"
+        let query = pieces.count > 1 ? pieces[1] : ""
+        let host = query.split(separator: "&").compactMap { item -> String? in
+            let pair = item.split(separator: "=", maxSplits: 1).map(String.init)
+            guard pair.count == 2, pair[0] == "host" else { return nil }
+            return pair[1].removingPercentEncoding ?? pair[1]
+        }.first
+        guard let camera = ptzCamera(host: host) else {
+            return "{\"ok\":false,\"reason\":\"PTZ가 없습니다.\"}"
+        }
+        if method == "GET" && (path == "/v1/ptz/scenes" || path == "/ptz/scenes") {
+            let rows = PtzScene.ten(camera.scenes).map { sceneJSON($0, host: camera.host) }.joined(separator: ",")
+            return "{\"ok\":true,\"host\":\"\(camera.host)\",\"scenes\":[\(rows)]}"
+        }
+        let parts = path.split(separator: "/").map(String.init)
+        guard parts.count >= 4, parts[0] == "v1" || parts[0] == "ptz" else {
+            return "{\"ok\":false,\"reason\":\"주소를 모르겠습니다.\"}"
+        }
+        let numberIndex = parts[0] == "v1" ? 3 : 2
+        guard parts.count > numberIndex, let number = Int(parts[numberIndex]), (1...10).contains(number) else {
+            return "{\"ok\":false,\"reason\":\"장면 번호는 1부터 10입니다.\"}"
+        }
+        let action = parts.count > numberIndex + 1 ? parts[numberIndex + 1] : "recall"
+        if method == "POST" && action == "name" {
+            let name = jsonString(body, key: "name") ?? "장면 \(number)"
+            renamePtzScene(camera.id, number: number, name: name)
+        } else if method == "POST" && action == "save" {
+            let aim = ptzLive[camera.id] ?? PtzScene.Aim()
+            await savePtzScene(camera.id, number: number, pan: aim.pan, tilt: aim.tilt, zoom: aim.zoom)
+        } else if method == "POST" || method == "GET" {
+            let moved = await recallPtzScene(camera.id, number: number)
+            guard let scene = scene(camera.id, number) else {
+                return "{\"ok\":false,\"reason\":\"장면을 읽지 못했습니다.\"}"
+            }
+            let ok = moved.contains("받았습니다") || moved.contains("불러왔습니다")
+            let reason = moved.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            return "{\"ok\":\(ok),\"reason\":\"\(reason)\",\"scene\":\(sceneJSON(scene, host: camera.host))}"
+        } else {
+            return "{\"ok\":false,\"reason\":\"그 명령은 받지 않습니다.\"}"
+        }
+        guard let scene = scene(camera.id, number) else {
+            return "{\"ok\":false,\"reason\":\"장면을 읽지 못했습니다.\"}"
+        }
+        return "{\"ok\":true,\"scene\":\(sceneJSON(scene, host: camera.host))}"
+    }
+
+    private func ptzCamera(host: String?) -> PtzRecord? {
+        if let host, !host.isEmpty {
+            return profile.ptzCameras.first { $0.host == host }
+        }
+        return profile.ptzCameras.first
+    }
+
+    private func scene(_ cameraId: UUID, _ number: Int) -> PtzScene? {
+        guard let camera = profile.ptzCameras.first(where: { $0.id == cameraId }) else { return nil }
+        return PtzScene.ten(camera.scenes).first { $0.number == number }
+    }
+
+    private func write(_ scene: PtzScene, cameraId: UUID) {
+        guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return }
+        var rows = PtzScene.ten(profile.ptzCameras[index].scenes)
+        rows[scene.number - 1] = scene
+        profile.ptzCameras[index].scenes = rows
+    }
+
+    private func sceneJSON(_ scene: PtzScene, host: String) -> String {
+        let name = scene.name.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        return "{\"id\":\"\(scene.stableId)\",\"number\":\(scene.number),\"name\":\"\(name)\",\"pan\":\(scene.pan),\"tilt\":\(scene.tilt),\"zoom\":\(scene.zoom),\"saved\":\(scene.saved),\"host\":\"\(host)\"}"
+    }
+
+    private func jsonString(_ body: String, key: String) -> String? {
+        guard let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = object[key] as? String else { return nil }
+        return value
     }
 
     func deletePtz(_ id: UUID) {
