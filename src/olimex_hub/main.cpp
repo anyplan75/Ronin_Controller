@@ -40,7 +40,16 @@ struct HubJob {
   bool used;
 };
 
+struct LiveCam {
+  char id[20];
+  char name[40];
+  char kind[16];
+  char ble[8];
+  bool used;
+};
+
 static HubCam cams[8];
+static LiveCam liveCams[8];
 static HubJob jobs[8];
 static int jobCount = 0;
 static bool busy = false;
@@ -61,8 +70,8 @@ static void tallyNote(const char* note) {
 static void publish() {
   JsonDocument doc;
   JsonArray list = doc["cameras"].to<JsonArray>();
-  for (const HubCam& cam : cams) {
-    if (!cam.used) continue;
+  for (const LiveCam& cam : liveCams) {
+    if (!cam.used || cam.name[0] == 0) continue;
     JsonObject row = list.add<JsonObject>();
     row["id"] = cam.id;
     row["name"] = cam.name;
@@ -130,6 +139,107 @@ static bool nameMatches(NimBLEAdvertisedDevice& device, const char* name) {
   std::string seen = device.getName();
   if (seen.empty()) return false;
   return seen == name || seen.find(name) != std::string::npos || strstr(name, seen.c_str()) != nullptr;
+}
+
+static bool textHas(const char* hay, const char* needle) {
+  return hay != nullptr && needle != nullptr && strstr(hay, needle) != nullptr;
+}
+
+static void toLower(char* dest, size_t cap, const std::string& src) {
+  size_t n = src.size();
+  if (n >= cap) n = cap - 1;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)src[i];
+    dest[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : (char)c;
+  }
+  dest[n] = 0;
+}
+
+static bool takeCamera(NimBLEAdvertisedDevice& device, LiveCam* out) {
+  memset(out, 0, sizeof(*out));
+  std::string raw = device.haveName() ? device.getName() : std::string();
+  char lower[48];
+  toLower(lower, sizeof(lower), raw);
+  if (textHas(lower, "ronin")) return false;
+  const bool fff0 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xFFF0));
+  const bool fea6 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xFEA6));
+  const bool ce80 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xCE80));
+  const bool nameOsmo = textHas(lower, "osmo") || textHas(lower, "action");
+  const bool nameGo = textHas(lower, "gopro");
+  const bool nameInsta = textHas(lower, "insta");
+  if (!(fff0 || fea6 || ce80 || nameOsmo || nameGo || nameInsta)) return false;
+  const char* ble = "FFF0";
+  const char* kind = "osmo";
+  if (fea6 || nameGo) {
+    ble = "FEA6";
+    kind = "gopro";
+  } else if (ce80 || nameInsta) {
+    ble = "CE80";
+    kind = "insta360";
+  }
+  copyField(out->ble, sizeof(out->ble), ble);
+  copyField(out->kind, sizeof(out->kind), kind);
+  std::string addr = device.getAddress().toString();
+  copyField(out->id, sizeof(out->id), addr.c_str());
+  if (raw.empty()) snprintf(out->name, sizeof(out->name), "%s %s", kind, addr.c_str());
+  else copyField(out->name, sizeof(out->name), raw.c_str());
+  out->used = out->name[0] != 0 && out->id[0] != 0;
+  return out->used;
+}
+
+static uint32_t nextScanAt = 0;
+
+static void scanCameras() {
+  if (busy || NimBLEDevice::getScan()->isScanning()) return;
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setActiveScan(true);
+  scan->setInterval(100);
+  scan->setWindow(90);
+  scan->setDuplicateFilter(true);
+  NimBLEDevice::getAdvertising()->stop();
+  Serial.println("블루투스 스캔 시작");
+  const uint32_t began = millis();
+  NimBLEScanResults results = scan->start(3, false);
+  if (millis() - began < 500) {
+    Serial.println("블루투스 스캔을 시작하지 못했습니다.");
+    NimBLEDevice::getAdvertising()->start();
+    nextScanAt = millis() + 8000;
+    return;
+  }
+  LiveCam next[8];
+  memset(next, 0, sizeof(next));
+  int count = 0;
+  int named = 0;
+  for (int i = 0; i < results.getCount(); i++) {
+    NimBLEAdvertisedDevice device = results.getDevice(i);
+    LiveCam row;
+    if (takeCamera(device, &row)) {
+      if (count < 8) next[count++] = row;
+      Serial.print("  카메라 ");
+      Serial.print(row.ble);
+      Serial.print(" ");
+      Serial.print(row.name);
+      Serial.print(" ");
+      Serial.println(row.id);
+      continue;
+    }
+    if (!device.haveName() || named >= 8) continue;
+    std::string seen = device.getName();
+    if (seen.empty()) continue;
+    named++;
+    Serial.print("  다른 이름 ");
+    Serial.println(seen.c_str());
+  }
+  const int seen = results.getCount();
+  scan->clearResults();
+  memcpy(liveCams, next, sizeof(liveCams));
+  Serial.print("블루투스 스캔 끝. 주변 ");
+  Serial.print(seen);
+  Serial.print(", 카메라 ");
+  Serial.println(count);
+  NimBLEDevice::getAdvertising()->start();
+  nextScanAt = millis() + 8000;
+  publish();
 }
 
 static NimBLEAddress findAddress(const char* name, const char* service) {
@@ -305,6 +415,7 @@ static void handleText(const char* text) {
 
 static void onEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType type, void*, uint8_t* data, size_t len) {
   if (type == WS_EVT_CONNECT) {
+    nextScanAt = millis();
     publish();
     return;
   }
@@ -545,7 +656,7 @@ static void banner() {
   Serial.println("PoE 192.168.10.150 웹소켓 81");
   Serial.println("핫스팟 Ronin-Olimex 192.168.4.1 웹소켓 81");
   Serial.println("같은 와이파이 기본 192.168.10.151 웹소켓 81. 블루투스 설정이 있으면 그 주소를 씁니다.");
-  Serial.println("고프로 FEA6, 오즈모 FFF0, 인스타360 은 목록만. 앞 화면 글자는 보내지 않습니다.");
+  Serial.println("주변 고프로 FEA6, 오즈모 FFF0, 인스타360 이름을 스캔해 웹소켓으로 보냅니다.");
 }
 
 void setup() {
@@ -597,6 +708,7 @@ void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
   pump();
+  if (!busy && (int32_t)(millis() - nextScanAt) >= 0) scanCameras();
   socket.cleanupClients();
   delay(20);
 }
