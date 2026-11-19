@@ -592,9 +592,33 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var name: String
     var job: String
+    /// lan, ap, usb. PoE는 이 기판에 없습니다.
+    var linkMode: String
 
     var duty: C3Job {
         C3Job(rawValue: job) ?? .ronin
+    }
+
+    var link: BoardLane {
+        let lane = BoardLane(stored: linkMode)
+        return lane == .poe ? .lan : lane
+    }
+
+    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue) {
+        self.id = id
+        self.name = name
+        self.job = job
+        self.linkMode = linkMode
+    }
+
+    enum CodingKeys: String, CodingKey { case id, name, job, linkMode }
+
+    init(from decoder: Decoder) throws {
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        id = try box.decode(UUID.self, forKey: .id)
+        name = try box.decode(String.self, forKey: .name)
+        job = try box.decode(String.self, forKey: .job)
+        linkMode = try box.decodeIfPresent(String.self, forKey: .linkMode) ?? BoardLane.lan.rawValue
     }
 }
 
@@ -630,7 +654,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         senderId: UInt32,
         senderMac: [UInt8],
         stageSpots: [StageSpot] = [],
-        boardLane: String = BoardLane.poe.rawValue,
+        boardLane: String = BoardLane.lan.rawValue,
         shootGroups: [String: [UUID]] = [:],
         olimexRegistered: Bool = false,
         c3Boards: [C3BoardRecord] = []
@@ -665,7 +689,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         senderId = try box.decode(UInt32.self, forKey: .senderId)
         senderMac = try box.decode([UInt8].self, forKey: .senderMac)
         stageSpots = try box.decodeIfPresent([StageSpot].self, forKey: .stageSpots) ?? []
-        boardLane = try box.decodeIfPresent(String.self, forKey: .boardLane) ?? BoardLane.poe.rawValue
+        boardLane = try box.decodeIfPresent(String.self, forKey: .boardLane) ?? BoardLane.lan.rawValue
         shootGroups = try box.decodeIfPresent([String: [UUID]].self, forKey: .shootGroups) ?? [:]
         olimexRegistered = try box.decodeIfPresent(Bool.self, forKey: .olimexRegistered) ?? false
         c3Boards = try box.decodeIfPresent([C3BoardRecord].self, forKey: .c3Boards) ?? []

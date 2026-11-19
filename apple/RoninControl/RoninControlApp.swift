@@ -9,6 +9,7 @@ struct RoninControlApp: App {
             RootView()
                 .environmentObject(studio)
                 .environmentObject(studio.boardSocket)
+                .environmentObject(studio.c3Socket)
         }
         #if os(macOS)
         .defaultSize(width: 1180, height: 800)

@@ -5,6 +5,7 @@ import SwiftUI
 struct StudioControlScreen: View {
     @EnvironmentObject private var studio: Studio
     @EnvironmentObject private var link: BoardSocket
+    @EnvironmentObject private var c3Link: C3JobSocket
     @State private var pick: DeskPick = .olimex
     @State private var askC3Job = false
     @State private var fov = "와이드"
@@ -13,7 +14,8 @@ struct StudioControlScreen: View {
     @State private var pitch = 0.0
     @State private var lightLevel: [UUID: Double] = [:]
     @State private var lightKelvin: [UUID: Double] = [:]
-    @State private var cameraSpots: [String: CGPoint] = [:]
+    /// 카메라 자리입니다. x는 좌우 미터, y는 무대에서 객석 쪽 깊이 미터입니다.
+    @State private var cameraMeters: [String: CGPoint] = [:]
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -68,13 +70,12 @@ struct StudioControlScreen: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
-                Picker("길", selection: Binding(get: { link.lane }, set: { studio.chooseLane($0) })) {
+                Picker("연결", selection: Binding(get: { link.lane }, set: { studio.chooseLane($0) })) {
                     ForEach(BoardLane.allCases) { lane in
                         Text(lane.title).tag(lane)
                     }
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 260)
+                .pickerStyle(.menu)
                 Button(link.state == .connecting ? "연결 중" : "지금 연결") {
                     guard studio.profile.olimexRegistered else {
                         studio.note("먼저 올리멕스 ESP32-PoE 를 등록하세요.")
@@ -82,7 +83,7 @@ struct StudioControlScreen: View {
                     }
                     link.connect()
                 }
-                .disabled(link.state == .connecting || !studio.profile.olimexRegistered)
+                .disabled(link.state == .connecting || !studio.profile.olimexRegistered || !link.lane.shoots)
                 Button("모두 녹화") { Task { await studio.fieldRecord(group: "all", start: true) } }
                     .buttonStyle(.borderedProminent)
                     .tint(record)
@@ -119,7 +120,8 @@ struct StudioControlScreen: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(studio.profile.olimexRegistered ? "ESP32-PoE" : "아직 등록하지 않음")
-                        Text(studio.profile.olimexRegistered ? (link.state == .online ? link.endpoint : "오프라인") : "PoE 또는 와이파이")
+                        Text(studio.profile.olimexRegistered ? "\(link.lane.title) · \(link.state == .online ? "온라인 \(link.endpoint)" : "오프라인")" : "연결을 고르세요")
+                        Text("녹화 \(link.reportedRecording == nil ? "모름" : "기판 보고") · HDMI/USB 모름")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -138,7 +140,7 @@ struct StudioControlScreen: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(board.name)
-                            Text(board.duty.title)
+                            Text("\(board.duty.title) · \(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -170,7 +172,7 @@ struct StudioControlScreen: View {
                             HStack {
                                 Text(camera.name)
                                 Spacer()
-                                Text(camera.ble)
+                                Text("온라인 · 대기 · 출력 모름")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -184,14 +186,29 @@ struct StudioControlScreen: View {
         .background(panel)
     }
 
+    private var selectedMark: String? {
+        switch pick {
+        case .olimex: return nil
+        case .c3(let id): return id.uuidString
+        case .camera(let id): return id
+        }
+    }
+
     private var floor: some View {
         FloorPlan(
             gimbal: studio.roninC3,
             cameras: link.cameras,
-            spots: cameraSpots,
-            onMoveCamera: { id, point in cameraSpots[id] = point },
+            meters: cameraMeters,
+            selected: selectedMark,
+            lens: LensLook(name: fov),
+            liveYaw: yaw,
+            livePitch: pitch,
+            onMoveCamera: { id, x, y in cameraMeters[id] = CGPoint(x: x, y: y) },
             onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) }
         )
+        .onChange(of: link.tallyNote) { _, note in
+            if !note.isEmpty { studio.note(note) }
+        }
         .background(canvas)
     }
 
@@ -259,7 +276,8 @@ struct StudioControlScreen: View {
             Text("올리멕스 ESP32-PoE")
                 .font(.headline)
             Text(studio.profile.olimexRegistered ? (link.state == .online ? "연결됨 \(link.endpoint)" : "오프라인") : "등록 전")
-            Text("PoE 192.168.0.150:81 또는 와이파이 192.168.0.151:81. 액션 카메라는 이 기판 블루투스입니다. 고프로 FEA6, 오즈모 FFF0, 인스타360 CE80. 로닌 짐벌은 이 기판이 아니라 로닌 제어 C3 가 맡습니다.")
+            Text(link.lane.detail)
+            Text("액션 카메라는 이 기판 블루투스입니다. 고프로 FEA6, 오즈모 FFF0, 인스타360 CE80. 로닌 짐벌은 로닌 제어 C3 가 맡습니다. HDMI와 USB 출력은 기판이 알려 주기 전에는 모름입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("웹소켓이 열리기 전에는 연결됨으로 두지 않습니다.")
@@ -272,18 +290,32 @@ struct StudioControlScreen: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(board.name).font(.headline)
             Text("이 C3 는 \(board.duty.title)만 합니다.")
-            Text("오프라인")
+            Text("\(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
                 .font(.caption.weight(.semibold))
+            Text(board.link.c3Detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("연결", selection: Binding(get: { board.link }, set: { studio.chooseC3Mode(board.id, $0) })) {
+                ForEach(BoardLane.c3Choices) { lane in
+                    Text(lane.title).tag(lane)
+                }
+            }
             if board.duty == .ronin {
-                Text("짐벌은 이 C3만 움직입니다. 로닌 기판을 따로 고르지 않고, 올리멕스 소켓으로도 보내지 않습니다.")
+                let spot = studio.stageSpot(for: board.id)
+                Text("기준 팬 \(Int(spot.homeYaw))°, 틸트 \(Int(spot.homePitch))°. 슬라이더는 그 기준에서의 차이입니다. 무대 화각은 기준과 이 차이를 더해 미터 눈금으로 그립니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("팬 \(Int(yaw))°")
+                Text("차이 팬 \(Int(yaw))°")
                 Slider(value: $yaw, in: -180...180, step: 1)
                 Text("틸트 \(Int(pitch))°")
                 Slider(value: $pitch, in: -56...90, step: 1)
-                Button("이 각도로 보내기") {
+                Button("이 차이를 보내기") {
                     Task { await studio.nudgeRonin(yaw: yaw, pitch: pitch) }
+                }
+                Button("지금 각도를 기준으로") {
+                    studio.setHomeAim(board.id, yaw: spot.homeYaw + yaw, pitch: spot.homePitch + pitch)
+                    yaw = 0
+                    pitch = 0
                 }
             } else {
                 let level = lightLevel[board.id] ?? 40
@@ -325,10 +357,20 @@ struct StudioControlScreen: View {
                     await studio.sendCameraSetting(id: camera.id, kind: camera.kind, ble: camera.ble, setting: "resolution", value: resolution)
                 }
             }
+            Text("화각 프리셋은 렌즈가 알려 준 값이 아닙니다. 고른 카메라만 그 각도의 부채꼴을 미터 눈금으로 그립니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
                 Button("녹화") { Task { await studio.olimexCamera(camera, start: true) } }
                 Button("정지") { Task { await studio.olimexCamera(camera, start: false) } }
             }
+            HStack {
+                Button("탈리 켜기") { Task { await studio.tally(camera, on: true) } }
+                Button("탈리 끄기") { Task { await studio.tally(camera, on: false) } }
+            }
+            Text("앞 화면에 글을 그리는 공식 블루투스 명령은 없습니다. 녹화 중 빨간 표시와 LED가 가장 가까운 탈리입니다. 랩스 펌웨어의 *FRNT=1 은 QR로만 앞 화면에 글을 띄웁니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
@@ -339,62 +381,118 @@ private enum DeskPick: Hashable {
     case camera(String)
 }
 
-/// 어두운 2차원 평면도입니다. 북쪽은 팬 0° 입니다. 그림 미리보기를 그리지 않습니다.
+/// 렌즈 프리셋입니다. 카메라가 각도를 알려 주지 않으면 이 표의 각만 씁니다.
+private struct LensLook {
+    var name: String
+    var degrees: Double {
+        switch name {
+        case "리니어": return 85
+        case "내로우": return 55
+        default: return 118
+        }
+    }
+    var throwMeters: Double {
+        switch name {
+        case "리니어": return 6
+        case "내로우": return 8
+        default: return 4
+        }
+    }
+}
+
+/// 가로 14m, 깊이 18m 무대를 미터로만 그립니다. 0°는 객석(+Y)입니다.
 private struct FloorPlan: View {
     @EnvironmentObject private var studio: Studio
     var gimbal: C3BoardRecord?
     var cameras: [BoardCamera]
-    var spots: [String: CGPoint]
-    var onMoveCamera: (String, CGPoint) -> Void
+    var meters: [String: CGPoint]
+    var selected: String?
+    var lens: LensLook
+    var liveYaw: Double
+    var livePitch: Double
+    var onMoveCamera: (String, Double, Double) -> Void
     var onMoveGimbal: (UUID, Double, Double) -> Void
     @State private var drag: String?
 
     var body: some View {
         GeometryReader { geo in
             Canvas { context, size in
-                let rect = CGRect(origin: .zero, size: size)
-                context.fill(Path(rect), with: .color(Color(red: 0.08, green: 0.09, blue: 0.11)))
-                var grid = Path()
-                for step in 0...7 {
-                    let x = pad + (size.width - pad * 2) * CGFloat(step) / 7
-                    grid.move(to: CGPoint(x: x, y: pad))
-                    grid.addLine(to: CGPoint(x: x, y: size.height - pad))
+                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(red: 0.08, green: 0.09, blue: 0.11)))
+                let deck = Path { path in
+                    path.addRect(rect(x0: -StageRoom.width * 0.35, y0: 0.2, x1: StageRoom.width * 0.35, y1: 2.2, size: size))
                 }
-                for step in 0...9 {
-                    let y = pad + (size.height - pad * 2) * CGFloat(step) / 9
-                    grid.move(to: CGPoint(x: pad, y: y))
-                    grid.addLine(to: CGPoint(x: size.width - pad, y: y))
+                context.fill(deck, with: .color(Color(red: 0.45, green: 0.62, blue: 0.78).opacity(0.18)))
+                var grid = Path()
+                var meter = -StageRoom.width / 2
+                while meter <= StageRoom.width / 2 + 0.01 {
+                    let a = plan(x: meter, y: 0, size: size)
+                    let b = plan(x: meter, y: StageRoom.length, size: size)
+                    grid.move(to: a)
+                    grid.addLine(to: b)
+                    meter += 2
+                }
+                var depth = 0.0
+                while depth <= StageRoom.length + 0.01 {
+                    let a = plan(x: -StageRoom.width / 2, y: depth, size: size)
+                    let b = plan(x: StageRoom.width / 2, y: depth, size: size)
+                    grid.move(to: a)
+                    grid.addLine(to: b)
+                    depth += 2
                 }
                 context.stroke(grid, with: .color(.white.opacity(0.08)), lineWidth: 1)
-                context.draw(
-                    Text("북 · 팬 0°").font(.caption2).foregroundStyle(.white.opacity(0.7)),
-                    at: CGPoint(x: size.width / 2, y: 14),
-                    anchor: .center
-                )
+                let scaleA = plan(x: -6, y: 0.4, size: size)
+                let scaleB = plan(x: -4, y: 0.4, size: size)
+                var scale = Path()
+                scale.move(to: scaleA)
+                scale.addLine(to: scaleB)
+                context.stroke(scale, with: .color(Color(red: 0.54, green: 0.42, blue: 0.20)), lineWidth: 2)
+                context.draw(Text("2 m").font(.caption2).foregroundStyle(.white.opacity(0.8)), at: CGPoint(x: (scaleA.x + scaleB.x) / 2, y: scaleA.y - 10), anchor: .bottom)
+                context.draw(Text("객석 · 조준 0°").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
                 if let gimbal {
                     let spot = studio.stageSpot(for: gimbal.id)
-                    let at = plan(x: spot.x, y: spot.y, size: size)
-                    wedge(context: context, at: at, yaw: spot.aimYaw, degrees: 70, size: size)
-                    mark(context: context, at: at, title: gimbal.name)
+                    let chosen = selected == gimbal.id.uuidString
+                    let aim = spot.homeYaw + liveYaw
+                    let pitch = spot.homePitch + livePitch
+                    paint(
+                        context: context,
+                        size: size,
+                        x: spot.x,
+                        y: spot.y,
+                        aim: aim,
+                        pitch: pitch,
+                        title: gimbal.name,
+                        asset: "gear-ronin",
+                        chosen: chosen,
+                        useLens: chosen
+                    )
                 }
                 for (index, camera) in cameras.enumerated() {
-                    let at = spots[camera.id] ?? defaultCamera(index, count: cameras.count, size: size)
-                    wedge(context: context, at: at, yaw: 0, degrees: 80, size: size)
-                    mark(context: context, at: at, title: camera.name)
+                    let place = cameraPlace(camera.id, index: index, count: cameras.count)
+                    let chosen = selected == camera.id
+                    paint(
+                        context: context,
+                        size: size,
+                        x: place.x,
+                        y: place.y,
+                        aim: 0,
+                        pitch: 0,
+                        title: camera.name,
+                        asset: faceAsset(camera),
+                        chosen: chosen,
+                        useLens: chosen
+                    )
                 }
             }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        if drag == nil {
-                            drag = hit(value.startLocation, size: geo.size)
-                        }
+                        if drag == nil { drag = hit(value.startLocation, size: geo.size) }
                         guard let drag else { return }
+                        let room = unplan(value.location, size: geo.size)
                         if let id = UUID(uuidString: drag), gimbal?.id == id {
-                            let room = unplan(value.location, size: geo.size)
                             onMoveGimbal(id, room.x, room.y)
                         } else {
-                            onMoveCamera(drag, value.location)
+                            onMoveCamera(drag, room.x, room.y)
                         }
                     }
                     .onEnded { _ in drag = nil }
@@ -403,10 +501,46 @@ private struct FloorPlan: View {
     }
 
     private let pad: CGFloat = 28
+    private let brass = Color(red: 0.54, green: 0.42, blue: 0.20)
+
+    private func paint(context: GraphicsContext, size: CGSize, x: Double, y: Double, aim: Double, pitch: Double, title: String, asset: String?, chosen: Bool, useLens: Bool) {
+        let at = plan(x: x, y: y, size: size)
+        let reach = useLens ? lens.throwMeters * max(0.2, cos(pitch * .pi / 180)) : 1.8
+        if useLens {
+            var path = Path()
+            path.move(to: at)
+            let half = lens.degrees / 2
+            for step in 0...12 {
+                let deg = aim - half + (half * 2) * Double(step) / 12
+                let end = offset(x: x, y: y, degrees: deg, meters: reach)
+                path.addLine(to: plan(x: end.x, y: end.y, size: size))
+            }
+            path.closeSubpath()
+            context.fill(path, with: .color(Color(red: 0.55, green: 0.22, blue: 0.24).opacity(0.28)))
+            let tip = offset(x: x, y: y, degrees: aim, meters: reach)
+            let tipPt = plan(x: tip.x, y: tip.y, size: size)
+            context.draw(Text(String(format: "%.1f m", reach)).font(.caption2).foregroundStyle(brass), at: tipPt, anchor: .bottom)
+        }
+        var aimLine = Path()
+        let tip = offset(x: x, y: y, degrees: aim, meters: useLens ? reach : 1.8)
+        aimLine.move(to: at)
+        aimLine.addLine(to: plan(x: tip.x, y: tip.y, size: size))
+        context.stroke(aimLine, with: .color(brass), style: StrokeStyle(lineWidth: chosen ? 2.5 : 1.2, dash: useLens ? [] : [4, 3]))
+        let width = pixels(0.7, size: size)
+        let height = pixels(0.42, size: size)
+        if let asset {
+            context.draw(Image(asset), in: CGRect(x: at.x - width / 2, y: at.y - height / 2, width: width, height: height))
+        }
+        if chosen {
+            let ring = Path(ellipseIn: CGRect(x: at.x - width / 2 - 4, y: at.y - height / 2 - 4, width: width + 8, height: height + 8))
+            context.stroke(ring, with: .color(.white), lineWidth: 1.5)
+        }
+        context.draw(Text(title).font(.caption2.weight(chosen ? .bold : .regular)).foregroundStyle(.white), at: CGPoint(x: at.x, y: at.y - height / 2 - 4), anchor: .bottom)
+    }
 
     private func plan(x: Double, y: Double, size: CGSize) -> CGPoint {
-        let nx = (x + 7) / 14
-        let ny = 1 - (y / 18)
+        let nx = (x + StageRoom.width / 2) / StageRoom.width
+        let ny = 1 - (y / StageRoom.length)
         return CGPoint(
             x: pad + (size.width - pad * 2) * nx,
             y: pad + (size.height - pad * 2) * ny
@@ -416,44 +550,61 @@ private struct FloorPlan: View {
     private func unplan(_ point: CGPoint, size: CGSize) -> (x: Double, y: Double) {
         let nx = (point.x - pad) / max(1, size.width - pad * 2)
         let ny = (point.y - pad) / max(1, size.height - pad * 2)
-        return (Double(nx) * 14 - 7, (1 - Double(ny)) * 18)
+        return (Double(nx) * StageRoom.width - StageRoom.width / 2, (1 - Double(ny)) * StageRoom.length)
     }
 
-    private func wedge(context: GraphicsContext, at: CGPoint, yaw: Double, degrees: Double, size: CGSize) {
-        let reach = min(size.width, size.height) * 0.22
-        let half = degrees * .pi / 180 / 2
-        let base = (yaw - 90) * .pi / 180
-        var path = Path()
-        path.move(to: at)
-        for step in 0...10 {
-            let ang = base - half + (half * 2) * Double(step) / 10
-            path.addLine(to: CGPoint(x: at.x + CGFloat(cos(ang)) * reach, y: at.y + CGFloat(sin(ang)) * reach))
-        }
-        path.closeSubpath()
-        context.fill(path, with: .color(Color(red: 0.45, green: 0.62, blue: 0.85).opacity(0.28)))
+    private func pixels(_ meters: Double, size: CGSize) -> CGFloat {
+        let a = plan(x: 0, y: 0, size: size)
+        let b = plan(x: meters, y: 0, size: size)
+        return hypot(b.x - a.x, b.y - a.y)
     }
 
-    private func mark(context: GraphicsContext, at: CGPoint, title: String) {
-        let dot = Path(ellipseIn: CGRect(x: at.x - 6, y: at.y - 6, width: 12, height: 12))
-        context.fill(dot, with: .color(.white))
-        context.draw(Text(title).font(.caption2).foregroundStyle(.white), at: CGPoint(x: at.x, y: at.y - 16), anchor: .bottom)
+    private func offset(x: Double, y: Double, degrees: Double, meters: Double) -> (x: Double, y: Double) {
+        let r = degrees * .pi / 180
+        return (x + sin(r) * meters, y + cos(r) * meters)
     }
 
-    private func defaultCamera(_ index: Int, count: Int, size: CGSize) -> CGPoint {
-        let span = size.width - pad * 2
-        let t = count <= 1 ? 0.5 : CGFloat(index) / CGFloat(count - 1)
-        return CGPoint(x: pad + span * t, y: size.height * 0.72)
+    private func rect(x0: Double, y0: Double, x1: Double, y1: Double, size: CGSize) -> CGRect {
+        let a = plan(x: x0, y: y1, size: size)
+        let b = plan(x: x1, y: y0, size: size)
+        return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(b.x - a.x), height: abs(b.y - a.y))
+    }
+
+    private func cameraPlace(_ id: String, index: Int, count: Int) -> (x: Double, y: Double) {
+        if let saved = meters[id] { return (Double(saved.x), Double(saved.y)) }
+        return defaultMeters(index, count: count)
+    }
+
+    private func defaultMeters(_ index: Int, count: Int) -> (x: Double, y: Double) {
+        let span = min(StageRoom.width * 0.62, Double(max(count - 1, 1)) * 1.6)
+        let t = count <= 1 ? 0.5 : Double(index) / Double(max(count - 1, 1))
+        return (-span / 2 + span * t, 4)
+    }
+
+    private func faceAsset(_ camera: BoardCamera) -> String? {
+        let text = (camera.kind + " " + camera.name).lowercased()
+        if text.contains("hero13") || text.contains("gopro 13") { return "gear-gopro-13" }
+        if text.contains("hero12") || text.contains("gopro 12") { return "gear-gopro-12" }
+        if text.contains("hero11") || text.contains("gopro 11") { return "gear-gopro-11" }
+        if text.contains("hero10") { return "gear-gopro-10" }
+        if text.contains("hero9") { return "gear-gopro-9" }
+        if text.contains("insta") && text.contains("ace") { return "gear-insta360-ace-pro" }
+        if text.contains("insta") || camera.ble == "CE80" { return "gear-insta360-x4" }
+        if text.contains("osmo") || text.contains("action") || camera.ble == "FFF0" { return "gear-osmo-action-5-pro" }
+        if camera.ble == "FEA6" { return "gear-gopro-11" }
+        return nil
     }
 
     private func hit(_ point: CGPoint, size: CGSize) -> String? {
         if let gimbal {
             let spot = studio.stageSpot(for: gimbal.id)
             let at = plan(x: spot.x, y: spot.y, size: size)
-            if hypot(at.x - point.x, at.y - point.y) < 22 { return gimbal.id.uuidString }
+            if hypot(at.x - point.x, at.y - point.y) < 28 { return gimbal.id.uuidString }
         }
         for (index, camera) in cameras.enumerated() {
-            let at = spots[camera.id] ?? defaultCamera(index, count: cameras.count, size: size)
-            if hypot(at.x - point.x, at.y - point.y) < 22 { return camera.id }
+            let place = cameraPlace(camera.id, index: index, count: cameras.count)
+            let at = plan(x: place.x, y: place.y, size: size)
+            if hypot(at.x - point.x, at.y - point.y) < 28 { return camera.id }
         }
         return nil
     }

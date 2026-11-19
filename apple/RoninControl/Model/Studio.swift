@@ -102,6 +102,7 @@ final class Studio: ObservableObject {
     /// 와이파이 연결과 기판 직접 연결을 따로 둡니다. 숫자 주소는 프로필에 덮어쓰지 않습니다.
     @Published var bridgeLinks: [UUID: BridgeLinks] = [:]
     let boardSocket = BoardSocket()
+    let c3Socket = C3JobSocket()
     let radio = OsmoRadio()
     private let c3 = C3Link()
     let frameOK = DjiRFrame.selfCheck()
@@ -123,9 +124,8 @@ final class Studio: ObservableObject {
             note("프레임 검사가 실패했습니다. 오즈모 명령 형식이 공식 예시와 다릅니다.")
         }
         dropSeparateRoninBoards()
-        if let lane = BoardLane(rawValue: profile.boardLane) {
-            boardSocket.lane = lane
-        }
+        let lane = BoardLane(stored: profile.boardLane)
+        boardSocket.lane = lane
         Task { await bootBoards() }
         Task { await maintainGoProSessions() }
     }
@@ -480,8 +480,21 @@ final class Studio: ObservableObject {
             noteOffline("짐벌은 로닌 제어로 고른 C3 가 움직입니다. 그 C3 를 먼저 등록하세요.")
             return
         }
-        _ = (yaw, pitch)
-        noteOffline("\(board.name) 은 로닌만 담당합니다. 이 C3 연결이 없어 팬과 틸트를 보내지 않았습니다.")
+        guard board.link.shoots else {
+            noteOffline("\(board.name) 은 USB 점검입니다. 팬과 틸트를 보내지 않았습니다.")
+            return
+        }
+        if c3Socket.boardId != board.id || c3Socket.state != .online {
+            c3Socket.connect(board)
+            note("\(board.name) 에 붙는 중입니다. 붙기 전에는 팬과 틸트를 보내지 않습니다.")
+            return
+        }
+        let result = await c3Socket.command(["op": "ronin", "yaw": yaw, "pitch": pitch])
+        if result.ack {
+            note("\(board.name) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 받았다고 답했습니다.")
+        } else {
+            note(result.sent ? result.reason : "\(board.name) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
+        }
     }
 
     /// 휠이 가리키는 각도로 옮깁니다. 손을 떼도 그 각도에 남고, 중앙으로 되돌리지 않습니다.
@@ -562,6 +575,7 @@ final class Studio: ObservableObject {
             "group": group,
             "start": start,
             "ids": ids,
+            "tally": start,
         ])
         if ok {
             note("\(label) \(start ? "녹화" : "정지")를 기판 소켓으로 보냈습니다.")
@@ -597,7 +611,26 @@ final class Studio: ObservableObject {
             note("조명 담당 C3 를 찾지 못했습니다.")
             return
         }
-        note("\(board.name) 은 조명만 담당합니다. 연결이 없어 밝기 \(brightness), 색온도 \(kelvin)K, \(on ? "켜기" : "끄기")를 보내지 않았습니다.")
+        guard board.link.shoots else {
+            note("\(board.name) 은 USB 점검입니다. 조명을 보내지 않았습니다.")
+            return
+        }
+        if c3Socket.boardId != board.id || c3Socket.state != .online {
+            c3Socket.connect(board)
+            note("\(board.name) 에 붙는 중입니다. 붙기 전에는 조명을 보내지 않습니다.")
+            return
+        }
+        let result = await c3Socket.command([
+            "op": "light",
+            "brightness": brightness,
+            "kelvin": kelvin,
+            "on": on,
+        ])
+        if result.ack {
+            note("\(board.name) 이 밝기 \(brightness), 색온도 \(kelvin)K 를 받았다고 답했습니다.")
+        } else {
+            note(result.reason)
+        }
     }
 
     func sendCameraSetting(id: String, kind: String, ble: String, setting: String, value: String) async {
@@ -627,10 +660,50 @@ final class Studio: ObservableObject {
     func chooseLane(_ lane: BoardLane) {
         profile.boardLane = lane.rawValue
         boardSocket.lane = lane
-        if boardSocket.state != .offline {
-            boardSocket.disconnect()
-            note("길을 바꿔 오프라인입니다. 지금 연결을 다시 누르세요.")
+        boardSocket.disconnect()
+        if lane == .usb {
+            note("올리멕스 USB는 펌웨어와 시리얼 점검입니다. 촬영 명령은 나가지 않습니다.")
+        } else {
+            note("올리멕스 연결을 \(lane.title) 로 바꿨습니다. 지금 연결을 다시 누르세요.")
         }
+    }
+
+    func chooseC3Mode(_ id: UUID, _ lane: BoardLane) {
+        guard let index = profile.c3Boards.firstIndex(where: { $0.id == id }) else { return }
+        let stored: BoardLane = lane == .poe ? .lan : lane
+        profile.c3Boards[index].linkMode = stored.rawValue
+        if c3Socket.boardId == id { c3Socket.disconnect() }
+        note("\(profile.c3Boards[index].name) 연결을 \(stored.title) 로 바꿨습니다. 명령을 보내면 그때 붙습니다.")
+    }
+
+    /// 고른 카메라를 온에어로 표시합니다. 앞 화면 글자는 기판 응답을 받은 뒤에만 적습니다.
+    func tally(_ camera: BoardCamera, on: Bool) async {
+        if profile.practice {
+            note("연습: \(camera.name) 탈리를 보내지 않았습니다.")
+            return
+        }
+        guard profile.olimexRegistered, boardSocket.lane.shoots else {
+            noteOffline("탈리는 올리멕스가 같은 망, PoE, 핫스팟으로 붙어 있을 때만 보냅니다.")
+            return
+        }
+        let ok = await boardSocket.send([
+            "op": "tally",
+            "id": camera.id,
+            "name": camera.name,
+            "kind": camera.kind,
+            "ble": camera.ble,
+            "on": on,
+        ])
+        if ok {
+            note("\(camera.name) 탈리 \(on ? "켜기" : "끄기")를 보냈습니다. 앞 화면 글자는 랩스에서만 되고, 기판이 결과를 주면 그 글을 따릅니다.")
+        } else {
+            noteOffline("올리멕스가 오프라인입니다. 탈리를 보내지 않았습니다.")
+        }
+    }
+
+    func setHomeAim(_ id: UUID, yaw: Double, pitch: Double) {
+        moveStage(deviceId: id, homeYaw: yaw, homePitch: pitch)
+        note("기준 방향을 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 로 저장했습니다. 이후 움직임은 이 기준에서의 차이입니다.")
     }
 
     func toggleShootGroup(_ name: String, deviceId: UUID) {
