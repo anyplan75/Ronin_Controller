@@ -433,22 +433,26 @@ struct StudioControlScreen: View {
             .disabled(c3Link.state == .connecting || !board.link.shoots)
             if board.duty == .ronin {
                 let spot = studio.stageSpot(for: board.id)
-                Text("조이스틱은 누르는 동안만 움직입니다. 슬라이더는 바로 그 각도로 갑니다. 무대에서 시선을 끌어도 그 절대 방향입니다.")
+                Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 그 방향의 한계로 가고, 제자리는 기본 시선으로 돌아옵니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("기본 시선 팬 \(Int(spot.homeYaw))°, 틸트 \(Int(spot.homePitch))°")
                     .font(.caption.weight(.semibold))
-                PtzStick { x, y in
-                    steerRonin(pan: x * stickSpeed, tilt: -y * stickSpeed)
-                } onEnd: {
-                    Task { await studio.nudgeRonin(yaw: yaw, pitch: pitch, quiet: true) }
-                }
-                HStack {
-                    holdNudge("왼쪽") { steerRonin(pan: -stickSpeed, tilt: 0) }
-                    holdNudge("오른쪽") { steerRonin(pan: stickSpeed, tilt: 0) }
-                    holdNudge("위") { steerRonin(pan: 0, tilt: stickSpeed) }
-                    holdNudge("아래") { steerRonin(pan: 0, tilt: -stickSpeed) }
-                }
+                AimPad(
+                    nudge: { pan, tilt in steerRonin(pan: pan * stickSpeed, tilt: tilt * stickSpeed) },
+                    stop: {},
+                    home: {
+                        yaw = 0
+                        pitch = 0
+                        queueRonin(yaw: 0, pitch: 0)
+                    },
+                    panEnd: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
+                    tiltEnd: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
+                    panMin: -180,
+                    panMax: 180,
+                    tiltMin: -56,
+                    tiltMax: 90
+                )
                 Text("팬 \(Int(wrapDegrees(spot.homeYaw + yaw)))°")
                 Slider(value: Binding(get: { yaw }, set: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -180...180, step: 1)
                 Text("틸트 \(Int(spot.homePitch + pitch))°")
@@ -548,23 +552,32 @@ struct StudioControlScreen: View {
             Text(camera.endpoint.isEmpty ? "ONVIF 주소를 찾는 중입니다." : camera.endpoint)
                 .font(.caption)
                 .textSelection(.enabled)
-            Text("조이스틱과 끝 버튼은 누르는 동안만 움직입니다. 팬·틸트·줌 슬라이더는 바로 그 각도로 갑니다. 무대 시선도 절대 방향입니다.")
+            Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 한계 각도로 가고, 제자리는 기본 시선입니다. 무대 시선을 끌어도 그 절대 방향입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             let spot = studio.stageSpot(for: camera.id)
             Text("기본 시선 \(Int(spot.homeYaw))°")
                 .font(.caption.weight(.semibold))
-            PtzStick { x, y in
-                steer(camera, pan: x * stickSpeed, tilt: -y * stickSpeed, zoom: 0)
-            } onEnd: {
-                halt(camera)
-            }
-            HStack {
-                holdNudge("왼쪽", onChange: { steer(camera, pan: -stickSpeed, tilt: 0, zoom: 0) }, onEnd: { halt(camera) })
-                holdNudge("오른쪽", onChange: { steer(camera, pan: stickSpeed, tilt: 0, zoom: 0) }, onEnd: { halt(camera) })
-                holdNudge("위", onChange: { steer(camera, pan: 0, tilt: stickSpeed, zoom: 0) }, onEnd: { halt(camera) })
-                holdNudge("아래", onChange: { steer(camera, pan: 0, tilt: -stickSpeed, zoom: 0) }, onEnd: { halt(camera) })
-            }
+            AimPad(
+                nudge: { pan, tilt in steer(camera, pan: pan * stickSpeed, tilt: tilt * stickSpeed, zoom: 0) },
+                stop: { halt(camera) },
+                home: {
+                    setPose(camera.id, yaw: 0, pitch: 0)
+                    sendAbsolute(camera)
+                },
+                panEnd: {
+                    setPose(camera.id, yaw: $0)
+                    sendAbsolute(camera)
+                },
+                tiltEnd: {
+                    setPose(camera.id, pitch: $0)
+                    sendAbsolute(camera)
+                },
+                panMin: -180,
+                panMax: 180,
+                tiltMin: -45,
+                tiltMax: 45
+            )
             Text("팬 \(Int(wrapDegrees(spot.homeYaw + pose.yaw)))°")
             Slider(value: Binding(get: { ptzPose[camera.id]?.yaw ?? 0 }, set: {
                 setPose(camera.id, yaw: $0)
@@ -594,21 +607,6 @@ struct StudioControlScreen: View {
             .buttonStyle(DeskButtonStyle(expand: true))
         }
         .task(id: camera.id) { await refreshPtz(camera) }
-    }
-
-    private func holdNudge(_ title: String, onChange: @escaping () -> Void, onEnd: @escaping () -> Void = {}) -> some View {
-        Text(title)
-            .font(.caption.weight(.bold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in onChange() }
-                    .onEnded { _ in onEnd() }
-            )
     }
 
     private func wrapDegrees(_ value: Double) -> Double {
@@ -835,50 +833,56 @@ private enum FloorTool: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .look: return "보기"
-        case .stage: return "무대 그리기"
-        case .foh: return "FOH 그리기"
+        case .stage: return "무대 배치"
+        case .foh: return "FOH 배치"
         }
     }
 }
 
-/// 팬·틸트 조이스틱입니다. 가운데에서 끈 방향이 속도입니다.
-private struct PtzStick: View {
-    var onChange: (Double, Double) -> Void
-    var onEnd: () -> Void
-    @State private var knob = CGSize.zero
-    private let radius: CGFloat = 54
+/// 방향은 누르는 동안만, 끝은 그 방향의 한계, 가운데는 제자리입니다.
+private struct AimPad: View {
+    var nudge: (Double, Double) -> Void
+    var stop: () -> Void
+    var home: () -> Void
+    var panEnd: (Double) -> Void
+    var tiltEnd: (Double) -> Void
+    var panMin: Double
+    var panMax: Double
+    var tiltMin: Double
+    var tiltMax: Double
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color.white.opacity(0.06))
-                .overlay(Circle().stroke(Color(red: 0.93, green: 0.78, blue: 0.42), lineWidth: 2))
-            Circle()
-                .fill(knob == .zero ? Color.white.opacity(0.2) : Color(red: 0.72, green: 0.58, blue: 0.28))
-                .frame(width: 36, height: 36)
-                .overlay(Circle().stroke(Color.white, lineWidth: knob == .zero ? 1 : 2.5))
-                .offset(knob)
-            Image(systemName: "arrow.up.and.down.and.arrow.left.and.right")
-                .font(.caption2)
-                .offset(knob)
+        VStack(spacing: 6) {
+            HStack { Spacer(); endButton("위 끝") { tiltEnd(tiltMax) }; Spacer() }
+            HStack { Spacer(); moveButton("위") { nudge(0, 1) }; Spacer() }
+            HStack(spacing: 6) {
+                endButton("왼쪽 끝") { panEnd(panMin) }
+                moveButton("왼쪽") { nudge(-1, 0) }
+                Button("제자리", action: home)
+                    .buttonStyle(DeskButtonStyle(selected: true))
+                moveButton("오른쪽") { nudge(1, 0) }
+                endButton("오른쪽 끝") { panEnd(panMax) }
+            }
+            HStack { Spacer(); moveButton("아래") { nudge(0, -1) }; Spacer() }
+            HStack { Spacer(); endButton("아래 끝") { tiltEnd(tiltMin) }; Spacer() }
         }
-        .frame(width: radius * 2, height: radius * 2)
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    let dx = value.translation.width
-                    let dy = value.translation.height
-                    let length = max(1, hypot(dx, dy))
-                    let scale = min(1, radius / length)
-                    knob = CGSize(width: dx * scale, height: dy * scale)
-                    onChange(Double(knob.width / radius), Double(knob.height / radius))
-                }
-                .onEnded { _ in
-                    knob = .zero
-                    onEnd()
-                }
-        )
-        .accessibilityLabel("PTZ 조이스틱")
+    }
+
+    private func moveButton(_ title: String, onChange: @escaping () -> Void) -> some View {
+        Text(title)
+            .font(.caption2.weight(.bold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 10)
+            .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
+            .gesture(DragGesture(minimumDistance: 0).onChanged { _ in onChange() }.onEnded { _ in stop() })
+            .accessibilityLabel(title)
+    }
+
+    private func endButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(DeskButtonStyle())
+            .accessibilityLabel("\(title) 한계")
     }
 }
 
@@ -925,6 +929,9 @@ private struct FloorPlan: View {
     @State private var drag: String?
     @State private var dragAim = false
     @State private var draft: FloorMark?
+    @State private var dragStart: FloorMark?
+    @State private var sizeWidth = ""
+    @State private var sizeDepth = ""
 
     private var stageMark: FloorMark {
         studio.profile.stageMark ?? FloorMark(x: -StageRoom.width * 0.35, y: 0.2, w: StageRoom.width * 0.7, d: 2)
@@ -941,36 +948,11 @@ private struct FloorPlan: View {
                 let room = rect(x0: -StageRoom.width / 2, y0: 0, x1: StageRoom.width / 2, y1: StageRoom.length, size: size)
                 context.fill(Path(room), with: .color(Color(red: 0.14, green: 0.15, blue: 0.17)))
                 context.stroke(Path(room), with: .color(.white.opacity(0.35)), lineWidth: 1.5)
-                let stageDraw = (tool == .stage ? draft : nil) ?? stageMark
-                let fohDraw = (tool == .foh ? draft : nil) ?? fohMark
+                let stageDraw = tool == .stage ? sized(stageMark) : stageMark
+                let fohDraw = tool == .foh ? sized(fohMark) : fohMark
                 paintZone(context: context, size: size, mark: stageDraw, title: "무대", fill: Color(red: 0.45, green: 0.62, blue: 0.78).opacity(0.28), stroke: Color(red: 0.62, green: 0.78, blue: 0.9))
                 paintZone(context: context, size: size, mark: fohDraw, title: "FOH", fill: Color(red: 0.54, green: 0.42, blue: 0.20).opacity(0.28), stroke: Color(red: 0.93, green: 0.78, blue: 0.42))
-                var grid = Path()
-                var meter = -StageRoom.width / 2
-                while meter <= StageRoom.width / 2 + 0.01 {
-                    let a = plan(x: meter, y: 0, size: size)
-                    let b = plan(x: meter, y: StageRoom.length, size: size)
-                    grid.move(to: a)
-                    grid.addLine(to: b)
-                    meter += 2
-                }
-                var depth = 0.0
-                while depth <= StageRoom.length + 0.01 {
-                    let a = plan(x: -StageRoom.width / 2, y: depth, size: size)
-                    let b = plan(x: StageRoom.width / 2, y: depth, size: size)
-                    grid.move(to: a)
-                    grid.addLine(to: b)
-                    depth += 2
-                }
-                context.stroke(grid, with: .color(.white.opacity(0.08)), lineWidth: 1)
-                let scaleA = plan(x: -6, y: 0.4, size: size)
-                let scaleB = plan(x: -4, y: 0.4, size: size)
-                var scale = Path()
-                scale.move(to: scaleA)
-                scale.addLine(to: scaleB)
-                context.stroke(scale, with: .color(Color(red: 0.54, green: 0.42, blue: 0.20)), lineWidth: 2)
-                context.draw(Text("2 m").font(.caption2).foregroundStyle(.white.opacity(0.8)), at: CGPoint(x: (scaleA.x + scaleB.x) / 2, y: scaleA.y - 10), anchor: .bottom)
-                context.draw(Text("객석 · 조준 0°").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
+                context.draw(Text("객석").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
                 if let gimbal {
                     let spot = studio.stageSpot(for: gimbal.id)
                     let chosen = selected == gimbal.id.uuidString
@@ -1048,9 +1030,15 @@ private struct FloorPlan: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         if tool != .look {
+                            if dragStart == nil {
+                                dragStart = sized(tool == .stage ? stageMark : fohMark)
+                            }
                             let a = unplan(value.startLocation, size: geo.size)
                             let b = unplan(value.location, size: geo.size)
-                            draft = FloorMark(x: min(a.x, b.x), y: min(a.y, b.y), w: abs(a.x - b.x), d: abs(a.y - b.y))
+                            var next = dragStart ?? sized(tool == .stage ? stageMark : fohMark)
+                            next.x += b.x - a.x
+                            next.y += b.y - a.y
+                            draft = next
                             return
                         }
                         if drag == nil {
@@ -1085,25 +1073,70 @@ private struct FloorPlan: View {
                         }
                     }
                     .onEnded { _ in
-                        if let draft, draft.w > 0.6, draft.d > 0.6 {
-                            if tool == .stage { studio.profile.stageMark = draft }
-                            if tool == .foh { studio.profile.fohMark = draft }
-                        }
-                        draft = nil
+                        dragStart = nil
                         drag = nil
                         dragAim = false
                     }
             )
+            .onAppear { fillSizes(tool) }
+            .onChange(of: tool) { _, new in
+                draft = nil
+                fillSizes(new)
+            }
             .overlay(alignment: .topLeading) {
-                HStack(spacing: 6) {
-                    ForEach(FloorTool.allCases) { item in
-                        Button(item.title) { onTool(item) }
-                            .buttonStyle(DeskButtonStyle(selected: tool == item))
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        ForEach(FloorTool.allCases) { item in
+                            Button(item.title) { onTool(item) }
+                                .buttonStyle(DeskButtonStyle(selected: tool == item))
+                        }
+                    }
+                    if tool != .look {
+                        HStack(spacing: 6) {
+                            TextField("가로 m", text: $sizeWidth)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 72)
+                            TextField("세로 m", text: $sizeDepth)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 72)
+                            Button("이 자리에 고정") { lockZone() }
+                                .buttonStyle(DeskButtonStyle(selected: true))
+                        }
+                        Text("가로·세로를 적고, 사각형을 끌어 자리를 정한 뒤 고정합니다.")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.8))
                     }
                 }
                 .padding(8)
             }
         }
+    }
+
+    private func fillSizes(_ tool: FloorTool) {
+        let mark = tool == .foh ? fohMark : stageMark
+        guard tool != .look else { return }
+        sizeWidth = String(format: "%.1f", mark.w)
+        sizeDepth = String(format: "%.1f", mark.d)
+    }
+
+    private func meters(_ text: String, fallback: Double) -> Double {
+        let value = Double(text.replacingOccurrences(of: ",", with: ".")) ?? fallback
+        return max(0.4, value)
+    }
+
+    private func sized(_ base: FloorMark) -> FloorMark {
+        var mark = draft ?? base
+        mark.w = meters(sizeWidth, fallback: base.w)
+        mark.d = meters(sizeDepth, fallback: base.d)
+        return mark
+    }
+
+    private func lockZone() {
+        let base = tool == .stage ? stageMark : fohMark
+        let mark = sized(base)
+        if tool == .stage { studio.profile.stageMark = mark }
+        if tool == .foh { studio.profile.fohMark = mark }
+        draft = nil
     }
 
     private func paintZone(context: GraphicsContext, size: CGSize, mark: FloorMark, title: String, fill: Color, stroke: Color) {
