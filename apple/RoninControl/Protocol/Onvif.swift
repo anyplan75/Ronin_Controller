@@ -68,38 +68,44 @@ enum Onvif {
 
     /// 스틱이 누르는 동안 연속으로 움직입니다. 성공 응답이 있을 때만 빈 실패 문장이 아닙니다.
     static func drive(host: String, endpoint: String, user: String, password: String, pan: Double, tilt: Double, zoom: Double) async -> (String, String) {
-        guard let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) else {
-            if user.isEmpty {
-                return ("\(host) 는 로그인 없이 움직이지 않습니다. 사용자 이름과 비밀번호를 넣은 뒤 다시 추가하세요.", "")
+        if let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) {
+            let x = max(-1, min(1, pan))
+            let y = max(-1, min(1, tilt))
+            let z = max(-1, min(1, zoom))
+            let body = """
+            <tptz:ContinuousMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="\(x)" y="\(y)" xmlns:tt="http://www.onvif.org/ver10/schema"/><tt:Zoom x="\(z)" xmlns:tt="http://www.onvif.org/ver10/schema"/></tptz:Velocity></tptz:ContinuousMove>
+            """
+            let reply = await post(url: token.ptz, user: user, password: password, body: body)
+            if reply.ok {
+                return ("\(host) ONVIF 2000이 조이스틱 명령을 받았습니다.", token.device)
             }
-            return ("\(host) 프로필을 읽지 못했습니다. 팬·틸트·줌을 보내지 않았습니다.", "")
         }
-        let x = max(-1, min(1, pan))
-        let y = max(-1, min(1, tilt))
-        let z = max(-1, min(1, zoom))
-        let body = """
-        <tptz:ContinuousMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:Velocity><tt:PanTilt x="\(x)" y="\(y)" xmlns:tt="http://www.onvif.org/ver10/schema"/><tt:Zoom x="\(z)" xmlns:tt="http://www.onvif.org/ver10/schema"/></tptz:Velocity></tptz:ContinuousMove>
-        """
-        let reply = await post(url: token.ptz, user: user, password: password, body: body)
-        if reply.ok {
-            return ("\(host) 가 조이스틱 명령을 받았습니다.", token.device)
+        if await Visca.drive(host: host, pan: pan, tilt: tilt, zoom: zoom) {
+            return ("\(host) Visca 1259가 조이스틱 명령을 받았습니다.", endpoint)
         }
-        if reply.fault {
-            return ("\(host) 가 조이스틱을 거절했습니다. 움직이지 않은 것으로 둡니다.", token.device)
-        }
-        return ("\(host) 가 응답하지 않았습니다. 명령을 성공으로 두지 않습니다.", token.device)
+        return ("\(host) ONVIF와 Visca가 조이스틱을 받지 않았습니다. 움직이지 않은 것으로 둡니다.", "")
     }
 
     static func stop(host: String, endpoint: String, user: String, password: String) async -> String {
-        guard let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) else {
-            return "\(host) 에 멈춤을 보내지 못했습니다."
+        if let token = await profileToken(host: host, endpoint: endpoint, user: user, password: password) {
+            let body = """
+            <tptz:Stop xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>
+            """
+            let reply = await post(url: token.ptz, user: user, password: password, body: body)
+            if reply.ok { return "\(host) ONVIF 2000이 멈춤을 받았습니다." }
         }
-        let body = """
-        <tptz:Stop xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"><tptz:ProfileToken>\(xml(token.token))</tptz:ProfileToken><tptz:PanTilt>true</tptz:PanTilt><tptz:Zoom>true</tptz:Zoom></tptz:Stop>
-        """
-        let reply = await post(url: token.ptz, user: user, password: password, body: body)
-        if reply.ok { return "\(host) 가 멈춤을 받았습니다." }
+        if await Visca.stop(host: host) {
+            return "\(host) Visca 1259가 멈춤을 받았습니다."
+        }
         return "\(host) 가 멈춤에 답하지 않았습니다."
+    }
+
+    static func hardwareMac(host: String) async -> String {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: hardwareMac(in: unicastText(host)))
+            }
+        }
     }
 
     /// 슬라이더의 절대 각도입니다. 카메라가 받았을 때만 성공 문장입니다.
@@ -235,9 +241,9 @@ enum Onvif {
         return hosts
     }
 
-    private static func unicastXAddrs(_ host: String) -> [URL] {
+    private static func unicastText(_ host: String) -> String {
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        if fd < 0 { return [] }
+        if fd < 0 { return "" }
         defer { close(fd) }
         var wait = timeval(tv_sec: 1, tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &wait, socklen_t(MemoryLayout<timeval>.size))
@@ -253,12 +259,28 @@ enum Onvif {
                 }
             }
         }
-        if sent < 0 { return [] }
+        if sent < 0 { return "" }
         var storage = [UInt8](repeating: 0, count: 8192)
         let count = recv(fd, &storage, storage.count, 0)
-        if count <= 0 { return [] }
-        let text = String(decoding: storage.prefix(count), as: UTF8.self)
-        return xaddrURLs(in: text)
+        if count <= 0 { return "" }
+        return String(decoding: storage.prefix(count), as: UTF8.self)
+    }
+
+    private static func unicastXAddrs(_ host: String) -> [URL] {
+        xaddrURLs(in: unicastText(host))
+    }
+
+    private static func hardwareMac(in text: String) -> String {
+        let pattern = #"hardware/([0-9A-Fa-f]{12})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
+              let slice = Range(match.range(at: 1), in: text) else { return "" }
+        let raw = String(text[slice]).uppercased()
+        return stride(from: 0, to: 12, by: 2).map { pair in
+            let start = raw.index(raw.startIndex, offsetBy: pair)
+            let end = raw.index(start, offsetBy: 2)
+            return String(raw[start..<end])
+        }.joined(separator: ":")
     }
 
     private static func sweep() async -> Set<String> {

@@ -518,8 +518,13 @@ struct StudioControlScreen: View {
                 .font(.headline)
             TextField("카메라 이름", text: Binding(get: { camera.name }, set: { studio.renamePtz(camera.id, $0) }))
                 .textFieldStyle(.roundedBorder)
-            Text("\(camera.host) · \(camera.endpoint.isEmpty ? "ONVIF 주소 찾는 중" : camera.endpoint) · \(ptzOnline.contains(camera.id) ? "온라인" : "오프라인")")
+            Text("\(camera.host) · ONVIF 2000 · Visca 1259 · \(ptzOnline.contains(camera.id) ? "온라인" : "오프라인")")
                 .font(.caption.weight(.semibold))
+            Text("MAC \(camera.mac.isEmpty ? "아직 없음" : camera.mac)")
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+            Text(camera.endpoint.isEmpty ? "ONVIF 주소를 찾는 중입니다." : camera.endpoint)
+                .font(.caption)
                 .textSelection(.enabled)
             Text("스틱을 누르는 동안 팬·틸트가 움직입니다. 손을 떼면 멈춥니다. 카메라가 명령을 받았을 때만 성공입니다.")
                 .font(.caption)
@@ -624,6 +629,8 @@ struct StudioControlScreen: View {
         let password = FieldSecret.load(account: camera.id.uuidString)
         let result = await Onvif.check(host: camera.host, endpoint: camera.endpoint, user: camera.username, password: password)
         if !result.1.isEmpty { studio.rememberPtzEndpoint(camera.id, result.1) }
+        let mac = await Onvif.hardwareMac(host: camera.host)
+        studio.rememberPtzMac(camera.id, mac)
         if result.0.contains("답했습니다") { ptzOnline.insert(camera.id) } else { ptzOnline.remove(camera.id) }
         studio.note(result.0)
     }
@@ -638,7 +645,8 @@ struct StudioControlScreen: View {
                     Button("이 주소 추가") {
                         Task {
                             let door = await Onvif.open(host: ptzHost, endpoint: "")
-                            studio.addPtz(host: ptzHost, username: ptzUser, password: ptzPassword, endpoint: door?.device.absoluteString ?? "")
+                            let mac = await Onvif.hardwareMac(host: ptzHost)
+                            studio.addPtz(host: ptzHost, username: ptzUser, password: ptzPassword, endpoint: door?.device.absoluteString ?? "", mac: mac)
                             ptzPassword = ""
                             showPtz = false
                         }
@@ -662,10 +670,13 @@ struct StudioControlScreen: View {
                     }
                     ForEach(ptzFound) { found in
                         Button(found.endpoint.isEmpty ? found.host : found.endpoint) {
-                            ptzHost = found.host
-                            studio.addPtz(host: found.host, username: ptzUser, password: ptzPassword, endpoint: found.endpoint)
-                            ptzPassword = ""
-                            showPtz = false
+                            Task {
+                                ptzHost = found.host
+                                let mac = await Onvif.hardwareMac(host: found.host)
+                                studio.addPtz(host: found.host, username: ptzUser, password: ptzPassword, endpoint: found.endpoint, mac: mac)
+                                ptzPassword = ""
+                                showPtz = false
+                            }
                         }
                         .buttonStyle(DeskButtonStyle(expand: true))
                     }

@@ -666,16 +666,19 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var username: String
     /// 카메라가 알려 준 ONVIF 주소입니다. 비어 있으면 호스트로 다시 찾습니다.
     var endpoint: String
+    /// 공유기에서 보는 카메라 MAC 입니다.
+    var mac: String
 
-    init(id: UUID, name: String, host: String, username: String, endpoint: String = "") {
+    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "") {
         self.id = id
         self.name = name
         self.host = host
         self.username = username
         self.endpoint = endpoint
+        self.mac = mac
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint }
+    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -684,6 +687,7 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         host = try box.decode(String.self, forKey: .host)
         username = try box.decodeIfPresent(String.self, forKey: .username) ?? ""
         endpoint = try box.decodeIfPresent(String.self, forKey: .endpoint) ?? ""
+        mac = try box.decodeIfPresent(String.self, forKey: .mac) ?? ""
     }
 
     func encode(to encoder: Encoder) throws {
@@ -693,6 +697,7 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         try box.encode(host, forKey: .host)
         try box.encode(username, forKey: .username)
         try box.encode(endpoint, forKey: .endpoint)
+        try box.encode(mac, forKey: .mac)
     }
 }
 

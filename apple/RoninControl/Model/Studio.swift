@@ -204,6 +204,11 @@ final class Studio: ObservableObject {
         if !hotspot.isEmpty { profile.c3Boards[index].apMac = hotspot }
     }
 
+    func rememberPtzMac(_ id: UUID, _ mac: String) {
+        guard !mac.isEmpty, let index = profile.ptzCameras.firstIndex(where: { $0.id == id }) else { return }
+        if profile.ptzCameras[index].mac != mac { profile.ptzCameras[index].mac = mac }
+    }
+
     func rememberPtzEndpoint(_ id: UUID, _ endpoint: String) {
         guard !endpoint.isEmpty, let index = profile.ptzCameras.firstIndex(where: { $0.id == id }) else { return }
         if profile.ptzCameras[index].endpoint != endpoint {
@@ -241,7 +246,7 @@ final class Studio: ObservableObject {
         }
     }
 
-    func addPtz(host: String, username: String, password: String, endpoint: String = "") {
+    func addPtz(host: String, username: String, password: String, endpoint: String = "", mac: String = "") {
         let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clean.hasPrefix("192.168.10."), clean.split(separator: ".").count == 4 else {
             note("PTZ 주소는 192.168.10.x 만 됩니다.")
@@ -250,6 +255,7 @@ final class Studio: ObservableObject {
         if let existing = profile.ptzCameras.first(where: { $0.host == clean }) {
             FieldSecret.save(password, account: existing.id.uuidString)
             rememberPtzEndpoint(existing.id, endpoint)
+            rememberPtzMac(existing.id, mac)
             if !username.isEmpty {
                 if let index = profile.ptzCameras.firstIndex(where: { $0.id == existing.id }) {
                     profile.ptzCameras[index].username = username
@@ -258,7 +264,7 @@ final class Studio: ObservableObject {
             note("\(clean) 은 이미 목록에 있습니다.")
             return
         }
-        let camera = PtzRecord(id: UUID(), name: "PTZ \(clean)", host: clean, username: username, endpoint: endpoint)
+        let camera = PtzRecord(id: UUID(), name: "PTZ \(clean)", host: clean, username: username, endpoint: endpoint, mac: mac)
         profile.ptzCameras.append(camera)
         FieldSecret.save(password, account: camera.id.uuidString)
         let index = profile.ptzCameras.count
