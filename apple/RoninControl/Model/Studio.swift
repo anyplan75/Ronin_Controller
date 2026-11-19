@@ -163,7 +163,9 @@ final class Studio: ObservableObject {
         }
         let board = C3BoardRecord(
             id: UUID(),
-            name: job == .ronin ? "C3 로닌" : "C3 울란지 VL120BI",
+            name: profile.lastC3Name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? (job == .ronin ? "C3 로닌" : "C3 울란지 VL120BI")
+                : profile.lastC3Name.trimmingCharacters(in: .whitespacesAndNewlines),
             job: job.rawValue,
             lanHost: profile.lastC3Host
         )
@@ -210,27 +212,31 @@ final class Studio: ObservableObject {
     }
 
     /// 블루투스 처음 설정이 알려 준 집 망 주소로 웹소켓을 엽니다.
-    func adoptLan(_ kind: SeenBoard.Kind, host: String, port: Int, radios: BoardRadios = BoardRadios()) {
+    func adoptLan(_ kind: SeenBoard.Kind, host: String, port: Int, radios: BoardRadios = BoardRadios(), name: String = "") {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         switch kind {
         case .olimex:
             profile.olimexRegistered = true
             profile.olimexLanHost = host
             profile.boardLane = BoardLane.lan.rawValue
+            if !cleanName.isEmpty { profile.olimexName = cleanName }
             rememberOlimex(wifi: radios.wifi, ethernet: radios.ethernet, hotspot: radios.hotspot)
             boardSocket.lane = .lan
             boardSocket.reportedHost = host
             boardSocket.reportedPort = port
             boardSocket.connect()
-            note("올리멕스가 \(host):\(port) 로 집 망에 붙었다고 답했습니다. 그 주소의 웹소켓을 엽니다.")
+            note("\(olimexTitle) 가 \(host):\(port) 로 집 망에 붙었다고 답했습니다. 그 주소의 웹소켓을 엽니다.")
         case .c3:
             profile.lastC3Host = host
+            if !cleanName.isEmpty { profile.lastC3Name = cleanName }
             if let index = profile.c3Boards.firstIndex(where: { $0.duty == .ronin }) ?? profile.c3Boards.indices.first {
                 profile.c3Boards[index].lanHost = host
                 profile.c3Boards[index].linkMode = BoardLane.lan.rawValue
+                if !cleanName.isEmpty { profile.c3Boards[index].name = cleanName }
                 rememberC3(profile.c3Boards[index].id, wifi: radios.wifi, hotspot: radios.hotspot)
                 note("\(profile.c3Boards[index].name) 주소를 \(host):\(port) 로 저장했습니다. 명령을 보내면 그 주소로 붙습니다.")
             } else {
-                note("C3 가 \(host):\(port) 로 붙었다고 답했습니다. C3 역할을 등록하면 그 주소를 씁니다.")
+                note("C3 \(cleanName.isEmpty ? "" : cleanName) 가 \(host):\(port) 로 붙었다고 답했습니다. C3 역할을 등록하면 그 이름과 주소를 씁니다.")
             }
         }
     }

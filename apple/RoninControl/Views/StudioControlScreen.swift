@@ -71,8 +71,8 @@ struct StudioControlScreen: View {
             Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
         }
         .sheet(isPresented: $showJoin) {
-            FirstJoinSheet { kind, host, port, radios in
-                studio.adoptLan(kind, host: host, port: port, radios: radios)
+            FirstJoinSheet { kind, host, port, radios, name in
+                studio.adoptLan(kind, host: host, port: port, radios: radios, name: name)
             }
         }
         .onChange(of: link.wifiMac) { _, _ in

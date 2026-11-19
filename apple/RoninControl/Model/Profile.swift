@@ -721,6 +721,8 @@ struct StudioProfile: Codable, Equatable, Sendable {
     var olimexLanHost: String
     /// 블루투스로 받은 C3 주소입니다. 아직 C3 를 등록하지 않았을 때 보관합니다.
     var lastC3Host: String
+    /// 처음 연결에서 붙인 C3 이름입니다. 등록할 때 이 이름을 씁니다.
+    var lastC3Name: String
     var ptzCameras: [PtzRecord]
     /// 사용자가 붙인 올리멕스 이름입니다. 비어 있으면 올리멕스로 보여 줍니다.
     var olimexName: String
@@ -747,6 +749,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         c3Boards: [C3BoardRecord] = [],
         olimexLanHost: String = "",
         lastC3Host: String = "",
+        lastC3Name: String = "",
         ptzCameras: [PtzRecord] = [],
         olimexName: String = "",
         olimexWifiMac: String = "",
@@ -770,6 +773,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         self.c3Boards = c3Boards
         self.olimexLanHost = olimexLanHost
         self.lastC3Host = lastC3Host
+        self.lastC3Name = lastC3Name
         self.ptzCameras = ptzCameras
         self.olimexName = olimexName
         self.olimexWifiMac = olimexWifiMac
@@ -780,7 +784,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, ptzCameras, olimexName, olimexWifiMac, olimexEthMac, olimexApMac, stageMark, fohMark
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, lastC3Name, ptzCameras, olimexName, olimexWifiMac, olimexEthMac, olimexApMac, stageMark, fohMark
     }
 
     init(from decoder: Decoder) throws {
@@ -800,6 +804,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         c3Boards = try box.decodeIfPresent([C3BoardRecord].self, forKey: .c3Boards) ?? []
         olimexLanHost = try box.decodeIfPresent(String.self, forKey: .olimexLanHost) ?? ""
         lastC3Host = try box.decodeIfPresent(String.self, forKey: .lastC3Host) ?? ""
+        lastC3Name = try box.decodeIfPresent(String.self, forKey: .lastC3Name) ?? ""
         ptzCameras = try box.decodeIfPresent([PtzRecord].self, forKey: .ptzCameras) ?? []
         olimexName = try box.decodeIfPresent(String.self, forKey: .olimexName) ?? ""
         olimexWifiMac = try box.decodeIfPresent(String.self, forKey: .olimexWifiMac) ?? ""
@@ -826,6 +831,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         try box.encode(c3Boards, forKey: .c3Boards)
         try box.encode(olimexLanHost, forKey: .olimexLanHost)
         try box.encode(lastC3Host, forKey: .lastC3Host)
+        try box.encode(lastC3Name, forKey: .lastC3Name)
         try box.encode(ptzCameras, forKey: .ptzCameras)
         try box.encode(olimexName, forKey: .olimexName)
         try box.encode(olimexWifiMac, forKey: .olimexWifiMac)
