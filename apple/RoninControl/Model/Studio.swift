@@ -823,15 +823,14 @@ final class Studio: ObservableObject {
             note("액션 카메라 녹화는 올리멕스 기판만 합니다. 먼저 올리멕스를 등록하세요.")
             return
         }
-        let ids: [String]
-        if group == "all" {
-            ids = profile.devices.map(\.id.uuidString)
-        } else {
-            ids = (profile.shootGroups[group] ?? []).map(\.uuidString)
-            if ids.isEmpty {
-                note("\(label) 묶음이 비어 있습니다. 명령을 보내지 않았습니다.")
-                return
-            }
+        guard boardSocket.state == .online else {
+            noteOffline("올리멕스가 오프라인입니다. \(label) 녹화를 보내지 않았습니다.")
+            return
+        }
+        let ids = group == "all" ? boardSocket.cameras.map(\.id) : (profile.cameraGroups[group] ?? [])
+        if ids.isEmpty {
+            note(group == "all" ? "스캔된 카메라가 없습니다. 모두 녹화를 보내지 않았습니다." : "\(label) 묶음이 비어 있습니다. 카메라 줄의 \(label) 을 먼저 누르세요.")
+            return
         }
         let ok = await boardSocket.send([
             "op": "record",
@@ -841,10 +840,25 @@ final class Studio: ObservableObject {
             "tally": start,
         ])
         if ok {
-            note("\(label) \(start ? "녹화" : "정지")를 기판 소켓으로 보냈습니다.")
+            note("\(label) \(start ? "녹화" : "정지") \(ids.count)대를 기판 소켓으로 보냈습니다.")
         } else {
             noteOffline("기판이 오프라인입니다. \(label) \(start ? "녹화" : "정지")를 보내지 않았습니다.")
         }
+    }
+
+    func toggleCameraGroup(_ name: String, _ cameraId: String) {
+        var list = profile.cameraGroups[name] ?? []
+        if list.contains(cameraId) {
+            list.removeAll { $0 == cameraId }
+        } else {
+            list.append(cameraId)
+        }
+        profile.cameraGroups[name] = list
+        note("\(name) 묶음은 지금 \(list.count)대입니다.")
+    }
+
+    func cameraInGroup(_ name: String, _ cameraId: String) -> Bool {
+        profile.cameraGroups[name]?.contains(cameraId) == true
     }
 
     /// 액션 카메라 한 대의 녹화입니다. 올리멕스 웹소켓으로만 보냅니다.
@@ -896,7 +910,7 @@ final class Studio: ObservableObject {
         }
     }
 
-    func sendCameraSetting(id: String, kind: String, ble: String, setting: String, value: String) async {
+    func sendCameraSetting(id: String, name: String, kind: String, ble: String, setting: String, value: String) async {
         if profile.practice {
             note("연습: 카메라 설정을 보내지 않았습니다.")
             return
@@ -908,6 +922,7 @@ final class Studio: ObservableObject {
         let ok = await boardSocket.send([
             "op": "camera",
             "id": id,
+            "name": name,
             "kind": kind,
             "ble": ble,
             "setting": setting,

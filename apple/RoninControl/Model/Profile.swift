@@ -774,6 +774,8 @@ struct StudioProfile: Codable, Equatable, Sendable {
     var boardLane: String
     /// A, B, C 묶음입니다. 값은 장치 아이디입니다.
     var shootGroups: [String: [UUID]]
+    /// 올리멕스 아래 액션 카메라 묶음입니다. 값은 카메라 맥 주소입니다.
+    var cameraGroups: [String: [String]]
     /// 스튜디오 화면의 올리멕스 ESP32-PoE 입니다. 액션 카메라는 이 기판에만 있습니다.
     var olimexRegistered: Bool
     /// 일을 하나씩 맡은 C3 입니다.
@@ -806,6 +808,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         stageSpots: [StageSpot] = [],
         boardLane: String = BoardLane.lan.rawValue,
         shootGroups: [String: [UUID]] = [:],
+        cameraGroups: [String: [String]] = [:],
         olimexRegistered: Bool = false,
         c3Boards: [C3BoardRecord] = [],
         olimexLanHost: String = "",
@@ -830,6 +833,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         self.stageSpots = stageSpots
         self.boardLane = boardLane
         self.shootGroups = shootGroups
+        self.cameraGroups = cameraGroups
         self.olimexRegistered = olimexRegistered
         self.c3Boards = c3Boards
         self.olimexLanHost = olimexLanHost
@@ -845,7 +849,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, lastC3Name, ptzCameras, olimexName, olimexWifiMac, olimexEthMac, olimexApMac, stageMark, fohMark
+        case version, devices, presets, groupIds, leadMs, practice, senderId, senderMac, stageSpots, boardLane, shootGroups, cameraGroups, olimexRegistered, c3Boards, olimexLanHost, lastC3Host, lastC3Name, ptzCameras, olimexName, olimexWifiMac, olimexEthMac, olimexApMac, stageMark, fohMark
     }
 
     init(from decoder: Decoder) throws {
@@ -861,6 +865,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         stageSpots = try box.decodeIfPresent([StageSpot].self, forKey: .stageSpots) ?? []
         boardLane = try box.decodeIfPresent(String.self, forKey: .boardLane) ?? BoardLane.lan.rawValue
         shootGroups = try box.decodeIfPresent([String: [UUID]].self, forKey: .shootGroups) ?? [:]
+        cameraGroups = try box.decodeIfPresent([String: [String]].self, forKey: .cameraGroups) ?? [:]
         olimexRegistered = try box.decodeIfPresent(Bool.self, forKey: .olimexRegistered) ?? false
         c3Boards = try box.decodeIfPresent([C3BoardRecord].self, forKey: .c3Boards) ?? []
         olimexLanHost = try box.decodeIfPresent(String.self, forKey: .olimexLanHost) ?? ""
@@ -888,6 +893,7 @@ struct StudioProfile: Codable, Equatable, Sendable {
         try box.encode(stageSpots, forKey: .stageSpots)
         try box.encode(boardLane, forKey: .boardLane)
         try box.encode(shootGroups, forKey: .shootGroups)
+        try box.encode(cameraGroups, forKey: .cameraGroups)
         try box.encode(olimexRegistered, forKey: .olimexRegistered)
         try box.encode(c3Boards, forKey: .c3Boards)
         try box.encode(olimexLanHost, forKey: .olimexLanHost)

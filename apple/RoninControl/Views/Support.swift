@@ -180,6 +180,7 @@ struct GroupBar: View {
 
 struct LogList: View {
     @EnvironmentObject private var studio: Studio
+    @State private var open = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -187,14 +188,24 @@ struct LogList: View {
                 Text("오즈모 프레임 검사가 실패했습니다.")
                     .foregroundStyle(.red)
             }
-            if studio.log.isEmpty {
-                Text("아직 기록이 없습니다.")
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(Array(studio.log.enumerated()), id: \.offset) { _, line in
-                Text(line)
+            Button {
+                open.toggle()
+            } label: {
+                Text(studio.log.first ?? "아직 기록이 없습니다.")
                     .font(.caption.monospaced())
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            if open {
+                ForEach(Array(studio.log.dropFirst().enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.caption.monospaced())
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if studio.log.count > 1 {
+                Text("기록을 누르면 이전 줄이 열립니다.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }

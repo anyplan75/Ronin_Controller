@@ -9,7 +9,6 @@ struct StudioControlScreen: View {
     @State private var pick: DeskPick = .olimex
     @State private var askC3Job = false
     @State private var fov = "와이드"
-    @State private var resolution = "1080p"
     @State private var yaw = 0.0
     @State private var pitch = 0.0
     @State private var lightLevel: [UUID: Double] = [:]
@@ -33,6 +32,9 @@ struct StudioControlScreen: View {
     @State private var ptzDrive: Task<Void, Never>?
     @State private var ptzSent = Date.distantPast
     @State private var stickSpeed = 0.45
+    @State private var goproChoice: [Int: Int] = [:]
+    @State private var osmoMode = 0x01
+    @State private var liveReady: [String: URL] = [:]
     @State private var absoluteTask: Task<Void, Never>?
     @State private var absolutePending: (PtzRecord, Double, Double, Double)?
     @State private var roninTask: Task<Void, Never>?
@@ -53,7 +55,7 @@ struct StudioControlScreen: View {
                         VStack(spacing: 0) {
                             deviceList.frame(minHeight: 240)
                             floor.frame(height: 300)
-                            liveStrip.frame(height: 150)
+                            liveStrip
                             inspector.frame(minHeight: 260)
                         }
                     }
@@ -62,7 +64,7 @@ struct StudioControlScreen: View {
                         deviceList.frame(width: min(280, geo.size.width * 0.24))
                         VStack(spacing: 0) {
                             floor
-                            liveStrip.frame(height: 168)
+                            liveStrip
                         }
                         inspector.frame(width: min(320, geo.size.width * 0.26))
                     }
@@ -126,11 +128,15 @@ struct StudioControlScreen: View {
             }
             HStack(spacing: 8) {
                 ForEach(["A", "B", "C"], id: \.self) { name in
-                    Button("\(name) 녹화") { Task { await studio.fieldRecord(group: name, start: true) } }
-                        .buttonStyle(DeskButtonStyle(tone: .record))
-                    Button("\(name) 정지") { Task { await studio.fieldRecord(group: name, start: false) } }
+                    let count = studio.profile.cameraGroups[name]?.count ?? 0
+                    Button("\(name) 묶음 \(count) 녹화") { Task { await studio.fieldRecord(group: name, start: true) } }
+                        .buttonStyle(DeskButtonStyle(selected: count > 0, tone: .record))
+                    Button("정지") { Task { await studio.fieldRecord(group: name, start: false) } }
                         .buttonStyle(DeskButtonStyle(tone: .stop))
                 }
+                Text("카메라 줄의 A·B·C가 묶음입니다.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Menu {
                     Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
@@ -175,6 +181,34 @@ struct StudioControlScreen: View {
                 }
                 .buttonStyle(DeskButtonStyle(selected: pick == .olimex, expand: true))
                 .listRowBackground(pick == .olimex ? Color.white.opacity(0.08) : Color.clear)
+                if studio.profile.olimexRegistered {
+                    if link.state != .online {
+                        Text("기판이 오프라인이면 카메라 이름이 비습니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if link.cameras.isEmpty {
+                        Text("아직 고프로·액션 5 이름이 안 보입니다. 장치 연결 또는 블루투스 리모컨 화면을 여세요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(link.cameras) { camera in
+                            HStack(spacing: 4) {
+                                Button {
+                                    pick = .camera(camera.id)
+                                } label: {
+                                    Label(camera.name, systemImage: cameraSymbol(camera))
+                                        .font(.caption)
+                                }
+                                .buttonStyle(DeskButtonStyle(selected: pick == .camera(camera.id), expand: true))
+                                ForEach(["A", "B", "C"], id: \.self) { name in
+                                    Button(name) { studio.toggleCameraGroup(name, camera.id) }
+                                        .buttonStyle(DeskButtonStyle(selected: studio.cameraInGroup(name, camera.id)))
+                                }
+                            }
+                            .listRowBackground(pick == .camera(camera.id) ? Color.white.opacity(0.08) : Color.clear)
+                        }
+                    }
+                }
             }
             Section("C3") {
                 if studio.profile.c3Boards.isEmpty {
@@ -224,37 +258,6 @@ struct StudioControlScreen: View {
                     }
                 }
             }
-            Section("액션 카메라") {
-                if !studio.profile.olimexRegistered {
-                    Text("올리멕스를 등록하면 여기 나옵니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if link.state != .online {
-                    Text("올리멕스가 오프라인입니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if link.cameras.isEmpty {
-                    Text("블루투스로 붙은 카메라가 없습니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(link.cameras) { camera in
-                        Button {
-                            pick = .camera(camera.id)
-                        } label: {
-                            HStack {
-                                Label(camera.name, systemImage: cameraSymbol(camera))
-                                Spacer()
-                                Text(link.state == .online ? "온라인 · 대기" : "오프라인")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(DeskButtonStyle(selected: pick == .camera(camera.id), expand: true))
-                        .listRowBackground(pick == .camera(camera.id) ? Color.white.opacity(0.08) : Color.clear)
-                    }
-                }
-            }
         }
         .scrollContentBackground(.hidden)
         .background(panel)
@@ -297,38 +300,54 @@ struct StudioControlScreen: View {
     }
 
     private var liveStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                if link.state != .online || link.cameras.isEmpty {
-                    liveCell(title: "실시간 그림", note: link.state == .online ? "그림 없음" : "오프라인", url: nil)
-                } else {
-                    ForEach(link.cameras) { camera in
-                        HonestPicture(title: camera.name, stream: camera.id)
+        let playing = link.cameras.filter { liveReady[$0.id] != nil }
+        return VStack(alignment: .leading, spacing: 8) {
+            if playing.isEmpty {
+                Text(link.state == .online ? "실시간 그림 없음" : "오프라인")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(playing) { camera in
+                            if let url = liveReady[camera.id] {
+                                LivePicture(title: camera.name, url: url)
+                            }
+                        }
                     }
                 }
             }
-            .padding(10)
         }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .frame(height: playing.isEmpty ? 44 : 360)
         .background(panel)
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+        .task(id: link.cameras.map(\.id).joined(separator: ",")) { await probeLive() }
     }
 
-    private func liveCell(title: String, note: String, url: URL?) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.caption.weight(.semibold))
-            ZStack {
-                Color.black
-                if let url {
-                    VideoPlayer(player: AVPlayer(url: url))
-                } else {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+    private func probeLive() async {
+        var next: [String: URL] = [:]
+        #if os(macOS)
+        if link.state == .online {
+            for camera in link.cameras {
+                let safe = camera.id.replacingOccurrences(of: ":", with: "")
+                let candidates = [camera.id, safe, camera.name.replacingOccurrences(of: " ", with: "")]
+                for name in candidates {
+                    guard let url = URL(string: "http://127.0.0.1:8888/\(name)/index.m3u8") else { continue }
+                    var request = URLRequest(url: url)
+                    request.timeoutInterval = 1.2
+                    if let (_, response) = try? await URLSession.shared.data(for: request),
+                       let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                        next[camera.id] = url
+                        break
+                    }
                 }
             }
-            .frame(width: 220, height: 110)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+        #endif
+        liveReady = next
     }
 
     private var inspector: some View {
@@ -486,31 +505,55 @@ struct StudioControlScreen: View {
     }
 
     private func cameraInspector(_ camera: BoardCamera) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let osmo = camera.ble == "FFF0" || camera.kind == "osmo"
+        return VStack(alignment: .leading, spacing: 8) {
             Text(camera.name).font(.headline)
-            Text("올리멕스 블루투스 \(camera.ble)")
+            Text(osmo ? "오즈모 액션 · 블루투스 리모컨 FFF0" : "오픈 고프로 · FEA6")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Picker("화각", selection: $fov) {
-                Text("와이드").tag("와이드")
-                Text("리니어").tag("리니어")
-                Text("내로우").tag("내로우")
-            }
-            Picker("해상도", selection: $resolution) {
-                Text("4K").tag("4K")
-                Text("2.7K").tag("2.7K")
-                Text("1080p").tag("1080p")
-            }
-            Button("이 카메라만 보내기") {
-                Task {
-                    await studio.sendCameraSetting(id: camera.id, kind: camera.kind, ble: camera.ble, setting: "fov", value: fov)
-                    await studio.sendCameraSetting(id: camera.id, kind: camera.kind, ble: camera.ble, setting: "resolution", value: resolution)
+            if osmo {
+                Text("쓸 수 있는 것은 모드입니다. 해상도·프레임·흔들림 보정은 이 명령으로 바꾸지 않습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("모드", selection: $osmoMode) {
+                    ForEach(OsmoCatalog.actionModes, id: \.0) { item in
+                        Text(item.1).tag(item.0)
+                    }
+                }
+                Button("모드 보내기") {
+                    Task {
+                        await studio.sendCameraSetting(id: camera.id, name: camera.name, kind: camera.kind, ble: camera.ble, setting: "mode", value: String(osmoMode))
+                    }
+                }
+                .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            } else {
+                Text("오픈 고프로에 공개된 설정 번호입니다. 카메라가 거절하면 로그에 상태 0이 아니라고 남습니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(GoProCatalog.settings) { spec in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(spec.title).font(.caption.weight(.semibold))
+                        HStack {
+                            Picker(spec.title, selection: Binding(
+                                get: { goproChoice[spec.id] ?? spec.options[0].value },
+                                set: { goproChoice[spec.id] = $0 }
+                            )) {
+                                ForEach(spec.options) { option in
+                                    Text(option.label).tag(option.value)
+                                }
+                            }
+                            .labelsHidden()
+                            Button("보내기") {
+                                let value = goproChoice[spec.id] ?? spec.options[0].value
+                                Task {
+                                    await studio.sendCameraSetting(id: camera.id, name: camera.name, kind: camera.kind, ble: camera.ble, setting: String(spec.id), value: String(value))
+                                }
+                            }
+                            .buttonStyle(DeskButtonStyle())
+                        }
+                    }
                 }
             }
-            .buttonStyle(DeskButtonStyle(selected: true, expand: true))
-            Text("화각 프리셋은 렌즈가 알려 준 값이 아닙니다. 고른 카메라만 그 각도의 부채꼴을 미터 눈금으로 그립니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             HStack {
                 Button("녹화") { Task { await studio.olimexCamera(camera, start: true) } }
                     .buttonStyle(DeskButtonStyle(tone: .record))
@@ -523,7 +566,9 @@ struct StudioControlScreen: View {
                 Button("탈리 끄기") { Task { await studio.tally(camera, on: false) } }
                     .buttonStyle(DeskButtonStyle(tone: .stop))
             }
-            Text("앞 화면에 글을 그리는 공식 블루투스 명령은 없습니다. 녹화 중 빨간 표시와 LED가 가장 가까운 탈리입니다. 랩스 펌웨어의 *FRNT=1 은 QR로만 앞 화면에 글을 띄웁니다.")
+            Text(osmo
+                 ? "액션 5 앞 화면에 글이나 탈리 불을 그리는 블루투스 명령은 없습니다. 빨간 테두리는 녹화가 실제로 시작될 때만 카메라가 켭니다."
+                 : "고프로 탈리는 LED 설정 91입니다. 상태 0이 오기 전에는 켜졌다고 하지 않습니다. 앞 화면 글자는 그리지 않습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -1314,59 +1359,28 @@ private struct FloorPlan: View {
     }
 }
 
-/// HLS 목록이 200일 때만 그림을 엽니다. 없으면 빈 화면 대신 글만 둡니다.
-private struct HonestPicture: View {
-    @EnvironmentObject private var link: BoardSocket
+/// 목록이 200으로 확인된 주소만 재생합니다.
+private struct LivePicture: View {
     var title: String
-    var stream: String
+    var url: URL
     @State private var player: AVPlayer?
-    @State private var note = "그림 없음"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption.weight(.semibold))
-            ZStack {
-                Color.black
-                if let player {
-                    VideoPlayer(player: player)
-                } else {
-                    Text(note)
-                        .font(.caption)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.secondary)
-                        .padding(8)
-                }
-            }
-            .frame(width: 240, height: 120)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            VideoPlayer(player: player)
+                .frame(width: 520, height: 292)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
-        .task(id: link.state) { await load() }
-    }
-
-    private func load() async {
-        player?.pause()
-        player = nil
-        guard link.state == .online else {
-            note = "오프라인"
-            return
+        .onAppear {
+            let next = AVPlayer(url: url)
+            player = next
+            next.play()
         }
-        #if os(macOS)
-        guard let url = URL(string: "http://127.0.0.1:8888/\(stream)/index.m3u8") else {
-            note = "그림 없음"
-            return
+        .onDisappear {
+            player?.pause()
+            player = nil
         }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 1.5
-        guard let (_, response) = try? await URLSession.shared.data(for: request),
-              let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            note = "그림 없음"
-            return
-        }
-        let next = AVPlayer(url: url)
-        player = next
-        next.play()
-        #else
-        note = "그림 없음. 실시간 그림은 맥의 MediaMTX 입니다."
-        #endif
     }
 }

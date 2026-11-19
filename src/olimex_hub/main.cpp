@@ -34,9 +34,15 @@ struct HubCam {
 };
 
 struct HubJob {
-  int index;
+  char id[20];
+  char name[40];
+  char ble[8];
+  uint8_t addrType;
+  uint8_t kind;
   bool start;
-  bool tally;
+  bool led;
+  uint8_t setting;
+  uint8_t option;
   bool used;
 };
 
@@ -45,6 +51,7 @@ struct LiveCam {
   char name[40];
   char kind[16];
   char ble[8];
+  uint8_t addrType;
   bool used;
 };
 
@@ -129,9 +136,31 @@ static void remember(JsonObject row) {
   copyField(cams[slot].ble, sizeof(cams[slot].ble), row["ble"] | "FEA6");
 }
 
-static void enqueue(int index, bool start, bool tally) {
-  if (index < 0 || jobCount >= 8) return;
-  jobs[jobCount++] = HubJob{index, start, tally, true};
+static const uint8_t kJobRecord = 0;
+static const uint8_t kJobTally = 1;
+static const uint8_t kJobSetting = 2;
+static bool linkHeld = false;
+
+static uint8_t macType(const char* id) {
+  unsigned value = 0;
+  if (id == nullptr || sscanf(id, "%2x", &value) != 1) return BLE_ADDR_PUBLIC;
+  return (value & 0xC0) == 0xC0 ? BLE_ADDR_RANDOM : BLE_ADDR_PUBLIC;
+}
+
+static void enqueueCam(const char* id, const char* name, const char* ble, uint8_t addrType, uint8_t kind, bool start, bool led, uint8_t setting, uint8_t option) {
+  if (jobCount >= 8 || id == nullptr || id[0] == 0) return;
+  HubJob job = {};
+  copyField(job.id, sizeof(job.id), id);
+  copyField(job.name, sizeof(job.name), name == nullptr ? "" : name);
+  copyField(job.ble, sizeof(job.ble), ble == nullptr || ble[0] == 0 ? "FEA6" : ble);
+  job.addrType = addrType;
+  job.kind = kind;
+  job.start = start;
+  job.led = led;
+  job.setting = setting;
+  job.option = option;
+  job.used = true;
+  jobs[jobCount++] = job;
 }
 
 static bool nameMatches(NimBLEAdvertisedDevice& device, const char* name) {
@@ -181,6 +210,7 @@ static bool takeCamera(NimBLEAdvertisedDevice& device, LiveCam* out) {
   copyField(out->kind, sizeof(out->kind), kind);
   std::string addr = device.getAddress().toString();
   copyField(out->id, sizeof(out->id), addr.c_str());
+  out->addrType = device.getAddress().getType();
   if (raw.empty()) snprintf(out->name, sizeof(out->name), "%s %s", kind, addr.c_str());
   else copyField(out->name, sizeof(out->name), raw.c_str());
   out->used = out->name[0] != 0 && out->id[0] != 0;
@@ -190,7 +220,7 @@ static bool takeCamera(NimBLEAdvertisedDevice& device, LiveCam* out) {
 static uint32_t nextScanAt = 0;
 
 static void scanCameras() {
-  if (busy || NimBLEDevice::getScan()->isScanning()) return;
+  if (busy || linkHeld || NimBLEDevice::getScan()->isScanning()) return;
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
   scan->setInterval(100);
@@ -260,38 +290,189 @@ static NimBLEAddress findAddress(const char* name, const char* service) {
   return found;
 }
 
-static bool writeGoPro(NimBLEClient* client, bool start, bool tallyOn, bool doTally, char* note, size_t noteCap) {
-  NimBLERemoteService* service = client->getService(NimBLEUUID((uint16_t)0xFEA6));
-  if (service == nullptr) {
-    snprintf(note, noteCap, "고프로 서비스 FEA6 를 찾지 못했습니다.");
-    return false;
+static volatile bool noteReady = false;
+static uint8_t noteBuf[48];
+static volatile uint8_t noteLen = 0;
+
+static void onBleNotify(NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
+  if (data == nullptr || len == 0 || len > sizeof(noteBuf)) return;
+  memcpy(noteBuf, data, len);
+  noteLen = (uint8_t)len;
+  noteReady = true;
+}
+
+struct BleSession {
+  NimBLEClient* client;
+  char id[20];
+  char ble[8];
+  bool open;
+  uint32_t touched;
+  uint32_t kept;
+};
+
+static BleSession session = {};
+
+static void dropSession() {
+  if (session.client != nullptr) {
+    if (session.client->isConnected()) session.client->disconnect();
+    NimBLEDevice::deleteClient(session.client);
   }
+  session.client = nullptr;
+  session.open = false;
+  session.id[0] = 0;
+  linkHeld = false;
+  NimBLEDevice::getAdvertising()->start();
+}
+
+static bool sessionHeld() {
+  return linkHeld && session.client != nullptr && session.client->isConnected();
+}
+
+static bool waitNote(uint32_t ms) {
+  const uint32_t start = millis();
+  while ((uint32_t)(millis() - start) < ms) {
+    if (noteReady) return true;
+    delay(15);
+  }
+  return noteReady;
+}
+
+static bool goproAccepted() {
+  GoproAssembler rx;
+  goproAssemblerReset(&rx);
+  bool done = false;
+  if (!goproAssemblerPush(&rx, noteBuf, noteLen, &done) || !done) return false;
+  if (rx.payloadLen >= 3 && rx.payload[0] == 0x02) return rx.payload[2] == 0;
+  if (rx.payloadLen >= 2) return rx.payload[1] == 0;
+  return false;
+}
+
+static bool osmoAccepted(uint8_t cmd) {
+  if (noteLen < 15 || noteBuf[0] != 0xAA) return false;
+  if ((noteBuf[3] & 0x20) == 0) return false;
+  if (noteBuf[12] != 0x1D || noteBuf[13] != cmd) return false;
+  return noteBuf[14] == 0;
+}
+
+static bool subscribeOne(NimBLERemoteService* service, const NimBLEUUID& uuid) {
+  NimBLERemoteCharacteristic* notify = service->getCharacteristic(uuid);
+  if (notify == nullptr || !notify->canNotify()) return false;
+  return notify->subscribe(true, onBleNotify, true);
+}
+
+static bool looksLikeMac(const char* id) {
+  int colons = 0;
+  if (id == nullptr) return false;
+  for (const char* p = id; *p; ++p) {
+    if (*p == ':') colons++;
+  }
+  return colons == 5;
+}
+
+static bool openSession(const HubJob& job) {
+  if (sessionHeld() && strcmp(session.id, job.id) == 0) {
+    session.touched = millis();
+    return true;
+  }
+  dropSession();
+  NimBLEDevice::getAdvertising()->stop();
+  const bool osmo = strcmp(job.ble, "FFF0") == 0;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    NimBLEAddress address(std::string(job.id), job.addrType);
+    if (!looksLikeMac(job.id)) {
+      address = findAddress(job.name, osmo ? "FFF0" : "FEA6");
+    }
+    NimBLEClient* client = NimBLEDevice::createClient();
+    if (client == nullptr) continue;
+    client->setConnectTimeout(8);
+    if (!client->connect(address)) {
+      NimBLEDevice::deleteClient(client);
+      delay(250);
+      continue;
+    }
+    client->updateConnParams(12, 24, 0, 200);
+    NimBLERemoteService* service = client->getService(osmo ? NimBLEUUID((uint16_t)0xFFF0) : NimBLEUUID((uint16_t)0xFEA6));
+    if (service == nullptr) {
+      client->disconnect();
+      NimBLEDevice::deleteClient(client);
+      delay(250);
+      continue;
+    }
+    bool listening = false;
+    if (osmo) {
+      listening = subscribeOne(service, NimBLEUUID((uint16_t)0xFFF4));
+    } else {
+      const bool command = subscribeOne(service, NimBLEUUID("b5f90073-aa8d-11e3-9046-0002a5d5c51b"));
+      const bool setting = subscribeOne(service, NimBLEUUID("b5f90075-aa8d-11e3-9046-0002a5d5c51b"));
+      listening = command && setting;
+    }
+    if (!listening) {
+      client->disconnect();
+      NimBLEDevice::deleteClient(client);
+      delay(250);
+      continue;
+    }
+    session.client = client;
+    copyField(session.id, sizeof(session.id), job.id);
+    copyField(session.ble, sizeof(session.ble), job.ble);
+    session.open = true;
+    session.touched = millis();
+    session.kept = millis();
+    linkHeld = true;
+    return true;
+  }
+  NimBLEDevice::getAdvertising()->start();
+  return false;
+}
+
+static bool writeGoPro(const uint8_t* body, uint8_t bodyLen, bool setting) {
+  if (!sessionHeld()) return false;
   GoproBytes frame;
-  bool wrote = false;
-  if (!doTally || start) {
-    if (!goproShutterFrame(start, &frame)) return false;
-    NimBLERemoteCharacteristic* command = service->getCharacteristic(
-        NimBLEUUID("b5f90072-aa8d-11e3-9046-0002a5d5c51b"));
-    if (command == nullptr || !command->writeValue(frame.data, frame.length, false)) {
-      snprintf(note, noteCap, "고프로 셔터를 쓰지 못했습니다. 성공으로 두지 않습니다.");
-      return false;
-    }
-    wrote = true;
+  if (!goproFrameExt13(body, bodyLen, &frame)) return false;
+  NimBLERemoteService* service = session.client->getService(NimBLEUUID((uint16_t)0xFEA6));
+  if (service == nullptr) return false;
+  const char* uuid = setting ? "b5f90074-aa8d-11e3-9046-0002a5d5c51b" : "b5f90072-aa8d-11e3-9046-0002a5d5c51b";
+  NimBLERemoteCharacteristic* write = service->getCharacteristic(NimBLEUUID(uuid));
+  if (write == nullptr) return false;
+  noteReady = false;
+  noteLen = 0;
+  if (!write->writeValue(frame.data, frame.length, true)) return false;
+  if (!waitNote(1200)) return false;
+  return goproAccepted();
+}
+
+static bool writeOsmo(uint8_t cmd, const uint8_t* payload, size_t payloadLen) {
+  if (!sessionHeld()) return false;
+  NimBLERemoteService* service = session.client->getService(NimBLEUUID((uint16_t)0xFFF0));
+  if (service == nullptr) return false;
+  NimBLERemoteCharacteristic* write = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF5));
+  if (write == nullptr) return false;
+  uint8_t frame[48];
+  size_t len = djiBuild(frame, sizeof(frame), 0x1D, cmd, 0x01, djiSeq++, payload, payloadLen);
+  if (len == 0) return false;
+  noteReady = false;
+  noteLen = 0;
+  if (!write->writeValue(frame, len, true)) return false;
+  if (!waitNote(1200)) return false;
+  return osmoAccepted(cmd);
+}
+
+static void keepSession() {
+  if (!sessionHeld() || busy || jobCount > 0) return;
+  if ((uint32_t)(millis() - session.touched) > 60000) {
+    dropSession();
+    nextScanAt = millis();
+    return;
   }
-  if (doTally) {
-    if (!goproSettingFrame(91, tallyOn ? 4 : 0, &frame)) return false;
-    NimBLERemoteCharacteristic* setting = service->getCharacteristic(
-        NimBLEUUID("b5f90074-aa8d-11e3-9046-0002a5d5c51b"));
-    if (setting == nullptr || !setting->writeValue(frame.data, frame.length, false)) {
-      snprintf(note, noteCap, "고프로 LED 설정을 쓰지 못했습니다. 앞 화면 글자는 보내지 않았습니다.");
-      return false;
-    }
-    wrote = true;
+  if (strcmp(session.ble, "FEA6") != 0) return;
+  if ((uint32_t)(millis() - session.kept) < 2500) return;
+  const uint8_t body[1] = {0x5B};
+  if (!writeGoPro(body, 1, false)) {
+    dropSession();
+    nextScanAt = millis();
+    return;
   }
-  if (wrote) {
-    snprintf(note, noteCap, "고프로에 셔터 또는 LED 설정을 썼습니다. 카메라가 상태 0으로 답했는지는 확인하지 못했습니다. 앞 화면 글자는 보내지 않았습니다.");
-  }
-  return wrote;
+  session.kept = millis();
 }
 
 static uint32_t osmoDeviceId(const char* name) {
@@ -303,67 +484,100 @@ static uint32_t osmoDeviceId(const char* name) {
   return 0xFF440000;
 }
 
-static bool writeOsmo(NimBLEClient* client, const char* name, bool start, char* note, size_t noteCap) {
-  NimBLERemoteService* service = client->getService(NimBLEUUID((uint16_t)0xFFF0));
-  if (service == nullptr) {
-    snprintf(note, noteCap, "오즈모 서비스 FFF0 를 찾지 못했습니다.");
+static bool osmoPayload(const HubJob& job, uint8_t cmd, uint8_t* payload, size_t* len) {
+  const uint32_t device = osmoDeviceId(job.name);
+  payload[0] = (uint8_t)device;
+  payload[1] = (uint8_t)(device >> 8);
+  payload[2] = (uint8_t)(device >> 16);
+  payload[3] = (uint8_t)(device >> 24);
+  if (cmd == 0x03) {
+    payload[4] = job.start ? 0x00 : 0x01;
+    payload[5] = 0;
+    payload[6] = 0;
+    payload[7] = 0;
+    payload[8] = 0;
+    *len = 9;
+    return true;
+  }
+  payload[4] = job.option;
+  payload[5] = 0x01;
+  payload[6] = 0x47;
+  payload[7] = 0x39;
+  payload[8] = 0x36;
+  *len = 9;
+  return true;
+}
+
+static bool runOnce(const HubJob& job, char* note, size_t noteCap) {
+  if (strcmp(job.ble, "CE80") == 0) {
+    snprintf(note, noteCap, "인스타360 은 목록만 둡니다. 확인된 셔터 명령이 없어 보내지 않았습니다.");
     return false;
   }
-  NimBLERemoteCharacteristic* write = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF5));
-  if (write == nullptr) {
-    snprintf(note, noteCap, "오즈모 쓰기 특성 FFF5 를 찾지 못했습니다.");
+  const bool osmo = strcmp(job.ble, "FFF0") == 0;
+  if (osmo && job.kind == kJobTally) {
+    snprintf(note, noteCap, "액션 5 앞 화면 탈리는 블루투스 명령에 없습니다. 녹화 테두리는 녹화가 시작될 때만 카메라가 켭니다.");
     return false;
   }
-  uint32_t device = osmoDeviceId(name);
-  uint8_t payload[9] = {
-      (uint8_t)device, (uint8_t)(device >> 8), (uint8_t)(device >> 16), (uint8_t)(device >> 24),
-      (uint8_t)(start ? 0x00 : 0x01), 0, 0, 0, 0};
-  uint8_t frame[40];
-  size_t len = djiBuild(frame, sizeof(frame), 0x1D, 0x03, 0x01, djiSeq++, payload, sizeof(payload));
-  if (len == 0 || !write->writeValue(frame, len, false)) {
-    snprintf(note, noteCap, "오즈모 녹화 프레임을 쓰지 못했습니다. 성공으로 두지 않습니다.");
+  if (!openSession(job)) {
+    snprintf(note, noteCap, "%s 에 세 번 붙지 못했습니다. 명령을 보내지 않았습니다.", job.name);
     return false;
   }
-  snprintf(note, noteCap, "오즈모 녹화 프레임을 썼습니다. 카메라 응답은 확인하지 못했습니다.");
+  if (!osmo && job.kind == kJobRecord) {
+    const uint8_t body[3] = {0x01, 0x01, (uint8_t)(job.start ? 0x01 : 0x00)};
+    if (!writeGoPro(body, 3, false)) {
+      snprintf(note, noteCap, "%s 고프로가 셔터에 상태 0으로 답하지 않았습니다.", job.name);
+      return false;
+    }
+    if (job.led) {
+      const uint8_t led[3] = {91, 0x01, (uint8_t)(job.start ? 4 : 0)};
+      if (!writeGoPro(led, 3, true)) {
+        snprintf(note, noteCap, "%s 셔터는 상태 0입니다. LED 91은 상태 0이 아닙니다. 앞 화면 글자는 그리지 않습니다.", job.name);
+        return true;
+      }
+    }
+    snprintf(note, noteCap, "%s 고프로가 상태 0으로 받았습니다. 앞 화면 글자는 그리지 않습니다.", job.name);
+    return true;
+  }
+  if (!osmo && job.kind == kJobTally) {
+    const uint8_t led[3] = {91, 0x01, (uint8_t)(job.start ? 4 : 0)};
+    if (!writeGoPro(led, 3, true)) {
+      snprintf(note, noteCap, "%s 고프로 LED 91이 상태 0으로 답하지 않았습니다. 앞 화면 글자는 그리지 않습니다.", job.name);
+      return false;
+    }
+    snprintf(note, noteCap, "%s 고프로 LED를 %s. 상태 0입니다. 앞 화면 글자는 그리지 않습니다.", job.name, job.start ? "켰습니다" : "껐습니다");
+    return true;
+  }
+  if (!osmo && job.kind == kJobSetting) {
+    const uint8_t body[3] = {job.setting, 0x01, job.option};
+    if (!writeGoPro(body, 3, true)) {
+      snprintf(note, noteCap, "%s 고프로 설정 %u 가 상태 0으로 답하지 않았습니다.", job.name, job.setting);
+      return false;
+    }
+    snprintf(note, noteCap, "%s 고프로 설정 %u 값 %u 을 상태 0으로 받았습니다.", job.name, job.setting, job.option);
+    return true;
+  }
+  uint8_t payload[9];
+  size_t len = 0;
+  const uint8_t cmd = job.kind == kJobSetting ? 0x04 : 0x03;
+  osmoPayload(job, cmd, payload, &len);
+  if (!writeOsmo(cmd, payload, len)) {
+    snprintf(note, noteCap, "%s 액션 5가 상태 0으로 답하지 않았습니다.", job.name);
+    return false;
+  }
+  snprintf(note, noteCap, "%s 액션 5가 상태 0으로 받았습니다. 앞 화면 글자는 그리지 않습니다.", job.name);
   return true;
 }
 
 static void runJob(const HubJob& job) {
-  const HubCam& cam = cams[job.index];
   char note[180] = "명령을 끝내지 못했습니다.";
-  const char* service = "FEA6";
-  if (strcmp(cam.ble, "FFF0") == 0) service = "FFF0";
-  if (strcmp(cam.ble, "CE80") == 0) service = "CE80";
-  if (strcmp(cam.ble, "CE80") == 0) {
-    tallyNote("인스타360 은 목록만 둡니다. 확인된 셔터 명령이 없어 보내지 않았습니다.");
-    return;
-  }
-  NimBLEAddress address = findAddress(cam.name, service);
-  if (address.toString().empty() || address.toString() == "00:00:00:00:00:00") {
-    snprintf(note, sizeof(note), "%s 블루투스를 찾지 못했습니다. 명령을 보내지 않았습니다.", cam.name);
-    tallyNote(note);
-    return;
-  }
-  NimBLEClient* client = NimBLEDevice::createClient();
-  if (client == nullptr || !client->connect(address)) {
-    snprintf(note, sizeof(note), "%s 에 붙지 못했습니다.", cam.name);
-    tallyNote(note);
-    if (client != nullptr) NimBLEDevice::deleteClient(client);
-    return;
-  }
   bool ok = false;
-  if (strcmp(cam.ble, "FFF0") == 0) {
-    ok = writeOsmo(client, cam.name, job.start, note, sizeof(note));
-  } else {
-    ok = writeGoPro(client, job.start, job.start || job.tally, job.tally || job.start, note, sizeof(note));
+  for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+    if (attempt > 0) dropSession();
+    ok = runOnce(job, note, sizeof(note));
+    if (strcmp(job.ble, "CE80") == 0 || (strcmp(job.ble, "FFF0") == 0 && job.kind == kJobTally)) break;
   }
-  client->disconnect();
-  NimBLEDevice::deleteClient(client);
-  if (!ok && note[0] == 0) {
-    snprintf(note, sizeof(note), "%s 명령을 끝내지 못했습니다.", cam.name);
-  }
+  if (ok) session.touched = millis();
   tallyNote(note);
-  (void)ok;
 }
 
 static void pump() {
@@ -377,39 +591,61 @@ static void pump() {
   publish();
 }
 
+static void enqueueKnown(const char* id, const char* name, const char* ble, uint8_t kind, bool start, bool led, uint8_t setting, uint8_t option) {
+  if (id == nullptr || id[0] == 0) return;
+  uint8_t addrType = macType(id);
+  const char* useName = name;
+  const char* useBle = ble;
+  for (const LiveCam& cam : liveCams) {
+    if (!cam.used || strcmp(cam.id, id) != 0) continue;
+    addrType = cam.addrType;
+    if (useName == nullptr || useName[0] == 0) useName = cam.name;
+    if (useBle == nullptr || useBle[0] == 0) useBle = cam.ble;
+    break;
+  }
+  enqueueCam(id, useName, useBle, addrType, kind, start, led, setting, option);
+}
+
 static void handleText(const char* text) {
   JsonDocument doc;
   if (deserializeJson(doc, text)) return;
   const char* op = doc["op"] | "";
   if (strcmp(op, "record") == 0 || strcmp(op, "record-one") == 0) {
     bool start = doc["start"] | false;
-    bool tally = doc["tally"] | start;
-    JsonArray ids = doc["ids"].as<JsonArray>();
+    bool led = doc["tally"] | start;
     if (strcmp(op, "record-one") == 0) {
-      remember(doc.as<JsonObject>());
-      int index = findCam(doc["id"] | "");
-      enqueue(index, start, tally);
-    } else if (!ids.isNull()) {
-      for (JsonVariant id : ids) {
-        int index = findCam(id.as<const char*>());
-        enqueue(index, start, tally);
-      }
-    } else {
-      for (int i = 0; i < 8; i++) {
-        if (cams[i].used) enqueue(i, start, tally);
-      }
+      enqueueKnown(doc["id"] | "", doc["name"] | "", doc["ble"] | "", kJobRecord, start, led, 0, 0);
+      return;
     }
+    JsonArray ids = doc["ids"].as<JsonArray>();
+    if (ids.isNull() || ids.size() == 0) {
+      for (const LiveCam& cam : liveCams) {
+        if (!cam.used) continue;
+        enqueueCam(cam.id, cam.name, cam.ble, cam.addrType, kJobRecord, start, led, 0, 0);
+      }
+      return;
+    }
+    for (JsonVariant id : ids) enqueueKnown(id.as<const char*>(), "", "", kJobRecord, start, led, 0, 0);
     return;
   }
   if (strcmp(op, "tally") == 0) {
-    remember(doc.as<JsonObject>());
-    enqueue(findCam(doc["id"] | ""), doc["on"] | false, true);
+    enqueueKnown(doc["id"] | "", doc["name"] | "", doc["ble"] | "", kJobTally, doc["on"] | false, true, 0, 0);
     return;
   }
   if (strcmp(op, "camera") == 0) {
-    remember(doc.as<JsonObject>());
-    tallyNote("이 허브는 화각과 해상도 설정을 카메라에 쓰지 않습니다. 화면의 화각은 프리셋입니다.");
-    publish();
+    const char* ble = doc["ble"] | "";
+    const char* rawSetting = doc["setting"] | "";
+    const int option = atoi(doc["value"] | "0");
+    if (strcmp(ble, "FFF0") == 0) {
+      enqueueKnown(doc["id"] | "", doc["name"] | "", ble, kJobSetting, false, false, 0, (uint8_t)option);
+      return;
+    }
+    const int setting = atoi(rawSetting);
+    if (setting <= 0 || option < 0) {
+      tallyNote("고프로 설정 번호가 없습니다. 보내지 않았습니다.");
+      return;
+    }
+    enqueueKnown(doc["id"] | "", doc["name"] | "", ble, kJobSetting, false, false, (uint8_t)setting, (uint8_t)option);
   }
 }
 
@@ -708,7 +944,8 @@ void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
   pump();
-  if (!busy && (int32_t)(millis() - nextScanAt) >= 0) scanCameras();
+  if (!busy) keepSession();
+  if (!busy && !linkHeld && (int32_t)(millis() - nextScanAt) >= 0) scanCameras();
   socket.cleanupClients();
   delay(20);
 }
