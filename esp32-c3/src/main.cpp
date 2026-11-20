@@ -513,6 +513,17 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       reply(num, true, "로닌 블루투스를 끊었습니다.");
       return;
     }
+    if (strcmp(action, "zoom") == 0 || strcmp(action, "zoomIn") == 0 ||
+        strcmp(action, "zoomOut") == 0 || strcmp(action, "zoomStop") == 0) {
+      int speed = doc["speed"] | 0;
+      if (strcmp(action, "zoomIn") == 0 && speed == 0) speed = 800;
+      if (strcmp(action, "zoomOut") == 0 && speed == 0) speed = -800;
+      if (strcmp(action, "zoomStop") == 0) speed = 0;
+      char reason[200];
+      bool ok = roninBleZoom((int16_t)speed, reason, sizeof(reason));
+      reply(num, ok, reason);
+      return;
+    }
     bool home = doc["home"] | false;
     float yaw = doc["yaw"] | 0.0f;
     float pitch = doc["pitch"] | 0.0f;

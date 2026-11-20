@@ -97,6 +97,17 @@ inline size_t djiGetAttitude(uint8_t* out, size_t cap, uint16_t seq) {
   return djiBuild(out, cap, 0x0E, 0x02, 0x03, seq, payload, sizeof(payload));
 }
 
+// RS2 앞 다이얼(줌/포커스 모터). +speed=줌 인, -speed=줌 아웃, 0=멈춤. 범위 ±2048.
+inline size_t djiDial(uint8_t* out, size_t cap, uint16_t seq, int16_t speed) {
+  if (speed < -2048) speed = -2048;
+  if (speed > 2048) speed = 2048;
+  uint8_t payload[3];
+  payload[0] = 0x02;
+  payload[1] = (uint8_t)(speed & 0xFF);
+  payload[2] = (uint8_t)(speed >> 8);
+  return djiBuild(out, cap, 0x0E, 0x0A, 0x03, seq, payload, sizeof(payload));
+}
+
 // 액션캠·로닌 BLE 공통 연결 요청(0x00/0x19). verifyMode 0=저장 페어 시도.
 inline size_t djiAuthConnect(uint8_t* out, size_t cap, uint16_t seq, uint32_t senderId, const uint8_t mac[6],
                              uint8_t verifyMode, uint16_t verify) {

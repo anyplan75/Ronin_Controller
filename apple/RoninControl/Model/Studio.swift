@@ -901,6 +901,32 @@ final class Studio: ObservableObject {
         return roninC3
     }
 
+    /// RS2 줌(다이얼). speed +줌인 / -줌아웃 / 0멈춤. SC 보드는 자리만(거부 안내).
+    func zoomRonin(speed: Int, boardId: UUID? = nil, quiet: Bool = false) async {
+        guard let board = roninBoard(boardId) else {
+            noteOffline("줌은 로닌용 OLED C3(RS2) 가 블루투스로 보냅니다. 보드 자리를 먼저 맞추세요.")
+            return
+        }
+        if board.boardSlot == .rmsid {
+            if !quiet {
+                note("SC 줌은 아직 없습니다. 자리만 두었고, 지금은 RS2 줌만 씁니다.")
+            }
+            return
+        }
+        guard board.link.shoots else {
+            noteOffline("\(board.listTitle) 은 USB 점검입니다. 줌을 보내지 않았습니다.")
+            return
+        }
+        if !(await c3Socket.ensureOnline(board)) {
+            if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
+            return
+        }
+        let payload: [String: Any] = ["op": "ronin", "action": "zoom", "speed": speed]
+        let result = await c3Socket.command(payload, timeout: quiet ? 1.5 : 4)
+        if quiet && result.ack { return }
+        note(result.sent ? result.reason : "\(board.listTitle) 에 줌을 보내지 않았습니다. \(result.reason)")
+    }
+
     /// 화면의 팬·틸트입니다. 오프라인이면 붙인 뒤 바로 명령을 보냅니다. 「지금 연결」을 다시 누르지 않습니다.
     func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false, home: Bool = false, boardId: UUID? = nil) async {
         guard let board = roninBoard(boardId) else {

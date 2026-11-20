@@ -656,3 +656,72 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
            (unsigned)lastAaRet, (unsigned)lastDumlSeen);
   return false;
 }
+
+bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+#if defined(BOARD_SLOT_RMSID)
+  (void)speed;
+  snprintf(reason, reasonCap,
+           "SC 줌은 아직 없습니다. UI·프로토콜 자리만 두었고, 지금은 RS2 줌만 씁니다.");
+  return false;
+#else
+  if (!roninBleLinked()) {
+    snprintf(reason, reasonCap, "붙은 로닌이 없습니다. 앱에서 이름을 골라 붙이세요.");
+    return false;
+  }
+  // 이름에 SC 만 있으면 RS2 줌 경로를 쓰지 않습니다.
+  {
+    char lower[40];
+    lowerCopy(lower, sizeof(lower), linkedName);
+    if (nameMatchesSc(lower) && !nameMatchesRs2(lower)) {
+      snprintf(reason, reasonCap,
+               "SC 줌은 아직 없습니다. UI·프로토콜 자리만 두었고, 지금은 RS2 줌만 씁니다.");
+      return false;
+    }
+  }
+
+  if (speed < -2048) speed = -2048;
+  if (speed > 2048) speed = 2048;
+
+  uint8_t frame[48];
+  size_t len = djiDial(frame, sizeof(frame), seq++, speed);
+  if (len == 0) {
+    snprintf(reason, reasonCap, "줌 프레임을 만들지 못했습니다.");
+    return false;
+  }
+
+  char txHex[40] = {};
+  hexShort(txHex, sizeof(txHex), frame, len);
+  clearRx();
+  if (!bleWrite(frame, len)) {
+    snprintf(reason, reasonCap, "로닌 줌 쓰기 실패(특성 %s).", writeUuid[0] ? writeUuid : "?");
+    return false;
+  }
+
+  if (speed == 0) {
+    snprintf(reason, reasonCap, "로닌 %s 줌 멈춤.", linkedName);
+    return true;
+  }
+
+  // dial(0x0E/0x0A) 응답이 오면 성공. 없으면 write-only 가짜 성공으로 치지 않습니다.
+  if (waitAaReply(0x0E, 0x0A, 900) && lastAaRet == 0) {
+    snprintf(reason, reasonCap,
+             "로닌 %s 줌 %s(속도 %d) · AA dial ret0 · 특성 %s. 렌즈/모터가 도는지 봐 주세요.",
+             linkedName, speed > 0 ? "인" : "아웃", (int)speed, writeUuid[0] ? writeUuid : "?");
+    return true;
+  }
+  if (waitAnyNotify(200) && lastDumlSeen) {
+    snprintf(reason, reasonCap,
+             "로닌 %s 줌 %s write+notify(속도 %d, aaRet=%u). 렌즈가 도는지 봐 주세요.",
+             linkedName, speed > 0 ? "인" : "아웃", (int)speed, (unsigned)lastAaRet);
+    return true;
+  }
+
+  snprintf(reason, reasonCap,
+           "로닌 %s 줌 %s write 는 됐지만 응답 없음(속도 %d tx %s aaRet=%u). 렌즈가 도는지 확인해 주세요.",
+           linkedName, speed > 0 ? "인" : "아웃", (int)speed, txHex[0] ? txHex : "-",
+           (unsigned)lastAaRet);
+  return false;
+#endif
+}

@@ -47,6 +47,8 @@ struct StudioControlScreen: View {
     @State private var venueRenameDraft = ""
     @State private var lightSendTask: [String: Task<Void, Never>] = [:]
     @State private var didLaunchBoards = false
+    @State private var zoomHolding = false
+    @State private var zoomSentAt = Date.distantPast
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -600,6 +602,31 @@ struct StudioControlScreen: View {
                 Slider(value: Binding(get: { pitch }, set: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -56...90, step: 1)
                 Text("속도 \(Int(stickSpeed * 100))%")
                 Slider(value: $stickSpeed, in: 0.15...1)
+                if board.boardSlot == .oled {
+                    Text("RS2 줌(앞 다이얼). 누르는 동안 돌고, 손을 떼면 멈춥니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("줌 아웃") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .simultaneousGesture(holdZoom(speed: -800, boardId: board.id))
+                        Button("줌 인") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .simultaneousGesture(holdZoom(speed: 800, boardId: board.id))
+                    }
+                } else if board.boardSlot == .rmsid {
+                    Text("SC 줌은 아직 없습니다. UI·프로토콜 자리만 두었고, 나중에 켭니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("줌 아웃 (나중에)") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .disabled(true)
+                        Button("줌 인 (나중에)") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .disabled(true)
+                    }
+                }
                 Button("기본 시선 고정") {
                     studio.setHomeAim(board.id, yaw: wrapDegrees(spot.homeYaw + yaw), pitch: spot.homePitch + pitch)
                     yaw = 0
@@ -954,6 +981,25 @@ struct StudioControlScreen: View {
             pitch = min(90, max(-56, pitch + tilt * 4))
         }
         queueRonin(yaw: yaw, pitch: pitch)
+    }
+
+    private func holdZoom(speed: Int, boardId: UUID) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                let now = Date()
+                if !zoomHolding {
+                    zoomHolding = true
+                    zoomSentAt = now
+                    Task { await studio.zoomRonin(speed: speed, boardId: boardId, quiet: true) }
+                } else if now.timeIntervalSince(zoomSentAt) >= 0.45 {
+                    zoomSentAt = now
+                    Task { await studio.zoomRonin(speed: speed, boardId: boardId, quiet: true) }
+                }
+            }
+            .onEnded { _ in
+                zoomHolding = false
+                Task { await studio.zoomRonin(speed: 0, boardId: boardId, quiet: true) }
+            }
     }
 
     private func queueRonin(yaw: Double, pitch: Double, home: Bool = false) {

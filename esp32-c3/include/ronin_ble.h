@@ -25,4 +25,6 @@ size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy = true);
 bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonCap);
 bool roninBleAutoPair(char* reason, size_t reasonCap);
 bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t reasonCap);
+/// RS2 줌(다이얼). speed +줌인 / -줌아웃 / 0멈춤. SC는 자리만(지금은 거부).
+bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap);
 void roninBleFillList(JsonDocument& doc);
