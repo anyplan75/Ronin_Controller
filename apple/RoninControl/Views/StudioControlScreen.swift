@@ -39,6 +39,10 @@ struct StudioControlScreen: View {
     @State private var absolutePending: (PtzRecord, Double, Double, Double)?
     @State private var roninTask: Task<Void, Never>?
     @State private var roninPending: (Double, Double)?
+    @State private var askVenueSave = false
+    @State private var venueNameDraft = ""
+    @State private var askVenueRename: UUID?
+    @State private var venueRenameDraft = ""
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -139,6 +143,47 @@ struct StudioControlScreen: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Menu {
+                    Text("지금 · \(studio.venues.currentName)")
+                    Button("지금 장소 다시 저장") { studio.saveCurrentVenue() }
+                    Button("새 이름으로 저장…") {
+                        venueNameDraft = studio.venues.currentName == "이름 없는 장소" ? "" : studio.venues.currentName
+                        askVenueSave = true
+                    }
+                    if !studio.venues.places.isEmpty {
+                        Divider()
+                        ForEach(studio.venues.places) { place in
+                            Button {
+                                studio.loadVenue(place.id)
+                            } label: {
+                                HStack {
+                                    Text(place.name)
+                                    if studio.venues.currentId == place.id {
+                                        Text("✓")
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        ForEach(studio.venues.places) { place in
+                            Button("이름 바꾸기 · \(place.name)") {
+                                askVenueRename = place.id
+                                venueRenameDraft = place.name
+                            }
+                            Button("삭제 · \(place.name)", role: .destructive) {
+                                studio.deleteVenue(place.id)
+                            }
+                        }
+                    }
+                } label: {
+                    Text("장소 · \(studio.venues.currentName)")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
+                }
+                Menu {
                     Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
                     Button("C3") { askC3Job = true }
                     Button("PTZ 카메라") { showPtz = true }
@@ -158,6 +203,24 @@ struct StudioControlScreen: View {
         .padding(12)
         .background(panel)
         .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
+        .alert("장소 이름", isPresented: $askVenueSave) {
+            TextField("예: 본당, FOH", text: $venueNameDraft)
+            Button("저장") { studio.saveVenue(named: venueNameDraft) }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("보드·무대·PTZ·카메라·로닌 설정을 이 이름으로 저장합니다.")
+        }
+        .alert("장소 이름 바꾸기", isPresented: Binding(
+            get: { askVenueRename != nil },
+            set: { if !$0 { askVenueRename = nil } }
+        )) {
+            TextField("새 이름", text: $venueRenameDraft)
+            Button("바꾸기") {
+                if let id = askVenueRename { studio.renameVenue(id, venueRenameDraft) }
+                askVenueRename = nil
+            }
+            Button("취소", role: .cancel) { askVenueRename = nil }
+        }
     }
 
     private var recordCount: String {

@@ -935,6 +935,34 @@ struct StudioProfile: Codable, Equatable, Sendable {
     }
 }
 
+/// 이름 붙인 현장 설정입니다. 보드·무대·PTZ·카메라·로닌 묶음을 통째로 담습니다.
+struct VenuePlace: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var updatedAt: Date
+    var profile: StudioProfile
+}
+
+/// 장소에 붙인 설정 목록입니다. 지금 쓰는 프로필과 따로 저장합니다.
+struct VenueBook: Codable, Equatable, Sendable {
+    static let storageKey = "[로닌컨트롤]_venues"
+
+    var places: [VenuePlace]
+    var currentId: UUID?
+
+    static func empty() -> VenueBook {
+        VenueBook(places: [], currentId: nil)
+    }
+
+    var currentName: String {
+        guard let currentId,
+              let place = places.first(where: { $0.id == currentId }) else {
+            return "이름 없는 장소"
+        }
+        return place.name
+    }
+}
+
 enum RoninCatalog {
     static let shots = [
         "front", "wide", "tight", "verse", "chorus", "hero", "high", "hands",
