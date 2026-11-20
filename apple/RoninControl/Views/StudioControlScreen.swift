@@ -395,7 +395,7 @@ struct StudioControlScreen: View {
             Text("공유기에서 고정 주소를 예약할 때 이 MAC을 적습니다. 와이파이는 와이파이 MAC, 랜 케이블은 이더넷 MAC 입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("액션 카메라는 이 기판 블루투스입니다. 로닌 짐벌은 로닌 제어 C3 가 맡습니다. 웹소켓이 열리기 전에는 온라인으로 두지 않습니다.")
+            Text("액션 카메라는 이 기판 블루투스입니다. 로닌 짐벌은 로닌 제어 C3 블루투스가 맡습니다. 웹소켓이 열리기 전에는 온라인으로 두지 않습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -452,6 +452,37 @@ struct StudioControlScreen: View {
             .disabled(c3Link.state == .connecting || !board.link.shoots)
             if board.duty == .ronin {
                 let spot = studio.stageSpot(for: board.id)
+                Text("로닌은 C3 블루투스로 붙입니다. CAN 배선이 아닙니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(board.gimbalName.isEmpty
+                     ? (c3Link.pairedName.isEmpty ? "아직 붙인 로닌 이름이 없습니다." : "붙음 \(c3Link.pairedName)")
+                     : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
+                    .font(.caption.weight(.semibold))
+                Button("로닌 블루투스 스캔") {
+                    Task { await studio.scanRoninGimbals() }
+                }
+                .buttonStyle(DeskButtonStyle(expand: true))
+                .disabled(c3Link.boardId != board.id || c3Link.state != .online)
+                if c3Link.gimbals.isEmpty {
+                    Text("스캔하면 주변 로닌 이름이 여기에 나옵니다. 짐벌에서 블루투스를 켠 뒤 누르세요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(c3Link.gimbals) { gimbal in
+                        Button("붙이기 · \(gimbal.name)") {
+                            Task { await studio.pairRoninGimbal(name: gimbal.name, id: gimbal.id) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3Link.pairedName == gimbal.name, expand: true))
+                    }
+                }
+                if !board.gimbalName.isEmpty {
+                    Button("저장 이름으로 다시 붙이기") {
+                        Task { await studio.pairRoninGimbal(name: board.gimbalName) }
+                    }
+                    .buttonStyle(DeskButtonStyle(expand: true))
+                    .disabled(c3Link.boardId != board.id || c3Link.state != .online)
+                }
                 Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 그 방향의 한계로 가고, 제자리는 기본 시선으로 돌아옵니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -463,7 +494,7 @@ struct StudioControlScreen: View {
                     home: {
                         yaw = 0
                         pitch = 0
-                        queueRonin(yaw: 0, pitch: 0)
+                        queueRonin(yaw: 0, pitch: 0, home: true)
                     },
                     panEnd: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
                     tiltEnd: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
@@ -760,13 +791,14 @@ struct StudioControlScreen: View {
         queueRonin(yaw: yaw, pitch: pitch)
     }
 
-    private func queueRonin(yaw: Double, pitch: Double) {
+    private func queueRonin(yaw: Double, pitch: Double, home: Bool = false) {
         roninPending = (yaw, pitch)
+        let sendHome = home
         guard roninTask == nil else { return }
         roninTask = Task {
             while let next = roninPending {
                 roninPending = nil
-                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true)
+                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true, home: sendHome && next.0 == 0 && next.1 == 0)
                 try? await Task.sleep(nanoseconds: 220_000_000)
             }
             roninTask = nil

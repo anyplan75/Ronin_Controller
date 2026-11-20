@@ -736,10 +736,10 @@ final class Studio: ObservableObject {
         await refresh()
     }
 
-    /// 화면의 팬·틸트입니다. 로닌 제어 C3 만 맡고, 그 연결이 없으면 보내지 않습니다.
-    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false) async {
+    /// 화면의 팬·틸트입니다. 로닌 제어 C3 가 블루투스로 짐벌에 보냅니다. CAN 이 아닙니다.
+    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false, home: Bool = false) async {
         guard let board = roninC3 else {
-            noteOffline("짐벌은 로닌 제어로 고른 C3 가 움직입니다. 그 C3 를 먼저 등록하세요.")
+            noteOffline("짐벌은 로닌 제어로 고른 C3 가 블루투스로 움직입니다. 그 C3 를 먼저 등록하세요.")
             return
         }
         guard board.link.shoots else {
@@ -751,12 +751,63 @@ final class Studio: ObservableObject {
             if !quiet { note("\(board.name) 에 붙는 중입니다. 붙기 전에는 팬과 틸트를 보내지 않습니다.") }
             return
         }
-        let result = await c3Socket.command(["op": "ronin", "yaw": yaw, "pitch": pitch])
+        var payload: [String: Any] = ["op": "ronin", "yaw": yaw, "pitch": pitch]
+        if home { payload["home"] = true }
+        let result = await c3Socket.command(payload, timeout: home ? 6 : 3)
+        if result.ack, !c3Socket.pairedName.isEmpty {
+            rememberGimbalName(board.id, c3Socket.pairedName)
+        }
         if quiet && result.ack { return }
         if result.ack {
-            note("\(board.name) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 받았다고 답했습니다.")
+            if home {
+                note("\(board.name) 이 로닌 제자리를 블루투스로 보냈다고 답했습니다.")
+            } else {
+                note("\(board.name) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
+            }
         } else if !quiet {
             note(result.sent ? result.reason : "\(board.name) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
+        }
+    }
+
+    /// C3 가 주변 로닌 블루투스 이름을 읽습니다.
+    func scanRoninGimbals() async {
+        guard let board = roninC3 else {
+            noteOffline("로닌 제어 C3 를 먼저 등록하세요.")
+            return
+        }
+        if c3Socket.boardId != board.id || c3Socket.state != .online {
+            c3Socket.connect(board)
+            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 스캔하세요.")
+            return
+        }
+        let result = await c3Socket.command(["op": "scan"], timeout: 10)
+        note(result.sent ? result.reason : "로닌 스캔을 보내지 못했습니다. \(result.reason)")
+    }
+
+    /// 고른 로닌 이름으로 C3 블루투스를 붙입니다.
+    func pairRoninGimbal(name: String, id: String = "") async {
+        guard let board = roninC3 else {
+            noteOffline("로닌 제어 C3 를 먼저 등록하세요.")
+            return
+        }
+        if c3Socket.boardId != board.id || c3Socket.state != .online {
+            c3Socket.connect(board)
+            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 누르세요.")
+            return
+        }
+        var payload: [String: Any] = ["op": "pair", "name": name]
+        if !id.isEmpty { payload["id"] = id }
+        let result = await c3Socket.command(payload, timeout: 15)
+        if result.ack {
+            rememberGimbalName(board.id, c3Socket.pairedName.isEmpty ? name : c3Socket.pairedName)
+        }
+        note(result.sent ? result.reason : "로닌 붙이기를 보내지 못했습니다. \(result.reason)")
+    }
+
+    func rememberGimbalName(_ id: UUID, _ name: String) {
+        guard !name.isEmpty, let index = profile.c3Boards.firstIndex(where: { $0.id == id }) else { return }
+        if profile.c3Boards[index].gimbalName != name {
+            profile.c3Boards[index].gimbalName = name
         }
     }
 

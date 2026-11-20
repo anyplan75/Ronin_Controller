@@ -22,7 +22,7 @@ enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .ronin: return "로닌 기판 · CAN"
+        case .ronin: return "로닌 · C3 블루투스"
         case .gopro: return "고프로 · 와이파이"
         case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
         case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
@@ -242,7 +242,7 @@ enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
 
     var label: String {
         switch self {
-        case .ronin: return "로닌 기판 · CAN"
+        case .ronin: return "로닌 · C3 블루투스"
         case .goproWifi: return "고프로 · 와이파이"
         case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
         case .action5Bluetooth: return "오즈모 액션 5 프로 · 블루투스"
@@ -392,7 +392,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     /// 목록과 메뉴에 쓰는 이름입니다. 제품과 연결을 같이 적습니다.
     var linkLabel: String {
         switch kind {
-        case .ronin: return "로닌 기판 · CAN"
+        case .ronin: return "로닌 · C3 블루투스"
         case .gopro: return "고프로 · 와이파이"
         case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
         case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
@@ -609,6 +609,8 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
     /// 공유기에서 고정 주소를 예약할 때 쓰는 와이파이 MAC 입니다.
     var wifiMac: String
     var apMac: String
+    /// C3 가 블루투스로 붙인 로닌 광고 이름입니다. CAN 이 아닙니다.
+    var gimbalName: String
 
     var socketHost: String {
         switch link {
@@ -623,7 +625,7 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         }
     }
 
-    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "", wifiMac: String = "", apMac: String = "") {
+    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "", wifiMac: String = "", apMac: String = "", gimbalName: String = "") {
         self.id = id
         self.name = name
         self.job = job
@@ -631,9 +633,10 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         self.lanHost = lanHost
         self.wifiMac = wifiMac
         self.apMac = apMac
+        self.gimbalName = gimbalName
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, job, linkMode, lanHost, wifiMac, apMac }
+    enum CodingKeys: String, CodingKey { case id, name, job, linkMode, lanHost, wifiMac, apMac, gimbalName }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -644,6 +647,7 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         lanHost = try box.decodeIfPresent(String.self, forKey: .lanHost) ?? ""
         wifiMac = try box.decodeIfPresent(String.self, forKey: .wifiMac) ?? ""
         apMac = try box.decodeIfPresent(String.self, forKey: .apMac) ?? ""
+        gimbalName = try box.decodeIfPresent(String.self, forKey: .gimbalName) ?? ""
     }
 
     func encode(to encoder: Encoder) throws {
@@ -655,6 +659,7 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         try box.encode(lanHost, forKey: .lanHost)
         try box.encode(wifiMac, forKey: .wifiMac)
         try box.encode(apMac, forKey: .apMac)
+        try box.encode(gimbalName, forKey: .gimbalName)
     }
 }
 

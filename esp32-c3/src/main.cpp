@@ -7,6 +7,8 @@
 #include <esp_netif.h>
 #include <esp_wifi.h>
 
+#include "ronin_ble.h"
+
 #if __has_include("wifi_local.h")
 #include "wifi_local.h"
 #define C3_HAS_WIFI 1
@@ -15,24 +17,31 @@
 #endif
 
 // C3 는 로닌 제어 또는 울란지 조명 중 하나만 합니다. 액션 카메라 중계가 아닙니다.
-// CAN 은 시작하지 않고, 울란지 프로토콜도 없습니다. 둘 다 ack false 로 답합니다.
+// 로닌은 블루투스로 붙입니다. CAN 배선이 아닙니다. 울란지 절차는 아직 없습니다.
 
 static WebSocketsServer socket(82);
 static Preferences prefs;
 static String job = "ronin";
 static bool clientUp = false;
 
-static void reply(uint8_t num, bool ack, const char* reason) {
-  JsonDocument doc;
-  doc["ack"] = ack;
-  doc["reason"] = reason;
+static void replyDoc(uint8_t num, JsonDocument& doc) {
   doc["job"] = job;
   doc["wifiMac"] = WiFi.macAddress();
   doc["apMac"] = WiFi.softAPmacAddress();
   if (WiFi.status() == WL_CONNECTED) doc["host"] = WiFi.localIP().toString();
+  if (job == "ronin") {
+    if (roninBleLinked()) doc["paired"] = roninBleName();
+  }
   String out;
   serializeJson(doc, out);
   socket.sendTXT(num, out);
+}
+
+static void reply(uint8_t num, bool ack, const char* reason) {
+  JsonDocument doc;
+  doc["ack"] = ack;
+  doc["reason"] = reason;
+  replyDoc(num, doc);
 }
 
 static const char* kProvService = "7b1e9c10-5a20-4c31-8d10-726f6e696e31";
@@ -261,10 +270,15 @@ static void banner() {
   Serial.println();
   Serial.println("C3 단일 작업 기판");
   Serial.print("맡은 일: ");
-  Serial.println(job == "light" ? "울란지 조명" : "로닌 제어");
+  Serial.println(job == "light" ? "울란지 조명" : "로닌 제어(블루투스)");
   Serial.println("핫스팟 Ronin-C3 192.168.4.1 웹소켓 82");
   Serial.println("같은 와이파이 기본 192.168.10.152 웹소켓 82. 블루투스 설정이 있으면 그 주소를 씁니다.");
-  Serial.println("로닌 CAN 은 시작하지 않습니다. 울란지 명령도 성공으로 답하지 않습니다.");
+  Serial.println("로닌은 C3 블루투스로 붙입니다. CAN 배선이 아닙니다.");
+  if (job == "ronin" && roninBleName()[0]) {
+    Serial.print("저장된 로닌 이름: ");
+    Serial.println(roninBleName());
+  }
+  Serial.println("울란지 명령은 아직 성공으로 답하지 않습니다.");
 }
 
 static void applyMode(const char* mode) {
@@ -325,12 +339,80 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     reply(num, true, "연결 방식을 저장했습니다. 웹소켓은 잠깐 끊길 수 있습니다.");
     return;
   }
+  if (strcmp(op, "scan") == 0) {
+    if (job != "ronin") {
+      reply(num, false, "이 C3 는 로닌 제어가 아닙니다. 스캔하지 않았습니다.");
+      return;
+    }
+    RoninFound rows[8];
+    size_t count = roninBleScan(rows, 8);
+    JsonDocument doc;
+    doc["ack"] = true;
+    char reason[96];
+    snprintf(reason, sizeof(reason), "로닌 후보 %u 대를 블루투스에서 찾았습니다.", (unsigned)count);
+    doc["reason"] = reason;
+    roninBleFillList(doc);
+    replyDoc(num, doc);
+    return;
+  }
+  if (strcmp(op, "pair") == 0) {
+    if (job != "ronin") {
+      reply(num, false, "이 C3 는 로닌 제어가 아닙니다. 붙이지 않았습니다.");
+      return;
+    }
+    const char* name = doc["name"] | "";
+    const char* id = doc["id"] | "";
+    char reason[180];
+    bool ok = roninBlePair(name, id, reason, sizeof(reason));
+    JsonDocument out;
+    out["ack"] = ok;
+    out["reason"] = reason;
+    if (ok) out["paired"] = roninBleName();
+    replyDoc(num, out);
+    return;
+  }
   if (strcmp(op, "ronin") == 0) {
     if (job != "ronin") {
       reply(num, false, "이 C3 는 로닌 제어가 아닙니다. 명령을 수행하지 않았습니다.");
       return;
     }
-    reply(num, false, "CAN 을 시작하지 않았습니다. 팬과 틸트를 짐벌에 보내지 않았습니다.");
+    const char* action = doc["action"] | "";
+    if (strcmp(action, "scan") == 0) {
+      RoninFound rows[8];
+      size_t count = roninBleScan(rows, 8);
+      JsonDocument out;
+      out["ack"] = true;
+      char reason[96];
+      snprintf(reason, sizeof(reason), "로닌 후보 %u 대를 블루투스에서 찾았습니다.", (unsigned)count);
+      out["reason"] = reason;
+      roninBleFillList(out);
+      replyDoc(num, out);
+      return;
+    }
+    if (strcmp(action, "pair") == 0) {
+      const char* name = doc["name"] | "";
+      const char* id = doc["id"] | "";
+      char reason[180];
+      bool ok = roninBlePair(name, id, reason, sizeof(reason));
+      JsonDocument out;
+      out["ack"] = ok;
+      out["reason"] = reason;
+      if (ok) out["paired"] = roninBleName();
+      replyDoc(num, out);
+      return;
+    }
+    if (strcmp(action, "drop") == 0) {
+      roninBleDrop();
+      reply(num, true, "로닌 블루투스를 끊었습니다.");
+      return;
+    }
+    bool home = doc["home"] | false;
+    float yaw = doc["yaw"] | 0.0f;
+    float pitch = doc["pitch"] | 0.0f;
+    if (strcmp(action, "home") == 0) home = true;
+    char reason[180];
+    bool ok = roninBleMove(yaw, pitch, home, reason, sizeof(reason));
+    reply(num, ok, reason);
     return;
   }
   if (strcmp(op, "light") == 0) {
@@ -350,8 +432,9 @@ void setup() {
   prefs.begin("ronin-c3", false);
   job = prefs.getString("job", "ronin");
   if (job != "light") job = "ronin";
-  banner();
   startProvision();
+  roninBleBegin();
+  banner();
   String mode = prefs.isKey("mode") ? prefs.getString("mode", "lan") : "lan";
   applyMode(mode.c_str());
   showIdentity();
@@ -365,6 +448,7 @@ void setup() {
 void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
+  roninBleLoop();
   socket.loop();
   (void)clientUp;
 }

@@ -317,6 +317,12 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     }
 }
 
+/// C3 가 스캔해 준 로닌 블루투스 이름입니다.
+struct C3Gimbal: Identifiable, Equatable {
+    var id: String
+    var name: String
+}
+
 /// C3 한 대의 웹소켓입니다. 로닌이나 조명 명령의 성공은 ack 가 true 일 때만입니다.
 final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     @Published private(set) var state: BoardLinkState = .offline
@@ -324,6 +330,8 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     @Published private(set) var detail = "오프라인"
     @Published private(set) var wifiMac = ""
     @Published private(set) var apMac = ""
+    @Published private(set) var gimbals: [C3Gimbal] = []
+    @Published private(set) var pairedName = ""
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var generation = 0
@@ -367,7 +375,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     }
 
     /// 열린 소켓으로만 보냅니다. 기판이 ack true 를 주기 전에는 성공으로 보지 않습니다.
-    func command(_ payload: [String: Any]) async -> (sent: Bool, ack: Bool, reason: String) {
+    func command(_ payload: [String: Any], timeout: TimeInterval = 2) async -> (sent: Bool, ack: Bool, reason: String) {
         guard state == .online, let task else {
             return (false, false, "C3 가 오프라인입니다. 명령을 보내지 않았습니다.")
         }
@@ -386,7 +394,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             waiter = { ack, reason in
                 continuation.resume(returning: (true, ack, reason))
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
                 guard let self, self.waiter != nil else { return }
                 self.finish(ack: false, reason: "C3 가 응답하지 않았습니다. 성공으로 두지 않습니다.")
             }
@@ -450,6 +458,17 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if let mac = object["apMac"] as? String, !mac.isEmpty { apMac = mac }
         if let host = object["host"] as? String, !host.isEmpty {
             detail = state == .online ? "연결됨 \(host)" : detail
+        }
+        if let paired = object["paired"] as? String, !paired.isEmpty {
+            pairedName = paired
+        }
+        if let rows = object["gimbals"] as? [[String: Any]] {
+            gimbals = rows.compactMap { row in
+                let id = (row["id"] as? String) ?? ""
+                let name = (row["name"] as? String) ?? ""
+                guard !name.isEmpty else { return nil }
+                return C3Gimbal(id: id.isEmpty ? name : id, name: name)
+            }
         }
         if let ack = object["ack"] as? Bool {
             let reason = (object["reason"] as? String) ?? (ack ? "응답을 받았습니다." : "기판이 실패라고 답했습니다.")
