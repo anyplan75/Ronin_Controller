@@ -54,35 +54,42 @@ inline size_t dumlBuild(uint8_t* out, size_t cap, uint16_t target, uint16_t seq,
 }
 
 // App(0x02) → Gimbal(0x04) = 0x0402
-inline size_t dumlAbsAngle(uint8_t* out, size_t cap, uint16_t seq, float pitchDeg, float yawDeg, float durationSec) {
+// 로닌 RS2/SC: 페이로드는 R SDK와 같이 yaw·roll·pitch 순서.
+// (Osmo Pocket 문서의 pitch-first 는 로닌에서 yaw가 틸트로 가는 오매핑이 났음.)
+// flags bit0=pitch, bit1=roll, bit2=yaw — 쓰는 축만 켭니다.
+inline size_t dumlAbsAngle(uint8_t* out, size_t cap, uint16_t seq, float yawDeg, float pitchDeg, float durationSec) {
   uint8_t payload[8];
-  int16_t pitch = (int16_t)lroundf(pitchDeg * 10.0f);
-  int16_t roll = 0;
   int16_t yaw = (int16_t)lroundf(yawDeg * 10.0f);
-  payload[0] = (uint8_t)(pitch & 0xFF);
-  payload[1] = (uint8_t)(pitch >> 8);
+  int16_t roll = 0;
+  int16_t pitch = (int16_t)lroundf(pitchDeg * 10.0f);
+  payload[0] = (uint8_t)(yaw & 0xFF);
+  payload[1] = (uint8_t)(yaw >> 8);
   payload[2] = (uint8_t)(roll & 0xFF);
   payload[3] = (uint8_t)(roll >> 8);
-  payload[4] = (uint8_t)(yaw & 0xFF);
-  payload[5] = (uint8_t)(yaw >> 8);
-  payload[6] = 0x07;  // pitch+roll+yaw
+  payload[4] = (uint8_t)(pitch & 0xFF);
+  payload[5] = (uint8_t)(pitch >> 8);
+  uint8_t axis = 0;
+  if (yaw != 0) axis |= 0x04;    // yaw/팬
+  if (pitch != 0) axis |= 0x01;  // pitch/틸트
+  if (axis == 0) axis = 0x05;    // 제자리: 팬+틸트
+  payload[6] = axis;
   if (durationSec < 0.1f) durationSec = 0.1f;
   if (durationSec > 25.0f) durationSec = 25.0f;
   payload[7] = (uint8_t)lroundf(durationSec * 10.0f);
   return dumlBuild(out, cap, 0x0402, seq, 0x40, 0x04, 0x14, payload, sizeof(payload));
 }
 
-inline size_t dumlSpeed(uint8_t* out, size_t cap, uint16_t seq, float pitchDps, float yawDps) {
+inline size_t dumlSpeed(uint8_t* out, size_t cap, uint16_t seq, float yawDps, float pitchDps) {
   uint8_t payload[7];
-  int16_t pitch = (int16_t)lroundf(pitchDps * 10.0f);
-  int16_t roll = 0;
   int16_t yaw = (int16_t)lroundf(yawDps * 10.0f);
-  payload[0] = (uint8_t)(pitch & 0xFF);
-  payload[1] = (uint8_t)(pitch >> 8);
+  int16_t roll = 0;
+  int16_t pitch = (int16_t)lroundf(pitchDps * 10.0f);
+  payload[0] = (uint8_t)(yaw & 0xFF);
+  payload[1] = (uint8_t)(yaw >> 8);
   payload[2] = (uint8_t)(roll & 0xFF);
   payload[3] = (uint8_t)(roll >> 8);
-  payload[4] = (uint8_t)(yaw & 0xFF);
-  payload[5] = (uint8_t)(yaw >> 8);
+  payload[4] = (uint8_t)(pitch & 0xFF);
+  payload[5] = (uint8_t)(pitch >> 8);
   payload[6] = 0x01;
   return dumlBuild(out, cap, 0x0402, seq, 0x40, 0x04, 0x0C, payload, sizeof(payload));
 }

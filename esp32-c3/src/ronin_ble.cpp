@@ -581,7 +581,7 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
     if (modeLen > 0) bleWrite(mode, modeLen);
     delay(40);
     uint8_t frame[48];
-    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, pitchDeg, yawDeg, 2.0f);
+    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, yawDeg, pitchDeg, 2.0f);
     clearRx();
     hexShort(txHex, sizeof(txHex), frame, len);
     if (len > 0 && bleWrite(frame, len)) {
@@ -596,7 +596,9 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
   if (!moved) {
     uint8_t frame[48];
     float yawSpeed = home ? 0.0f : (yawDeg >= 0 ? 20.0f : -20.0f);
-    size_t len = dumlSpeed(frame, sizeof(frame), dumlSeq++, 0, yawSpeed);
+    float pitchSpeed = home ? 0.0f : (pitchDeg == 0 ? 0.0f : (pitchDeg >= 0 ? 15.0f : -15.0f));
+    if (yawDeg == 0 && pitchDeg != 0) yawSpeed = 0;
+    size_t len = dumlSpeed(frame, sizeof(frame), dumlSeq++, yawSpeed, pitchSpeed);
     clearRx();
     if (len > 0 && bleWrite(frame, len)) {
       hexShort(txHex, sizeof(txHex), frame, len);
