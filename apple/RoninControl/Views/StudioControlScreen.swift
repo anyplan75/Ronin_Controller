@@ -587,17 +587,45 @@ struct StudioControlScreen: View {
                 Text("로닌용 C3 와 같은 기판이면 안 됩니다. 조명 전용 C3 가 필요합니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text(board.gimbalName.isEmpty
+                     ? (c3Link.pairedName.isEmpty ? "아직 붙인 울란지 이름이 없습니다." : "붙음 \(c3Link.pairedName)")
+                     : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
+                    .font(.caption.weight(.semibold))
+                Button("울란지 블루투스 스캔") {
+                    Task { await studio.scanUlanziLights(board.id) }
+                }
+                .buttonStyle(DeskButtonStyle(expand: true))
+                .disabled(c3Link.boardId != board.id || c3Link.state != .online)
+                if c3Link.gimbals.isEmpty {
+                    Text("스캔하면 주변 울란지 이름이 여기에 나옵니다. 조명을 켠 뒤 누르세요. 폰·맥 울란지 앱이 붙어 있으면 끊으세요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(c3Link.gimbals) { light in
+                        Button("붙이기 · \(light.name)") {
+                            Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == light.name || c3Link.pairedName == light.name, expand: true))
+                    }
+                }
+                if !board.gimbalName.isEmpty {
+                    Button("저장 이름으로 다시 붙이기") {
+                        Task { await studio.pairUlanziLight(board.id, name: board.gimbalName) }
+                    }
+                    .buttonStyle(DeskButtonStyle(expand: true))
+                    .disabled(c3Link.boardId != board.id || c3Link.state != .online)
+                }
                 Text("밝기 \(Int(level))")
                 Slider(value: Binding(get: { lightLevel[board.id] ?? 40 }, set: { lightLevel[board.id] = $0 }), in: 0...100, step: 1)
                 Text("색온도 \(Int(kelvin))K")
-                Slider(value: Binding(get: { lightKelvin[board.id] ?? 4500 }, set: { lightKelvin[board.id] = $0 }), in: 2500...6500, step: 100)
+                Slider(value: Binding(get: { lightKelvin[board.id] ?? 4500 }, set: { lightKelvin[board.id] = $0 }), in: 2700...6500, step: 100)
                 HStack {
                     Button("켜기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: true) } }
                         .buttonStyle(DeskButtonStyle(tone: .record))
                     Button("끄기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: false) } }
                         .buttonStyle(DeskButtonStyle(tone: .stop))
                 }
-                Text("지금 C3 펌웨어는 울란지 블루투스가 없어, 켜기·끄기는 실패로 답합니다. 안내는 연결 준비용입니다.")
+                Text("켜기·끄기 성공은 C3 가 ack true 로 답할 때만입니다.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

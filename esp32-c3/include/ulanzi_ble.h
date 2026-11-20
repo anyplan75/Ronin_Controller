@@ -1,0 +1,25 @@
+#pragma once
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <NimBLEDevice.h>
+
+// 울란지 VL120BI·VL200BI 조명을 C3 블루투스로 붙입니다.
+// 카메라 탈리와는 별개입니다. 로닌 역할 C3 와 같은 기판에서 쓰지 않습니다.
+// 프로토콜 근거: 실기 GATT FFF0/FFF1/FFF2 + kevinlouie/lctl 관측 명령 + 맥 bleak 쓰기 확인.
+
+struct UlanziFound {
+  char id[24];
+  char name[40];
+  uint8_t addrType;
+};
+
+void ulanziBleBegin();
+void ulanziBleLoop();
+void ulanziBleDrop();
+bool ulanziBleBusy();
+bool ulanziBleLinked();
+const char* ulanziBleName();
+size_t ulanziBleScan(UlanziFound* out, size_t cap, bool manageBusy = true);
+bool ulanziBlePair(const char* name, const char* id, char* reason, size_t reasonCap);
+bool ulanziBleApply(int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
+void ulanziBleFillList(JsonDocument& doc);

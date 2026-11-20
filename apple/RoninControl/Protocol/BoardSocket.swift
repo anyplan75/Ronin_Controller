@@ -462,7 +462,8 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if let paired = object["paired"] as? String, !paired.isEmpty {
             pairedName = paired
         }
-        if let rows = object["gimbals"] as? [[String: Any]] {
+        let lightRows = (object["lights"] as? [[String: Any]]) ?? (object["gimbals"] as? [[String: Any]])
+        if let rows = lightRows {
             gimbals = rows.compactMap { row in
                 let id = (row["id"] as? String) ?? ""
                 let name = (row["name"] as? String) ?? ""

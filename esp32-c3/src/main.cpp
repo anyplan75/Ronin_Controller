@@ -8,6 +8,7 @@
 #include <esp_wifi.h>
 
 #include "ronin_ble.h"
+#include "ulanzi_ble.h"
 
 #if __has_include("wifi_local.h")
 #include "wifi_local.h"
@@ -17,7 +18,7 @@
 #endif
 
 // C3 는 로닌 제어 또는 울란지 조명 중 하나만 합니다. 액션 카메라 중계가 아닙니다.
-// 로닌은 블루투스로 붙입니다. CAN 배선이 아닙니다. 울란지 절차는 아직 없습니다.
+// 로닌·울란지 모두 블루투스로 붙입니다. CAN 배선이 아닙니다. 조명은 카메라 탈리와 별개입니다.
 
 static WebSocketsServer socket(82);
 static Preferences prefs;
@@ -31,6 +32,8 @@ static void replyDoc(uint8_t num, JsonDocument& doc) {
   if (WiFi.status() == WL_CONNECTED) doc["host"] = WiFi.localIP().toString();
   if (job == "ronin") {
     if (roninBleLinked()) doc["paired"] = roninBleName();
+  } else if (job == "light") {
+    if (ulanziBleLinked()) doc["paired"] = ulanziBleName();
   }
   String out;
   serializeJson(doc, out);
@@ -273,12 +276,15 @@ static void banner() {
   Serial.println(job == "light" ? "울란지 조명" : "로닌 제어(블루투스)");
   Serial.println("핫스팟 Ronin-C3 192.168.4.1 웹소켓 82");
   Serial.println("같은 와이파이 기본 192.168.10.152 웹소켓 82. 블루투스 설정이 있으면 그 주소를 씁니다.");
-  Serial.println("로닌은 C3 블루투스로 붙입니다. CAN 배선이 아닙니다.");
+  Serial.println("로닌·울란지는 C3 블루투스로 붙입니다. CAN 배선이 아닙니다. 조명은 탈리와 별개입니다.");
   if (job == "ronin" && roninBleName()[0]) {
     Serial.print("저장된 로닌 이름: ");
     Serial.println(roninBleName());
   }
-  Serial.println("울란지 명령은 아직 성공으로 답하지 않습니다.");
+  if (job == "light" && ulanziBleName()[0]) {
+    Serial.print("저장된 울란지 이름: ");
+    Serial.println(ulanziBleName());
+  }
 }
 
 static void applyMode(const char* mode) {
@@ -328,8 +334,15 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
   const char* op = doc["op"] | "";
   if (strcmp(op, "job") == 0) {
     const char* next = doc["job"] | "ronin";
+    String prev = job;
     job = strcmp(next, "light") == 0 ? "light" : "ronin";
     prefs.putString("job", job);
+    if (prev != job) {
+      roninBleDrop();
+      ulanziBleDrop();
+      if (job == "light") ulanziBleBegin();
+      else roninBleBegin();
+    }
     reply(num, true, job == "light" ? "조명만 맡도록 저장했습니다." : "로닌 제어만 맡도록 저장했습니다.");
     banner();
     return;
@@ -420,7 +433,42 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       reply(num, false, "이 C3 는 조명이 아닙니다. 명령을 수행하지 않았습니다.");
       return;
     }
-    reply(num, false, "울란지 VL120BI·VL200BI 블루투스 절차가 아직 없습니다. 밝기와 색온도를 보내지 않았습니다. 카메라 탈리와는 별개입니다.");
+    const char* action = doc["action"] | "";
+    if (strcmp(action, "scan") == 0) {
+      UlanziFound rows[8];
+      size_t count = ulanziBleScan(rows, 8);
+      JsonDocument out;
+      out["ack"] = true;
+      char reason[96];
+      snprintf(reason, sizeof(reason), "울란지 후보 %u 대를 블루투스에서 찾았습니다.", (unsigned)count);
+      out["reason"] = reason;
+      ulanziBleFillList(out);
+      replyDoc(num, out);
+      return;
+    }
+    if (strcmp(action, "pair") == 0) {
+      const char* name = doc["name"] | "";
+      const char* id = doc["id"] | "";
+      char reason[180];
+      bool ok = ulanziBlePair(name, id, reason, sizeof(reason));
+      JsonDocument out;
+      out["ack"] = ok;
+      out["reason"] = reason;
+      if (ok) out["paired"] = ulanziBleName();
+      replyDoc(num, out);
+      return;
+    }
+    if (strcmp(action, "drop") == 0) {
+      ulanziBleDrop();
+      reply(num, true, "울란지 블루투스를 끊었습니다.");
+      return;
+    }
+    int brightness = doc["brightness"] | 40;
+    int kelvin = doc["kelvin"] | 4500;
+    bool on = doc["on"] | true;
+    char reason[180];
+    bool ok = ulanziBleApply(brightness, kelvin, on, reason, sizeof(reason));
+    reply(num, ok, reason);
     return;
   }
   reply(num, false, "이 기판이 받지 않는 명령입니다.");
@@ -433,7 +481,8 @@ void setup() {
   job = prefs.getString("job", "ronin");
   if (job != "light") job = "ronin";
   startProvision();
-  roninBleBegin();
+  if (job == "light") ulanziBleBegin();
+  else roninBleBegin();
   banner();
   String mode = prefs.isKey("mode") ? prefs.getString("mode", "lan") : "lan";
   applyMode(mode.c_str());
@@ -448,7 +497,8 @@ void setup() {
 void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
-  roninBleLoop();
+  if (job == "light") ulanziBleLoop();
+  else roninBleLoop();
   socket.loop();
   (void)clientUp;
 }

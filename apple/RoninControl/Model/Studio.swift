@@ -943,6 +943,41 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// 조명 C3 가 주변 울란지 이름을 읽습니다.
+    func scanUlanziLights(_ id: UUID) async {
+        guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
+            note("조명 담당 C3 를 찾지 못했습니다.")
+            return
+        }
+        if c3Socket.boardId != board.id || c3Socket.state != .online {
+            c3Socket.connect(board)
+            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 스캔하세요.")
+            return
+        }
+        let result = await c3Socket.command(["op": "light", "action": "scan"], timeout: 12)
+        note(result.sent ? result.reason : "울란지 스캔을 보내지 못했습니다. \(result.reason)")
+    }
+
+    /// 고른 울란지 이름으로 C3 블루투스를 붙입니다.
+    func pairUlanziLight(_ id: UUID, name: String, id lightId: String = "") async {
+        guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
+            note("조명 담당 C3 를 찾지 못했습니다.")
+            return
+        }
+        if c3Socket.boardId != board.id || c3Socket.state != .online {
+            c3Socket.connect(board)
+            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 누르세요.")
+            return
+        }
+        var payload: [String: Any] = ["op": "light", "action": "pair", "name": name]
+        if !lightId.isEmpty { payload["id"] = lightId }
+        let result = await c3Socket.command(payload, timeout: 18)
+        if result.ack {
+            rememberGimbalName(board.id, c3Socket.pairedName.isEmpty ? name : c3Socket.pairedName)
+        }
+        note(result.sent ? result.reason : "울란지 붙이기를 보내지 못했습니다. \(result.reason)")
+    }
+
     /// 조명 C3 만 받는 명령입니다. 연결이 없으면 보내지 않고, 연결됨으로 바꾸지 않습니다.
     func setLight(_ id: UUID, brightness: Int, kelvin: Int, on: Bool) async {
         guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
@@ -963,9 +998,11 @@ final class Studio: ObservableObject {
             "brightness": brightness,
             "kelvin": kelvin,
             "on": on,
-        ])
+        ], timeout: 12)
         if result.ack {
-            note("\(board.name) 이 밝기 \(brightness), 색온도 \(kelvin)K 를 받았다고 답했습니다.")
+            note(result.reason.isEmpty
+                 ? "\(board.name) 이 밝기 \(brightness), 색온도 \(kelvin)K 를 받았다고 답했습니다."
+                 : result.reason)
         } else {
             note(result.reason)
         }
