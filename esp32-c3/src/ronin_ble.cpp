@@ -1,4 +1,5 @@
 #include "ronin_ble.h"
+#include "board_slot.h"
 #include "dji_r_frame.h"
 
 #include <Preferences.h>
@@ -17,6 +18,16 @@ static char linkedName[40] = {};
 static char linkedId[24] = {};
 static uint16_t seq = 1;
 static Preferences store;
+static RoninTarget targetFilter = RoninTarget::Any;
+
+void roninBleSetTarget(RoninTarget target) { targetFilter = target; }
+RoninTarget roninBleTarget() { return targetFilter; }
+
+static bool passesTarget(const char* lower) {
+  if (targetFilter == RoninTarget::Rs2Only) return nameMatchesRs2(lower);
+  if (targetFilter == RoninTarget::ScOnly) return nameMatchesSc(lower);
+  return true;
+}
 
 static void lowerCopy(char* out, size_t cap, const char* in) {
   if (out == nullptr || cap == 0) return;
@@ -141,6 +152,9 @@ size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
     if (!looksLikeRonin(device)) continue;
     std::string name = device.getName();
     if (name.empty()) continue;
+    char lower[64];
+    lowerCopy(lower, sizeof(lower), name.c_str());
+    if (!passesTarget(lower)) continue;
     RoninFound row = {};
     strncpy(row.name, name.c_str(), sizeof(row.name) - 1);
     strncpy(row.id, device.getAddress().toString().c_str(), sizeof(row.id) - 1);
@@ -296,6 +310,25 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
   snprintf(reason, reasonCap, "로닌 %s 에 블루투스로 붙었습니다.", linkedName);
   Serial.println(reason);
   return true;
+}
+
+bool roninBleAutoPair(char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (roninBleLinked()) {
+    snprintf(reason, reasonCap, "이미 %s 에 붙어 있습니다.", linkedName);
+    return true;
+  }
+  if (linkedName[0]) {
+    return roninBlePair(linkedName, linkedId, reason, reasonCap);
+  }
+  RoninFound rows[kMaxFound];
+  size_t n = roninBleScan(rows, kMaxFound);
+  if (n == 0) {
+    snprintf(reason, reasonCap, "담당 로닌을 찾지 못했습니다.");
+    return false;
+  }
+  return roninBlePair(rows[0].name, rows[0].id, reason, reasonCap);
 }
 
 bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t reasonCap) {

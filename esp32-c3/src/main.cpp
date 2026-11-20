@@ -7,6 +7,9 @@
 #include <esp_netif.h>
 #include <esp_wifi.h>
 
+#include "board_oled.h"
+#include "board_ota.h"
+#include "board_slot.h"
 #include "ronin_ble.h"
 #include "ulanzi_ble.h"
 
@@ -17,16 +20,53 @@
 #define C3_HAS_WIFI 0
 #endif
 
-// C3 는 로닌 제어 또는 울란지 조명 중 하나만 합니다. 액션 카메라 중계가 아닙니다.
-// 로닌·울란지 모두 블루투스로 붙입니다. CAN 배선이 아닙니다. 조명은 카메라 탈리와 별개입니다.
+// 보드 슬롯: OLED=RS2, RMSID=SC, S3=울란지. 역할을 섞지 않습니다.
+// 로닌·울란지는 블루투스. CAN 아님. 조명은 카메라 탈리와 별개입니다.
 
 static WebSocketsServer socket(82);
 static Preferences prefs;
+static BoardSlot slot = kDefaultSlot;
 static String job = "ronin";
 static bool clientUp = false;
+static uint32_t nextAutoPairAt = 0;
+
+static void applySlot(BoardSlot next) {
+  slot = next;
+  prefs.putString("slot", slotId(slot));
+  if (slotIsLight(slot)) {
+    job = "light";
+    roninBleDrop();
+    ulanziBleBegin();
+  } else {
+    job = "ronin";
+    ulanziBleDrop();
+    roninBleSetTarget(slot == BoardSlot::OledRs2 ? RoninTarget::Rs2Only : RoninTarget::ScOnly);
+    roninBleBegin();
+  }
+  prefs.putString("job", job);
+}
+
+static void refreshOled() {
+  if (slot != BoardSlot::OledRs2) return;
+  char l1[24];
+  char l2[24];
+  char l3[40];
+  snprintf(l1, sizeof(l1), "%s", slotTitle(slot));
+  if (WiFi.status() == WL_CONNECTED) {
+    String ip = WiFi.localIP().toString();
+    snprintf(l2, sizeof(l2), "%s", ip.c_str());
+  } else {
+    snprintf(l2, sizeof(l2), "WiFi...");
+  }
+  if (roninBleLinked()) snprintf(l3, sizeof(l3), "%s", roninBleName());
+  else snprintf(l3, sizeof(l3), "no pair");
+  boardOledShow(l1, l2, l3);
+}
 
 static void replyDoc(uint8_t num, JsonDocument& doc) {
   doc["job"] = job;
+  doc["slot"] = slotId(slot);
+  doc["fw"] = FW_VERSION;
   doc["wifiMac"] = WiFi.macAddress();
   doc["apMac"] = WiFi.softAPmacAddress();
   if (WiFi.status() == WL_CONNECTED) doc["host"] = WiFi.localIP().toString();
@@ -271,12 +311,15 @@ static void finishJoin() {
 
 static void banner() {
   Serial.println();
-  Serial.println("C3 단일 작업 기판");
+  Serial.println("단일 담당 기판");
+  Serial.print("슬롯: ");
+  Serial.println(slotTitle(slot));
+  Serial.print("펌웨어: ");
+  Serial.println(FW_VERSION);
   Serial.print("맡은 일: ");
   Serial.println(job == "light" ? "울란지 조명" : "로닌 제어(블루투스)");
-  Serial.println("핫스팟 Ronin-C3 192.168.4.1 웹소켓 82");
-  Serial.println("같은 와이파이 기본 192.168.10.152 웹소켓 82. 블루투스 설정이 있으면 그 주소를 씁니다.");
-  Serial.println("로닌·울란지는 C3 블루투스로 붙입니다. CAN 배선이 아닙니다. 조명은 탈리와 별개입니다.");
+  Serial.println("핫스팟 Ronin-C3 192.168.4.1 웹소켓 82 · OTA http://ip/update");
+  Serial.println("같은 와이파이 기본 192.168.10.152:82. CAN 아님. 조명은 탈리와 별개.");
   if (job == "ronin" && roninBleName()[0]) {
     Serial.print("저장된 로닌 이름: ");
     Serial.println(roninBleName());
@@ -285,6 +328,7 @@ static void banner() {
     Serial.print("저장된 울란지 이름: ");
     Serial.println(ulanziBleName());
   }
+  refreshOled();
 }
 
 static void applyMode(const char* mode) {
@@ -332,17 +376,22 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     return;
   }
   const char* op = doc["op"] | "";
+  if (strcmp(op, "slot") == 0) {
+    BoardSlot next = slotFromText(doc["slot"] | slotId(slot), slot);
+    applySlot(next);
+    reply(num, true, slotTitle(slot));
+    banner();
+    return;
+  }
   if (strcmp(op, "job") == 0) {
+    // 슬롯이 고정 담당입니다. job 요청은 슬롯과 맞을 때만 받습니다.
     const char* next = doc["job"] | "ronin";
-    String prev = job;
-    job = strcmp(next, "light") == 0 ? "light" : "ronin";
-    prefs.putString("job", job);
-    if (prev != job) {
-      roninBleDrop();
-      ulanziBleDrop();
-      if (job == "light") ulanziBleBegin();
-      else roninBleBegin();
+    bool wantLight = strcmp(next, "light") == 0;
+    if (wantLight != slotIsLight(slot)) {
+      reply(num, false, "이 보드 슬롯 담당과 다른 일입니다. 바꾸지 않았습니다.");
+      return;
     }
+    applySlot(slot);
     reply(num, true, job == "light" ? "조명만 맡도록 저장했습니다." : "로닌 제어만 맡도록 저장했습니다.");
     banner();
     return;
@@ -478,11 +527,10 @@ void setup() {
   Serial.begin(115200);
   delay(400);
   prefs.begin("ronin-c3", false);
-  job = prefs.getString("job", "ronin");
-  if (job != "light") job = "ronin";
+  slot = slotFromText(prefs.getString("slot", slotId(kDefaultSlot)).c_str(), kDefaultSlot);
   startProvision();
-  if (job == "light") ulanziBleBegin();
-  else roninBleBegin();
+  applySlot(slot);
+  boardOledBegin(slot == BoardSlot::OledRs2);
   banner();
   String mode = prefs.isKey("mode") ? prefs.getString("mode", "lan") : "lan";
   applyMode(mode.c_str());
@@ -492,13 +540,30 @@ void setup() {
   socket.begin();
   socket.onEvent(onEvent);
   Serial.println("웹소켓 82번을 열었습니다.");
+  nextAutoPairAt = millis() + 8000;
 }
 
 void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
-  if (job == "light") ulanziBleLoop();
-  else roninBleLoop();
+  boardOtaLoop();
+  if (job == "light") {
+    ulanziBleLoop();
+  } else {
+    roninBleLoop();
+    if (WiFi.status() == WL_CONNECTED && !roninBleLinked() && !roninBleBusy() && millis() >= nextAutoPairAt) {
+      nextAutoPairAt = millis() + 20000;
+      char reason[180];
+      if (roninBleAutoPair(reason, sizeof(reason))) {
+        Serial.println(reason);
+        refreshOled();
+      } else {
+        Serial.println(reason);
+        refreshOled();
+      }
+    }
+  }
+  if (millis() % 3000 < 30) refreshOled();
   socket.loop();
   (void)clientUp;
 }

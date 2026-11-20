@@ -11,7 +11,11 @@ struct RoninFound {
   uint8_t addrType;
 };
 
+enum class RoninTarget : uint8_t { Any = 0, Rs2Only = 1, ScOnly = 2 };
+
 void roninBleBegin();
+void roninBleSetTarget(RoninTarget target);
+RoninTarget roninBleTarget();
 void roninBleLoop();
 void roninBleDrop();
 bool roninBleBusy();
@@ -19,5 +23,6 @@ bool roninBleLinked();
 const char* roninBleName();
 size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy = true);
 bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonCap);
+bool roninBleAutoPair(char* reason, size_t reasonCap);
 bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t reasonCap);
 void roninBleFillList(JsonDocument& doc);
