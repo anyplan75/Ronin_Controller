@@ -21,5 +21,8 @@ bool ulanziBleLinked();
 const char* ulanziBleName();
 size_t ulanziBleScan(UlanziFound* out, size_t cap, bool manageBusy = true);
 bool ulanziBlePair(const char* name, const char* id, char* reason, size_t reasonCap);
+bool ulanziBleAutoPair(char* reason, size_t reasonCap);  // 최대 2대 저장·첫 대 연결
 bool ulanziBleApply(int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
+bool ulanziBleApplyAll(int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
 void ulanziBleFillList(JsonDocument& doc);
+uint8_t ulanziBleSavedCount();

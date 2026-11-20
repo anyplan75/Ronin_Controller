@@ -39,6 +39,13 @@ void boardOtaBegin(const char* hostname) {
     String body = String("{\"fw\":\"") + FW_VERSION + "\"}";
     http.send(200, "application/json", body);
   });
+  http.on("/update", HTTP_GET, []() {
+    http.send(200, "text/html",
+              "<html><body><h1>Ronin OTA</h1>"
+              "<form method='POST' enctype='multipart/form-data'>"
+              "<input type='file' name='update'><input type='submit' value='Upload'>"
+              "</form></body></html>");
+  });
   http.on(
       "/update", HTTP_POST,
       []() {

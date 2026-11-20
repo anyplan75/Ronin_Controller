@@ -21,7 +21,25 @@ static bool linked = false;
 static bool busy = false;
 static char linkedName[40] = {};
 static char linkedId[24] = {};
+static char savedNames[2][40] = {};
+static char savedIds[2][24] = {};
+static uint8_t savedCount = 0;
 static Preferences store;
+
+static void rememberSlot(uint8_t i, const char* name, const char* id) {
+  if (i >= 2 || name == nullptr) return;
+  strncpy(savedNames[i], name, sizeof(savedNames[i]) - 1);
+  if (id) strncpy(savedIds[i], id, sizeof(savedIds[i]) - 1);
+  char keyN[16];
+  char keyI[16];
+  snprintf(keyN, sizeof(keyN), "lightName%u", (unsigned)i);
+  snprintf(keyI, sizeof(keyI), "lightId%u", (unsigned)i);
+  store.begin("ronin-c3", false);
+  store.putString(keyN, savedNames[i]);
+  store.putString(keyI, savedIds[i]);
+  store.putUChar("lightCount", savedCount);
+  store.end();
+}
 
 static void lowerCopy(char* out, size_t cap, const char* in) {
   if (out == nullptr || cap == 0) return;
@@ -63,8 +81,10 @@ static void clearLink(bool keepPrefs) {
   linkedId[0] = 0;
   if (client != nullptr) {
     if (client->isConnected()) client->disconnect();
+    delay(250);
     NimBLEDevice::deleteClient(client);
     client = nullptr;
+    delay(150);
   }
   if (!keepPrefs) {
     store.begin("ronin-c3", false);
@@ -77,16 +97,31 @@ static void clearLink(bool keepPrefs) {
 
 void ulanziBleBegin() {
   store.begin("ronin-c3", false);
-  String savedName = store.getString("lightName", "");
-  String savedId = store.getString("lightId", "");
-  store.end();
-  if (!savedName.isEmpty()) {
-    strncpy(linkedName, savedName.c_str(), sizeof(linkedName) - 1);
+  savedCount = store.getUChar("lightCount", 0);
+  if (savedCount > 2) savedCount = 2;
+  for (uint8_t i = 0; i < 2; i++) {
+    char keyN[16];
+    char keyI[16];
+    snprintf(keyN, sizeof(keyN), "lightName%u", (unsigned)i);
+    snprintf(keyI, sizeof(keyI), "lightId%u", (unsigned)i);
+    String n = store.getString(keyN, i == 0 ? store.getString("lightName", "") : "");
+    String id = store.getString(keyI, i == 0 ? store.getString("lightId", "") : "");
+    savedNames[i][0] = 0;
+    savedIds[i][0] = 0;
+    if (!n.isEmpty()) {
+      strncpy(savedNames[i], n.c_str(), sizeof(savedNames[i]) - 1);
+      strncpy(savedIds[i], id.c_str(), sizeof(savedIds[i]) - 1);
+      if (i >= savedCount) savedCount = i + 1;
+    }
   }
-  if (!savedId.isEmpty()) {
-    strncpy(linkedId, savedId.c_str(), sizeof(linkedId) - 1);
+  store.end();
+  if (savedNames[0][0]) {
+    strncpy(linkedName, savedNames[0], sizeof(linkedName) - 1);
+    strncpy(linkedId, savedIds[0], sizeof(linkedId) - 1);
   }
 }
+
+uint8_t ulanziBleSavedCount() { return savedCount; }
 
 void ulanziBleLoop() {
   if (client != nullptr && linked && !client->isConnected()) {
@@ -272,14 +307,82 @@ bool ulanziBlePair(const char* name, const char* id, char* reason, size_t reason
   linked = true;
   strncpy(linkedName, hit->name, sizeof(linkedName) - 1);
   strncpy(linkedId, hit->id, sizeof(linkedId) - 1);
-  store.begin("ronin-c3", false);
-  store.putString("lightName", linkedName);
-  store.putString("lightId", linkedId);
-  store.end();
+  // 첫 빈 칸 또는 같은 id 자리에 저장
+  uint8_t slot = 0;
+  for (uint8_t i = 0; i < savedCount; i++) {
+    if (strcmp(savedIds[i], linkedId) == 0 || strcmp(savedNames[i], linkedName) == 0) {
+      slot = i;
+      break;
+    }
+    slot = i + 1;
+  }
+  if (slot > 1) slot = 1;
+  if (savedCount < slot + 1) savedCount = slot + 1;
+  rememberSlot(slot, linkedName, linkedId);
   busy = false;
   snprintf(reason, reasonCap, "울란지 %s 에 블루투스로 붙었습니다.", linkedName);
   Serial.println(reason);
   return true;
+}
+
+bool ulanziBleAutoPair(char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  UlanziFound rows[8];
+  size_t n = ulanziBleScan(rows, 8);
+  if (n == 0) {
+    snprintf(reason, reasonCap, "울란지를 찾지 못했습니다.");
+    return false;
+  }
+  savedCount = 0;
+  size_t take = n < 2 ? n : 2;
+  for (size_t i = 0; i < take; i++) {
+    rememberSlot((uint8_t)i, rows[i].name, rows[i].id);
+    savedCount = (uint8_t)(i + 1);
+  }
+  store.begin("ronin-c3", false);
+  store.putUChar("lightCount", savedCount);
+  store.end();
+  bool ok = ulanziBlePair(rows[0].name, rows[0].id, reason, reasonCap);
+  if (ok && savedCount > 1) {
+    char extra[96];
+    snprintf(extra, sizeof(extra), " · 2대 저장(%s)", savedNames[1]);
+    strncat(reason, extra, reasonCap - strlen(reason) - 1);
+  }
+  return ok;
+}
+
+bool ulanziBleApplyAll(int brightness, int kelvin, bool on, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (savedCount == 0 && linkedName[0]) {
+    savedCount = 1;
+    rememberSlot(0, linkedName, linkedId);
+  }
+  if (savedCount == 0) {
+    snprintf(reason, reasonCap, "저장된 울란지가 없습니다. 먼저 스캔·자동페어하세요.");
+    return false;
+  }
+  char notes[180] = {};
+  uint8_t okCount = 0;
+  for (uint8_t i = 0; i < savedCount; i++) {
+    char one[120];
+    if (!ulanziBlePair(savedNames[i], savedIds[i], one, sizeof(one))) {
+      strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+      strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+      continue;
+    }
+    if (!ulanziBleApply(brightness, kelvin, on, one, sizeof(one))) {
+      strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+      strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+      continue;
+    }
+    okCount++;
+    strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+    strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+  }
+  snprintf(reason, reasonCap, "울란지 %u/%u 성공. %s", (unsigned)okCount, (unsigned)savedCount, notes);
+  return okCount > 0;
 }
 
 static bool writePkt(const uint8_t* pkt, size_t len) {

@@ -70,10 +70,12 @@ static void replyDoc(uint8_t num, JsonDocument& doc) {
   doc["wifiMac"] = WiFi.macAddress();
   doc["apMac"] = WiFi.softAPmacAddress();
   if (WiFi.status() == WL_CONNECTED) doc["host"] = WiFi.localIP().toString();
+  if (slot == BoardSlot::OledRs2) doc["oledReady"] = boardOledReady() ? 1 : 0;
   if (job == "ronin") {
     if (roninBleLinked()) doc["paired"] = roninBleName();
   } else if (job == "light") {
     if (ulanziBleLinked()) doc["paired"] = ulanziBleName();
+    doc["savedLights"] = ulanziBleSavedCount();
   }
   String out;
   serializeJson(doc, out);
@@ -198,8 +200,10 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
   IPAddress parsed;
   String useIp = ipText;
   if (!fixedLan(useIp, &parsed)) {
-    useIp = "192.168.10.152";
-    Serial.println("고정 주소가 없어 192.168.10.152 을 씁니다.");
+    useIp = slotIsLight(slot) ? "192.168.10.153" : "192.168.10.152";
+    Serial.print("고정 주소가 없어 ");
+    Serial.print(useIp);
+    Serial.println(" 을 씁니다.");
   }
   joinIp = useIp;
   if (ssid.isEmpty()) {
@@ -344,13 +348,15 @@ static void applyMode(const char* mode) {
   prefs.putString("mode", "lan");
   if (prefs.isKey("wifiSsid")) {
     String savedIp = prefs.getString("wifiIp", "");
-    if (savedIp.isEmpty() || savedIp == "192.168.10.205") savedIp = "192.168.10.152";
+    if (savedIp.isEmpty() || savedIp == "192.168.10.205") {
+      savedIp = slotIsLight(slot) ? "192.168.10.153" : "192.168.10.152";
+    }
     beginStation(prefs.getString("wifiSsid", ""), prefs.getString("wifiPass", ""), savedIp);
     return;
   }
 #if C3_HAS_WIFI
   Serial.println("저장된 설정이 없어 비밀 파일의 와이파이로 붙습니다. 비밀번호는 찍지 않습니다.");
-  beginStation(WIFI_SSID_1, WIFI_PASS, "192.168.10.152");
+  beginStation(WIFI_SSID_1, WIFI_PASS, slotIsLight(slot) ? "192.168.10.153" : "192.168.10.152");
 #else
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
@@ -512,11 +518,19 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       reply(num, true, "울란지 블루투스를 끊었습니다.");
       return;
     }
+    if (strcmp(action, "auto") == 0) {
+      char reason[180];
+      bool ok = ulanziBleAutoPair(reason, sizeof(reason));
+      reply(num, ok, reason);
+      return;
+    }
     int brightness = doc["brightness"] | 40;
     int kelvin = doc["kelvin"] | 4500;
     bool on = doc["on"] | true;
-    char reason[180];
-    bool ok = ulanziBleApply(brightness, kelvin, on, reason, sizeof(reason));
+    char reason[200];
+    bool ok = (ulanziBleSavedCount() > 1)
+                  ? ulanziBleApplyAll(brightness, kelvin, on, reason, sizeof(reason))
+                  : ulanziBleApply(brightness, kelvin, on, reason, sizeof(reason));
     reply(num, ok, reason);
     return;
   }
@@ -530,10 +544,11 @@ void setup() {
   slot = slotFromText(prefs.getString("slot", slotId(kDefaultSlot)).c_str(), kDefaultSlot);
   startProvision();
   applySlot(slot);
-  boardOledBegin(slot == BoardSlot::OledRs2);
   banner();
   String mode = prefs.isKey("mode") ? prefs.getString("mode", "lan") : "lan";
   applyMode(mode.c_str());
+  // OLED I2C 는 와이파이 뒤에 켠다. 버스가 멈춰도 망·웹소켓은 이미 열린 뒤다.
+  boardOledBegin(slot == BoardSlot::OledRs2);
   showIdentity();
   Serial.print("와이파이 MAC ");
   Serial.println(WiFi.macAddress());
@@ -541,6 +556,7 @@ void setup() {
   socket.onEvent(onEvent);
   Serial.println("웹소켓 82번을 열었습니다.");
   nextAutoPairAt = millis() + 8000;
+  refreshOled();
 }
 
 void loop() {
@@ -549,6 +565,12 @@ void loop() {
   boardOtaLoop();
   if (job == "light") {
     ulanziBleLoop();
+    if (WiFi.status() == WL_CONNECTED && !ulanziBleBusy() && ulanziBleSavedCount() < 2 && millis() >= nextAutoPairAt) {
+      nextAutoPairAt = millis() + 25000;
+      char reason[180];
+      if (ulanziBleAutoPair(reason, sizeof(reason))) Serial.println(reason);
+      else Serial.println(reason);
+    }
   } else {
     roninBleLoop();
     if (WiFi.status() == WL_CONNECTED && !roninBleLinked() && !roninBleBusy() && millis() >= nextAutoPairAt) {
