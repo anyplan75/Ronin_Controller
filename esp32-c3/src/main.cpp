@@ -200,7 +200,7 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
   IPAddress parsed;
   String useIp = ipText;
   if (!fixedLan(useIp, &parsed)) {
-    useIp = slotIsLight(slot) ? "192.168.10.153" : "192.168.10.152";
+    useIp = slotDefaultIp(slot);
     Serial.print("고정 주소가 없어 ");
     Serial.print(useIp);
     Serial.println(" 을 씁니다.");
@@ -323,7 +323,9 @@ static void banner() {
   Serial.print("맡은 일: ");
   Serial.println(job == "light" ? "울란지 조명" : "로닌 제어(블루투스)");
   Serial.println("핫스팟 Ronin-C3 192.168.4.1 웹소켓 82 · OTA http://ip/update");
-  Serial.println("같은 와이파이 기본 192.168.10.152:82. CAN 아님. 조명은 탈리와 별개.");
+  Serial.print("같은 와이파이 기본 ");
+  Serial.print(slotDefaultIp(slot));
+  Serial.println(":82. CAN 아님. 조명은 탈리와 별개.");
   if (job == "ronin" && roninBleName()[0]) {
     Serial.print("저장된 로닌 이름: ");
     Serial.println(roninBleName());
@@ -349,14 +351,24 @@ static void applyMode(const char* mode) {
   if (prefs.isKey("wifiSsid")) {
     String savedIp = prefs.getString("wifiIp", "");
     if (savedIp.isEmpty() || savedIp == "192.168.10.205") {
-      savedIp = slotIsLight(slot) ? "192.168.10.153" : "192.168.10.152";
+      savedIp = slotDefaultIp(slot);
+    }
+    // 슬롯 기본 IP가 바뀌었거나 다른 보드 IP를 물려받은 경우 교정
+    if (slot == BoardSlot::RmsidSc && (savedIp == "192.168.10.152" || savedIp == "192.168.10.153")) {
+      savedIp = slotDefaultIp(slot);
+    }
+    if (slot == BoardSlot::OledRs2 && (savedIp == "192.168.10.153" || savedIp == "192.168.10.154")) {
+      savedIp = slotDefaultIp(slot);
+    }
+    if (slot == BoardSlot::S3Light && (savedIp == "192.168.10.152" || savedIp == "192.168.10.154")) {
+      savedIp = slotDefaultIp(slot);
     }
     beginStation(prefs.getString("wifiSsid", ""), prefs.getString("wifiPass", ""), savedIp);
     return;
   }
 #if C3_HAS_WIFI
   Serial.println("저장된 설정이 없어 비밀 파일의 와이파이로 붙습니다. 비밀번호는 찍지 않습니다.");
-  beginStation(WIFI_SSID_1, WIFI_PASS, slotIsLight(slot) ? "192.168.10.153" : "192.168.10.152");
+  beginStation(WIFI_SSID_1, WIFI_PASS, slotDefaultIp(slot));
 #else
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));

@@ -50,6 +50,16 @@ inline BoardSlot slotFromText(const char* text, BoardSlot fallback = kDefaultSlo
 
 inline bool slotIsLight(BoardSlot s) { return s == BoardSlot::S3Light; }
 
+// OLED=.152, S3=.153, RMSID=.154 — 서로 겹치지 않게.
+inline const char* slotDefaultIp(BoardSlot s) {
+  switch (s) {
+    case BoardSlot::S3Light: return "192.168.10.153";
+    case BoardSlot::RmsidSc: return "192.168.10.154";
+    case BoardSlot::OledRs2: return "192.168.10.152";
+  }
+  return "192.168.10.152";
+}
+
 inline bool nameMatchesRs2(const char* lower) {
   if (lower == nullptr) return false;
   if (strstr(lower, "rs 2") || strstr(lower, "rs2")) return true;
