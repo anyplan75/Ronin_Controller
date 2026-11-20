@@ -582,7 +582,7 @@ enum C3Job: String, Codable, CaseIterable, Identifiable, Sendable {
     var title: String {
         switch self {
         case .ronin: return "로닌 제어"
-        case .light: return "조명 · 울란지 VL120BI"
+        case .light: return "조명 · 울란지 VL120BI/VL200BI"
         }
     }
 }

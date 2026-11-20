@@ -80,7 +80,7 @@ struct StudioControlScreen: View {
         .preferredColorScheme(.dark)
         .confirmationDialog("이 C3 의 일", isPresented: $askC3Job, titleVisibility: .visible) {
             Button("로닌 제어") { studio.registerC3(.ronin) }
-            Button("조명 · 울란지 VL120BI") { studio.registerC3(.light) }
+            Button("조명 · 울란지 VL120BI/VL200BI") { studio.registerC3(.light) }
             Button("취소", role: .cancel) {}
         } message: {
             Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
@@ -275,7 +275,7 @@ struct StudioControlScreen: View {
             }
             Section("C3") {
                 if studio.profile.c3Boards.isEmpty {
-                    Text("등록하면 로닌 또는 조명 중 하나만 맡습니다.")
+                    Text("한 C3 는 로닌 또는 조명 중 하나만 맡습니다. 조명은 카메라 탈리와 별개입니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -581,7 +581,10 @@ struct StudioControlScreen: View {
             } else {
                 let level = lightLevel[board.id] ?? 40
                 let kelvin = lightKelvin[board.id] ?? 4500
-                Text("울란지 VL120BI. 밝기와 색온도만 다룹니다.")
+                Text("울란지 VL120BI·VL200BI 조명입니다. 카메라 탈리(고프로 LED·액션 5 전면)와는 별개입니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("로닌용 C3 와 같은 기판이면 안 됩니다. 조명 전용 C3 가 필요합니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("밝기 \(Int(level))")
@@ -594,6 +597,9 @@ struct StudioControlScreen: View {
                     Button("끄기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: false) } }
                         .buttonStyle(DeskButtonStyle(tone: .stop))
                 }
+                Text("지금 C3 펌웨어는 울란지 블루투스가 없어, 켜기·끄기는 실패로 답합니다. 안내는 연결 준비용입니다.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -661,8 +667,8 @@ struct StudioControlScreen: View {
                     .buttonStyle(DeskButtonStyle(tone: .stop))
             }
             Text(osmo
-                 ? "액션 5 앞 화면에 글이나 탈리 불을 그리는 블루투스 명령은 없습니다. 빨간 테두리는 녹화가 실제로 시작될 때만 카메라가 켭니다."
-                 : "고프로 탈리는 LED 설정 91입니다. 상태 0이 오기 전에는 켜졌다고 하지 않습니다. 앞 화면 글자는 그리지 않습니다.")
+                 ? "액션 5 전면 탈리 명령은 없습니다. 앱도 전면 켜짐을 확인하지 못합니다. 빨간 테두리는 녹화가 시작될 때만 카메라가 켭니다. 울란지 조명과는 별개입니다."
+                 : "고프로 탈리는 LED 설정 91입니다. 기판이 상태 0으로 답하기 전에는 켜졌다고 하지 않습니다. 전면 화면 글자는 그리지 않고, 앱도 전면 표시를 보지 못합니다. 울란지 조명과는 별개입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

@@ -183,7 +183,7 @@ final class Studio: ObservableObject {
         let board = C3BoardRecord(
             id: UUID(),
             name: profile.lastC3Name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? (job == .ronin ? "C3 로닌" : "C3 울란지 VL120BI")
+                ? (job == .ronin ? "C3 로닌" : "C3 울란지 조명")
                 : profile.lastC3Name.trimmingCharacters(in: .whitespacesAndNewlines),
             job: job.rawValue,
             lanHost: profile.lastC3Host

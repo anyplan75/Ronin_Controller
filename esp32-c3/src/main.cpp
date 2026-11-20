@@ -420,7 +420,7 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       reply(num, false, "이 C3 는 조명이 아닙니다. 명령을 수행하지 않았습니다.");
       return;
     }
-    reply(num, false, "울란지 통신 절차가 없습니다. 밝기와 색온도를 보내지 않았습니다.");
+    reply(num, false, "울란지 VL120BI·VL200BI 블루투스 절차가 아직 없습니다. 밝기와 색온도를 보내지 않았습니다. 카메라 탈리와는 별개입니다.");
     return;
   }
   reply(num, false, "이 기판이 받지 않는 명령입니다.");
