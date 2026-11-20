@@ -61,17 +61,20 @@ static bool looksLikeRonin(NimBLEAdvertisedDevice& device) {
   char lower[64];
   lowerCopy(lower, sizeof(lower), name.c_str());
   if (isActionCamName(lower)) return false;
-  // 우리 기판 핫스팟 이름은 짐벌이 아닙니다.
-  if (textHas(lower, "ronin-olimex") || textHas(lower, "ronin-c3")) return false;
-  if (textHas(lower, "ronin") || textHas(lower, "ronin-sc") || textHas(lower, "ronin sc") ||
-      textHas(lower, "dji rs") || textHas(lower, "rs 2") || textHas(lower, "rs2") ||
-      textHas(lower, "rsc") || textHas(lower, "rsc2") || textHas(lower, "rsc 2") ||
-      textHas(lower, "rs 3") || textHas(lower, "rs3") || textHas(lower, "rs 4") || textHas(lower, "rs4")) {
+  // 우리 기판 핫스팟·광고 이름은 짐벌이 아닙니다(Ronin-S3 를 SC 로 오인하지 않음).
+  if (isOurBoardBleName(lower)) return false;
+  if (textHas(lower, "ronin") || textHas(lower, "ronin-sc") || textHas(lower, "ronin_sc") ||
+      textHas(lower, "ronin sc") || textHas(lower, "dji rs") || textHas(lower, "rs 2") ||
+      textHas(lower, "rs2") || textHas(lower, "rsc") || textHas(lower, "rsc2") ||
+      textHas(lower, "rsc 2") || textHas(lower, "rs 3") || textHas(lower, "rs3") ||
+      textHas(lower, "rs 4") || textHas(lower, "rs4")) {
     return true;
   }
   const bool fff0 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xFFF0));
-  if (fff0 && name.size() > 0) {
-    if (textHas(lower, "dji") || hasDjiManufacturer(device)) return true;
+  // 이름이 비어 있어도 FFF0+DJI 면 짐벌 후보(SC 약전계에서 이름 누락 대비).
+  if (fff0 && (hasDjiManufacturer(device) || textHas(lower, "dji") || name.empty())) {
+    if (name.empty() && !hasDjiManufacturer(device) && targetFilter != RoninTarget::ScOnly) return false;
+    return true;
   }
   return false;
 }
@@ -118,10 +121,23 @@ void roninBleBegin() {
   }
 }
 
+static uint32_t nextAutoPairMs = 0;
+
 void roninBleLoop() {
   if (client != nullptr && linked && !client->isConnected()) {
     Serial.println("로닌 블루투스가 끊겼습니다.");
     clearLink(true);
+    nextAutoPairMs = millis() + 2000;
+  }
+  // OTA·재부팅 뒤 저장 이름으로 다시 붙습니다. 앱이 「지금 연결」을 다시 누르지 않아도 됩니다.
+  if (!busy && !roninBleLinked() && linkedName[0] && millis() >= nextAutoPairMs) {
+    nextAutoPairMs = millis() + 15000;
+    char reason[160];
+    if (roninBlePair(linkedName, linkedId, reason, sizeof(reason))) {
+      Serial.println(reason);
+    } else {
+      Serial.println(reason);
+    }
   }
 }
 
@@ -145,16 +161,25 @@ size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
   scan->setInterval(100);
   scan->setWindow(90);
   scan->setDuplicateFilter(true);
-  NimBLEScanResults results = scan->start(4, false);
+  // SC 광고가 약할 때 4초면 놓칩니다. 중복 필터를 끄고 10초로 잡습니다.
+  scan->setDuplicateFilter(false);
+  NimBLEScanResults results = scan->start(10, false);
   foundCount = 0;
   for (int i = 0; i < results.getCount() && foundCount < kMaxFound; i++) {
     NimBLEAdvertisedDevice device = results.getDevice(i);
     if (!looksLikeRonin(device)) continue;
     std::string name = device.getName();
-    if (name.empty()) continue;
+    if (name.empty()) {
+      name = std::string("DJI-FFF0-") + device.getAddress().toString();
+    }
     char lower[64];
     lowerCopy(lower, sizeof(lower), name.c_str());
-    if (!passesTarget(lower)) continue;
+    // 이름 없는 FFF0 후보는 SC 전용 보드에서만 통과시킵니다.
+    if (textHas(lower, "dji-fff0-")) {
+      if (targetFilter != RoninTarget::ScOnly && targetFilter != RoninTarget::Any) continue;
+    } else if (!passesTarget(lower)) {
+      continue;
+    }
     RoninFound row = {};
     strncpy(row.name, name.c_str(), sizeof(row.name) - 1);
     strncpy(row.id, device.getAddress().toString().c_str(), sizeof(row.id) - 1);
@@ -268,14 +293,26 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
       }
     }
   }
-  if (hit == nullptr) {
+
+  // 스캔에 없어도 저장·요청 MAC 으로 바로 붙습니다(광고 sleep 대비).
+  char connectId[24] = {};
+  uint8_t connectType = BLE_ADDR_PUBLIC;
+  char connectName[40] = {};
+  if (hit != nullptr) {
+    strncpy(connectId, hit->id, sizeof(connectId) - 1);
+    connectType = hit->addrType;
+    strncpy(connectName, hit->name, sizeof(connectName) - 1);
+  } else if (wantId[0]) {
+    strncpy(connectId, wantId, sizeof(connectId) - 1);
+    strncpy(connectName, wantName[0] ? wantName : wantId, sizeof(connectName) - 1);
+  } else {
     busy = false;
     resumeProvision();
     snprintf(reason, reasonCap, "주변에서 그 로닌 이름을 찾지 못했습니다. 먼저 스캔하세요.");
     return false;
   }
 
-  NimBLEAddress address(std::string(hit->id), hit->addrType);
+  NimBLEAddress address(std::string(connectId), connectType);
   NimBLEClient* next = NimBLEDevice::createClient();
   if (next == nullptr) {
     busy = false;
@@ -285,11 +322,23 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
   }
   next->setConnectTimeout(8);
   if (!next->connect(address)) {
-    NimBLEDevice::deleteClient(next);
-    busy = false;
-    resumeProvision();
-    snprintf(reason, reasonCap, "로닌 블루투스에 붙지 못했습니다. 짐벌 화면에서 블루투스를 켠 뒤 다시 누르세요.");
-    return false;
+    // public 실패 시 random 주소로 한 번 더(SC 일부).
+    if (hit == nullptr) {
+      NimBLEAddress alt(std::string(connectId), BLE_ADDR_RANDOM);
+      if (!next->connect(alt)) {
+        NimBLEDevice::deleteClient(next);
+        busy = false;
+        resumeProvision();
+        snprintf(reason, reasonCap, "로닌 블루투스에 붙지 못했습니다. 짐벌 화면에서 블루투스를 켠 뒤 다시 누르세요.");
+        return false;
+      }
+    } else {
+      NimBLEDevice::deleteClient(next);
+      busy = false;
+      resumeProvision();
+      snprintf(reason, reasonCap, "로닌 블루투스에 붙지 못했습니다. 짐벌 화면에서 블루투스를 켠 뒤 다시 누르세요.");
+      return false;
+    }
   }
   if (!openServices(next, reason, reasonCap)) {
     next->disconnect();
@@ -300,8 +349,8 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
   }
   client = next;
   linked = true;
-  strncpy(linkedName, hit->name, sizeof(linkedName) - 1);
-  strncpy(linkedId, hit->id, sizeof(linkedId) - 1);
+  strncpy(linkedName, connectName, sizeof(linkedName) - 1);
+  strncpy(linkedId, connectId, sizeof(linkedId) - 1);
   store.begin("ronin-c3", false);
   store.putString("gimbalName", linkedName);
   store.putString("gimbalId", linkedId);

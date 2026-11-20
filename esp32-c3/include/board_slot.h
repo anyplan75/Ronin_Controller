@@ -7,7 +7,7 @@
 // s3    = 울란지 VL200BI 두 대(조명)
 
 #ifndef FW_VERSION
-#define FW_VERSION "1.0.49"
+#define FW_VERSION "1.0.51"
 #endif
 
 enum class BoardSlot : uint8_t { OledRs2 = 0, RmsidSc = 1, S3Light = 2 };
@@ -70,21 +70,28 @@ inline const char* slotDefaultIp(BoardSlot s) {
   return "192.168.10.152";
 }
 
-inline bool nameMatchesRs2(const char* lower) {
+/// 우리 기판 핫스팟·광고 이름. 짐벌 스캔에 넣지 않습니다.
+inline bool isOurBoardBleName(const char* lower) {
   if (lower == nullptr) return false;
+  return strstr(lower, "ronin-oled") || strstr(lower, "ronin-rmsid") || strstr(lower, "ronin-s3") ||
+         strstr(lower, "ronin-olimex") || strstr(lower, "ronin-c3");
+}
+
+inline bool nameMatchesRs2(const char* lower) {
+  if (lower == nullptr || isOurBoardBleName(lower)) return false;
   if (strstr(lower, "rs 2") || strstr(lower, "rs2")) return true;
   if (strstr(lower, "dji rs") && strstr(lower, "2")) return true;
   return false;
 }
 
 inline bool nameMatchesSc(const char* lower) {
-  if (lower == nullptr) return false;
-  if (strstr(lower, "ronin-sc") || strstr(lower, "ronin sc")) return true;
+  if (lower == nullptr || isOurBoardBleName(lower)) return false;
+  // 실기 광고: RONIN_SC-… (밑줄) · Ronin-SC · RSC
+  if (strstr(lower, "ronin-sc") || strstr(lower, "ronin_sc") || strstr(lower, "ronin sc")) return true;
   if (strstr(lower, "rsc")) return true;
   // 이름에 ronin 이 있고 RS 계열이 아니면 SC 후보로 봅니다.
   if (strstr(lower, "ronin") && !nameMatchesRs2(lower) && !strstr(lower, "rs 3") &&
-      !strstr(lower, "rs3") && !strstr(lower, "rs 4") && !strstr(lower, "rs4") &&
-      !strstr(lower, "ronin-olimex") && !strstr(lower, "ronin-c3")) {
+      !strstr(lower, "rs3") && !strstr(lower, "rs 4") && !strstr(lower, "rs4")) {
     return true;
   }
   return false;

@@ -975,7 +975,7 @@ struct StudioControlScreen: View {
             while let next = roninPending {
                 roninPending = nil
                 await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true, home: sendHome && next.0 == 0 && next.1 == 0, boardId: boardId)
-                try? await Task.sleep(nanoseconds: 220_000_000)
+                try? await Task.sleep(nanoseconds: 80_000_000)
             }
             roninTask = nil
             if let pending = roninPending {

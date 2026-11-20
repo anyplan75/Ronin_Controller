@@ -604,6 +604,8 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         }
         if let ack = object["ack"] as? Bool {
             let reason = (object["reason"] as? String) ?? (ack ? "응답을 받았습니다." : "기판이 실패라고 답했습니다.")
+            // 연결 hello 의 ack:false 는 대기 중인 명령 응답이 아닙니다. 가로채면 팬·틸트가 조용히 실패합니다.
+            if reason.contains("연결만") { return }
             finish(ack: ack, reason: reason)
         }
     }

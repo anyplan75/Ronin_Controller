@@ -917,7 +917,8 @@ final class Studio: ObservableObject {
         }
         var payload: [String: Any] = ["op": "ronin", "yaw": yaw, "pitch": pitch]
         if home { payload["home"] = true }
-        let result = await c3Socket.command(payload, timeout: home ? 6 : 3)
+        // 연속 팬·틸트는 짧은 대기. hello ack 가로채기 수정 후 실응답은 보통 수십 ms 입니다.
+        let result = await c3Socket.command(payload, timeout: home ? 6 : (quiet ? 1.2 : 3))
         if result.ack, !c3Socket.pairedName.isEmpty {
             rememberGimbalName(board.id, c3Socket.pairedName)
         }
@@ -928,8 +929,12 @@ final class Studio: ObservableObject {
             } else {
                 note("\(board.listTitle) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
             }
-        } else if !quiet {
-            note(result.sent ? result.reason : "\(board.listTitle) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
+        } else {
+            // quiet 여도 「붙은 로닌 없음」은 무조건 알립니다. 조용한 실패가 무반응처럼 보였습니다.
+            let hard = result.reason.contains("붙은 로닌") || result.reason.contains("붙지 못") || !result.sent
+            if !quiet || hard {
+                note(result.sent ? result.reason : "\(board.listTitle) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
+            }
         }
     }
 

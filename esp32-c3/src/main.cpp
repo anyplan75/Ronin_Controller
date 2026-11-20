@@ -390,7 +390,11 @@ static void applyMode(const char* mode) {
 static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
   if (type == WStype_CONNECTED) {
     clientUp = true;
-    reply(num, false, "연결만 되었습니다. 아직 명령을 수행하지 않았습니다.");
+    // hello 에 ack 를 넣지 않습니다. ack:false 가 앱의 대기 중인 명령을 가로채 무반응처럼 보였습니다.
+    JsonDocument hello;
+    hello["hello"] = true;
+    hello["reason"] = "연결만 되었습니다. 아직 명령을 수행하지 않았습니다.";
+    replyDoc(num, hello);
     return;
   }
   if (type == WStype_DISCONNECTED) {
