@@ -205,6 +205,43 @@ void ulanziBleFillList(JsonDocument& doc) {
   }
 }
 
+void ulanziBleFillSaved(JsonDocument& doc) {
+  JsonArray list = doc["savedLightsList"].to<JsonArray>();
+  for (uint8_t i = 0; i < savedCount; i++) {
+    if (!savedNames[i][0]) continue;
+    JsonObject row = list.add<JsonObject>();
+    row["index"] = i;
+    row["id"] = savedIds[i];
+    row["name"] = savedNames[i];
+  }
+  doc["savedLights"] = savedCount;
+}
+
+const char* ulanziBleSavedName(uint8_t index) {
+  if (index >= savedCount) return "";
+  return savedNames[index];
+}
+
+const char* ulanziBleSavedId(uint8_t index) {
+  if (index >= savedCount) return "";
+  return savedIds[index];
+}
+
+bool ulanziBleApplyIndex(uint8_t index, int brightness, int kelvin, bool on, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (index >= savedCount || !savedNames[index][0]) {
+    snprintf(reason, reasonCap, "울란지 칸 %u 가 비어 있습니다. 먼저 스캔·붙이기를 하세요.", (unsigned)index);
+    return false;
+  }
+  char pairReason[160];
+  if (!ulanziBlePair(savedNames[index], savedIds[index], pairReason, sizeof(pairReason))) {
+    snprintf(reason, reasonCap, "%s", pairReason);
+    return false;
+  }
+  return ulanziBleApply(brightness, kelvin, on, reason, reasonCap);
+}
+
 static bool openServices(NimBLEClient* next, char* reason, size_t reasonCap) {
   NimBLERemoteService* service = next->getService(NimBLEUUID((uint16_t)0xFFF0));
   if (service == nullptr) {

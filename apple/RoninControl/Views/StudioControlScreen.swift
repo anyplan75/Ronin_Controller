@@ -11,8 +11,10 @@ struct StudioControlScreen: View {
     @State private var fov = "와이드"
     @State private var yaw = 0.0
     @State private var pitch = 0.0
-    @State private var lightLevel: [UUID: Double] = [:]
-    @State private var lightKelvin: [UUID: Double] = [:]
+    /// 키: "보드UUID-칸index" — 울란지마다 밝기·색온도를 따로 둡니다.
+    @State private var lightLevel: [String: Double] = [:]
+    @State private var lightKelvin: [String: Double] = [:]
+    @State private var lightOnByKey: [String: Bool] = [:]
     /// 카메라 자리입니다. x는 좌우 미터, y는 무대에서 객석 쪽 깊이 미터입니다.
     @State private var cameraMeters: [String: CGPoint] = [:]
     @State private var showJoin = false
@@ -43,6 +45,8 @@ struct StudioControlScreen: View {
     @State private var venueNameDraft = ""
     @State private var askVenueRename: UUID?
     @State private var venueRenameDraft = ""
+    @State private var lightSendTask: [String: Task<Void, Never>] = [:]
+    @State private var didLaunchBoards = false
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -105,6 +109,16 @@ struct StudioControlScreen: View {
         .onChange(of: c3Link.lastSlot) { _, slot in
             guard !slot.isEmpty else { return }
             studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: "")
+        }
+        .task {
+            guard !didLaunchBoards else { return }
+            didLaunchBoards = true
+            await studio.ensureBoardRolesOnLaunch()
+        }
+        .onChange(of: pick) { _, next in
+            if case .c3(let id) = next {
+                studio.reconnectC3(id)
+            }
         }
         .sheet(isPresented: $showPtz) {
             ptzSheet
@@ -542,9 +556,8 @@ struct StudioControlScreen: View {
                     Task { await studio.scanRoninGimbals(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle(expand: true))
-                .disabled(c3Link.boardId != board.id || c3Link.state != .online)
                 if c3Link.gimbals.isEmpty {
-                    Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 짐벌 블루투스를 켠 뒤 누르세요. 올리멕스에 붙은 것처럼 보여도 조종은 여기 C3만입니다.")
+                    Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 오프라인이면 붙인 뒤 바로 스캔합니다. 조종은 이 보드만입니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -560,7 +573,6 @@ struct StudioControlScreen: View {
                         Task { await studio.pairRoninGimbal(name: board.gimbalName, boardId: board.id) }
                     }
                     .buttonStyle(DeskButtonStyle(expand: true))
-                    .disabled(c3Link.boardId != board.id || c3Link.state != .online)
                 }
                 Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 그 방향의 한계로 가고, 제자리는 기본 시선으로 돌아옵니다.")
                     .font(.caption)
@@ -595,25 +607,18 @@ struct StudioControlScreen: View {
                 }
                 .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             } else {
-                let level = lightLevel[board.id] ?? 40
-                let kelvin = lightKelvin[board.id] ?? 4500
-                Text("울란지 VL120BI·VL200BI 조명입니다. 카메라 탈리(고프로 LED·액션 5 전면)와는 별개입니다.")
+                Text("울란지 VL120BI·VL200BI 입니다. 대마다 밝기·색온도·켜기/끄기를 따로 보냅니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("S3 슬롯 전용입니다. OLED·RMSID C3 와 같은 기판이면 안 됩니다.")
+                Text("S3 슬롯 전용입니다. OLED·RMSID 와 같은 기판이면 안 됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(board.gimbalName.isEmpty
-                     ? (c3Link.pairedName.isEmpty ? "아직 붙인 울란지 이름이 없습니다." : "붙음 \(c3Link.pairedName)")
-                     : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
-                    .font(.caption.weight(.semibold))
                 Button("울란지 블루투스 스캔") {
                     Task { await studio.scanUlanziLights(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle(expand: true))
-                .disabled(c3Link.boardId != board.id || c3Link.state != .online)
                 if c3Link.gimbals.isEmpty {
-                    Text("스캔하면 주변 울란지 이름이 여기에 나옵니다. 조명을 켠 뒤 누르세요. 폰·맥 울란지 앱이 붙어 있으면 끊으세요.")
+                    Text("스캔하면 주변 이름이 나옵니다. 붙이면 아래 칸에 저장됩니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -621,27 +626,76 @@ struct StudioControlScreen: View {
                         Button("붙이기 · \(light.name)") {
                             Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
                         }
-                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == light.name || c3Link.pairedName == light.name, expand: true))
+                        .buttonStyle(DeskButtonStyle(selected: c3Link.savedLights.contains(where: { $0.name == light.name }), expand: true))
                     }
                 }
-                if !board.gimbalName.isEmpty {
-                    Button("저장 이름으로 다시 붙이기") {
-                        Task { await studio.pairUlanziLight(board.id, name: board.gimbalName) }
+                if c3Link.savedLights.isEmpty {
+                    Text("저장된 울란지가 없습니다. 스캔 후 붙이거나 보드가 예전에 저장한 2대를 기다리세요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(c3Link.savedLights) { light in
+                    let key = lightKey(board.id, light.index)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("칸 \(light.index) · \(light.name)")
+                            .font(.caption.weight(.semibold))
+                        Text("밝기 \(Int(lightLevel[key] ?? 40))")
+                        Slider(value: Binding(
+                            get: { lightLevel[key] ?? 40 },
+                            set: { lightLevel[key] = $0; queueLight(board.id, index: light.index) }
+                        ), in: 0...100, step: 1)
+                        Text("색온도 \(Int(lightKelvin[key] ?? 4500))K")
+                        Slider(value: Binding(
+                            get: { lightKelvin[key] ?? 4500 },
+                            set: { lightKelvin[key] = $0; queueLight(board.id, index: light.index) }
+                        ), in: 2700...6500, step: 100)
+                        HStack {
+                            Button("켜기") {
+                                lightOnByKey[key] = true
+                                Task {
+                                    await studio.setLight(
+                                        board.id,
+                                        index: light.index,
+                                        brightness: Int(lightLevel[key] ?? 40),
+                                        kelvin: Int(lightKelvin[key] ?? 4500),
+                                        on: true
+                                    )
+                                }
+                            }
+                            .buttonStyle(DeskButtonStyle(tone: .record))
+                            Button("끄기") {
+                                lightOnByKey[key] = false
+                                Task {
+                                    await studio.setLight(
+                                        board.id,
+                                        index: light.index,
+                                        brightness: Int(lightLevel[key] ?? 40),
+                                        kelvin: Int(lightKelvin[key] ?? 4500),
+                                        on: false
+                                    )
+                                }
+                            }
+                            .buttonStyle(DeskButtonStyle(tone: .stop))
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                if c3Link.savedLights.count > 1 {
+                    Button("모두 같은 값으로 (묶음)") {
+                        let first = c3Link.savedLights[0]
+                        let key = lightKey(board.id, first.index)
+                        Task {
+                            await studio.setAllLights(
+                                board.id,
+                                brightness: Int(lightLevel[key] ?? 40),
+                                kelvin: Int(lightKelvin[key] ?? 4500),
+                                on: lightOnByKey[key] ?? true
+                            )
+                        }
                     }
                     .buttonStyle(DeskButtonStyle(expand: true))
-                    .disabled(c3Link.boardId != board.id || c3Link.state != .online)
                 }
-                Text("밝기 \(Int(level))")
-                Slider(value: Binding(get: { lightLevel[board.id] ?? 40 }, set: { lightLevel[board.id] = $0 }), in: 0...100, step: 1)
-                Text("색온도 \(Int(kelvin))K")
-                Slider(value: Binding(get: { lightKelvin[board.id] ?? 4500 }, set: { lightKelvin[board.id] = $0 }), in: 2700...6500, step: 100)
-                HStack {
-                    Button("켜기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: true) } }
-                        .buttonStyle(DeskButtonStyle(tone: .record))
-                    Button("끄기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: false) } }
-                        .buttonStyle(DeskButtonStyle(tone: .stop))
-                }
-                Text("켜기·끄기 성공은 C3 가 ack true 로 답할 때만입니다.")
+                Text("칸마다 즉시 나갑니다. ack true 일 때만 성공입니다.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -890,6 +944,14 @@ struct StudioControlScreen: View {
         }
     }
 
+    private var selectedRoninId: UUID? {
+        if case .c3(let id) = pick,
+           let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+            return board.id
+        }
+        return studio.roninC3?.id
+    }
+
     private func steerRonin(pan: Double, tilt: Double, absolute: Bool = false) {
         if absolute {
             yaw = pan
@@ -907,17 +969,36 @@ struct StudioControlScreen: View {
     private func queueRonin(yaw: Double, pitch: Double, home: Bool = false) {
         roninPending = (yaw, pitch)
         let sendHome = home
+        let boardId = selectedRoninId
         guard roninTask == nil else { return }
         roninTask = Task {
             while let next = roninPending {
                 roninPending = nil
-                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true, home: sendHome && next.0 == 0 && next.1 == 0)
+                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true, home: sendHome && next.0 == 0 && next.1 == 0, boardId: boardId)
                 try? await Task.sleep(nanoseconds: 220_000_000)
             }
             roninTask = nil
             if let pending = roninPending {
                 queueRonin(yaw: pending.0, pitch: pending.1)
             }
+        }
+    }
+
+    private func lightKey(_ boardId: UUID, _ index: Int) -> String {
+        "\(boardId.uuidString)-\(index)"
+    }
+
+    /// 칸별 슬라이더: 디바운스 후 그 울란지 한 대만 S3로 보냅니다.
+    private func queueLight(_ boardId: UUID, index: Int) {
+        let key = lightKey(boardId, index)
+        lightSendTask[key]?.cancel()
+        lightSendTask[key] = Task {
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            let brightness = Int(lightLevel[key] ?? 40)
+            let kelvin = Int(lightKelvin[key] ?? 4500)
+            let on = lightOnByKey[key] ?? true
+            await studio.setLight(boardId, index: index, brightness: brightness, kelvin: kelvin, on: on, quiet: true)
         }
     }
 

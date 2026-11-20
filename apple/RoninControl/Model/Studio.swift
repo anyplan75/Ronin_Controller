@@ -198,7 +198,7 @@ final class Studio: ObservableObject {
     }
 
     /// OLED→RS2, RMSID→SC, S3→울란지 자리를 맞추고, 구 C3 중복을 뺍니다.
-    func syncBoardRoles() {
+    func syncBoardRoles(quiet: Bool = false) {
         var keep: [UUID] = []
         for slot in C3Slot.allCases {
             keep.append(upsertKnownSlot(slot))
@@ -216,11 +216,30 @@ final class Studio: ObservableObject {
             return false
         }
         sortBoardRoles()
+        guard !quiet else { return }
         let dropped = before - profile.c3Boards.count
         if dropped > 0 {
             note("보드 자리: OLED·RS2, RMSID·SC, S3·울란지. 중복 \(dropped)개를 뺐습니다.")
         } else {
             note("보드 자리: OLED·RS2, RMSID·SC, S3·울란지.")
+        }
+    }
+
+    /// 앱을 열면 알려진 세 자리를 목록에 두고, 살아 있는 호스트는 WS hello 로 맞춥니다.
+    func ensureBoardRolesOnLaunch() async {
+        syncBoardRoles(quiet: true)
+        var live: [String] = []
+        for slot in C3Slot.allCases {
+            if let hello = await BoardHello.probe(host: slot.defaultHost) {
+                applyBoardHello(boardId: nil, slot: hello.slot, wifi: hello.wifiMac, host: hello.host.isEmpty ? slot.defaultHost : hello.host)
+                live.append("\(slot.boardTitle) \(hello.host.isEmpty ? slot.defaultHost : hello.host)")
+            }
+        }
+        sortBoardRoles()
+        if live.isEmpty {
+            note("보드 자리 3대를 목록에 두었습니다. 망에서 응답한 보드는 아직 없습니다.")
+        } else {
+            note("망에서 응답: \(live.joined(separator: ", ")). 목록에 OLED·RMSID·S3 자리를 맞췄습니다.")
         }
     }
 
@@ -366,8 +385,10 @@ final class Studio: ObservableObject {
         case .c3:
             profile.lastC3Host = host
             if !cleanName.isEmpty { profile.lastC3Name = cleanName }
-            let slot = C3Slot.from(mac: radios.wifi)
+            let slot = radios.resolvedSlot
+                ?? C3Slot.from(mac: radios.wifi)
                 ?? C3Slot.from(host: host)
+                ?? C3Slot.from(bleName: cleanName)
                 ?? (cleanName.lowercased().contains("light") || cleanName.lowercased().contains("ulanzi") ? .s3 : nil)
             if let slot {
                 let id = upsertKnownSlot(slot)
@@ -872,19 +893,26 @@ final class Studio: ObservableObject {
         await refresh()
     }
 
-    /// 화면의 팬·틸트입니다. 로닌 제어 C3 가 블루투스로 짐벌에 보냅니다. CAN 이 아닙니다.
-    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false, home: Bool = false) async {
-        guard let board = roninC3 else {
-            noteOffline("짐벌은 로닌 제어로 고른 C3 가 블루투스로 움직입니다. 그 C3 를 먼저 등록하세요.")
+    /// 고른 로닌 보드(없으면 OLED→RMSID 순). 팬·틸트는 이 보드 WS로만 나갑니다.
+    func roninBoard(_ boardId: UUID? = nil) -> C3BoardRecord? {
+        if let boardId, let board = profile.c3Boards.first(where: { $0.id == boardId && $0.duty == .ronin }) {
+            return board
+        }
+        return roninC3
+    }
+
+    /// 화면의 팬·틸트입니다. 오프라인이면 붙인 뒤 바로 명령을 보냅니다. 「지금 연결」을 다시 누르지 않습니다.
+    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false, home: Bool = false, boardId: UUID? = nil) async {
+        guard let board = roninBoard(boardId) else {
+            noteOffline("짐벌은 로닌용 OLED/RMSID C3 가 블루투스로 움직입니다. 보드 자리를 먼저 맞추세요.")
             return
         }
         guard board.link.shoots else {
-            noteOffline("\(board.name) 은 USB 점검입니다. 팬과 틸트를 보내지 않았습니다.")
+            noteOffline("\(board.listTitle) 은 USB 점검입니다. 팬과 틸트를 보내지 않았습니다.")
             return
         }
-        if c3Socket.boardId != board.id || c3Socket.state != .online {
-            c3Socket.connect(board)
-            if !quiet { note("\(board.name) 에 붙는 중입니다. 붙기 전에는 팬과 틸트를 보내지 않습니다.") }
+        if !(await c3Socket.ensureOnline(board)) {
+            if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
         var payload: [String: Any] = ["op": "ronin", "yaw": yaw, "pitch": pitch]
@@ -896,25 +924,23 @@ final class Studio: ObservableObject {
         if quiet && result.ack { return }
         if result.ack {
             if home {
-                note("\(board.name) 이 로닌 제자리를 블루투스로 보냈다고 답했습니다.")
+                note("\(board.listTitle) 이 로닌 제자리를 블루투스로 보냈다고 답했습니다.")
             } else {
-                note("\(board.name) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
+                note("\(board.listTitle) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
             }
         } else if !quiet {
-            note(result.sent ? result.reason : "\(board.name) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
+            note(result.sent ? result.reason : "\(board.listTitle) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
         }
     }
 
     /// C3 가 주변 로닌 블루투스 이름을 읽습니다.
     func scanRoninGimbals(_ boardId: UUID? = nil) async {
-        let board = boardId.flatMap { id in profile.c3Boards.first { $0.id == id && $0.duty == .ronin } } ?? roninC3
-        guard let board else {
+        guard let board = roninBoard(boardId) else {
             noteOffline("로닌용 OLED/RMSID C3 를 먼저 등록하세요.")
             return
         }
-        if c3Socket.boardId != board.id || c3Socket.state != .online {
-            c3Socket.connect(board)
-            note("\(board.listTitle) 에 붙는 중입니다. 붙은 뒤 다시 스캔하세요.")
+        if !(await c3Socket.ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
         let result = await c3Socket.command(["op": "scan"], timeout: 10)
@@ -923,14 +949,12 @@ final class Studio: ObservableObject {
 
     /// 고른 로닌 이름으로 C3 블루투스를 붙입니다.
     func pairRoninGimbal(name: String, id: String = "", boardId: UUID? = nil) async {
-        let board = boardId.flatMap { bid in profile.c3Boards.first { $0.id == bid && $0.duty == .ronin } } ?? roninC3
-        guard let board else {
+        guard let board = roninBoard(boardId) else {
             noteOffline("로닌용 OLED/RMSID C3 를 먼저 등록하세요.")
             return
         }
-        if c3Socket.boardId != board.id || c3Socket.state != .online {
-            c3Socket.connect(board)
-            note("\(board.listTitle) 에 붙는 중입니다. 붙은 뒤 다시 누르세요.")
+        if !(await c3Socket.ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
         var payload: [String: Any] = ["op": "pair", "name": name]
@@ -1074,12 +1098,11 @@ final class Studio: ObservableObject {
     /// 조명 C3 가 주변 울란지 이름을 읽습니다.
     func scanUlanziLights(_ id: UUID) async {
         guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
-            note("조명 담당 C3 를 찾지 못했습니다.")
+            note("조명 담당 S3 를 찾지 못했습니다.")
             return
         }
-        if c3Socket.boardId != board.id || c3Socket.state != .online {
-            c3Socket.connect(board)
-            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 스캔하세요.")
+        if !(await c3Socket.ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
         let result = await c3Socket.command(["op": "light", "action": "scan"], timeout: 12)
@@ -1089,12 +1112,11 @@ final class Studio: ObservableObject {
     /// 고른 울란지 이름으로 C3 블루투스를 붙입니다.
     func pairUlanziLight(_ id: UUID, name: String, id lightId: String = "") async {
         guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
-            note("조명 담당 C3 를 찾지 못했습니다.")
+            note("조명 담당 S3 를 찾지 못했습니다.")
             return
         }
-        if c3Socket.boardId != board.id || c3Socket.state != .online {
-            c3Socket.connect(board)
-            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 누르세요.")
+        if !(await c3Socket.ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
         var payload: [String: Any] = ["op": "light", "action": "pair", "name": name]
@@ -1106,34 +1128,55 @@ final class Studio: ObservableObject {
         note(result.sent ? result.reason : "울란지 붙이기를 보내지 못했습니다. \(result.reason)")
     }
 
-    /// 조명 C3 만 받는 명령입니다. 연결이 없으면 보내지 않고, 연결됨으로 바꾸지 않습니다.
-    func setLight(_ id: UUID, brightness: Int, kelvin: Int, on: Bool) async {
+    /// 울란지 한 대(칸 index). 묶음이 아닙니다. 오프라인이면 붙인 뒤 바로 보냅니다.
+    func setLight(_ id: UUID, index: Int, brightness: Int, kelvin: Int, on: Bool, quiet: Bool = false) async {
         guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
-            note("조명 담당 C3 를 찾지 못했습니다.")
+            if !quiet { note("조명 담당 S3 를 찾지 못했습니다.") }
             return
         }
         guard board.link.shoots else {
-            note("\(board.name) 은 USB 점검입니다. 조명을 보내지 않았습니다.")
+            if !quiet { note("\(board.listTitle) 은 USB 점검입니다. 조명을 보내지 않았습니다.") }
             return
         }
-        if c3Socket.boardId != board.id || c3Socket.state != .online {
-            c3Socket.connect(board)
-            note("\(board.name) 에 붙는 중입니다. 붙기 전에는 조명을 보내지 않습니다.")
+        if !(await c3Socket.ensureOnline(board)) {
+            if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
         let result = await c3Socket.command([
             "op": "light",
+            "index": index,
             "brightness": brightness,
             "kelvin": kelvin,
             "on": on,
-        ], timeout: 12)
+        ], timeout: 14)
+        if quiet && result.ack { return }
         if result.ack {
             note(result.reason.isEmpty
-                 ? "\(board.name) 이 밝기 \(brightness), 색온도 \(kelvin)K 를 받았다고 답했습니다."
+                 ? "\(board.listTitle) 칸\(index) 밝기 \(brightness), \(kelvin)K 를 받았다고 답했습니다."
                  : result.reason)
-        } else {
+        } else if !quiet {
             note(result.reason)
         }
+    }
+
+    /// 저장된 울란지 모두(선택). 개별 UI가 기본이고, 이 버튼만 묶음입니다.
+    func setAllLights(_ id: UUID, brightness: Int, kelvin: Int, on: Bool) async {
+        guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
+            note("조명 담당 S3 를 찾지 못했습니다.")
+            return
+        }
+        if !(await c3Socket.ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
+            return
+        }
+        let result = await c3Socket.command([
+            "op": "light",
+            "action": "all",
+            "brightness": brightness,
+            "kelvin": kelvin,
+            "on": on,
+        ], timeout: 18)
+        note(result.sent ? result.reason : "묶음 조명을 보내지 못했습니다. \(result.reason)")
     }
 
     func sendCameraSetting(id: String, name: String, kind: String, ble: String, setting: String, value: String) async {

@@ -23,6 +23,12 @@ size_t ulanziBleScan(UlanziFound* out, size_t cap, bool manageBusy = true);
 bool ulanziBlePair(const char* name, const char* id, char* reason, size_t reasonCap);
 bool ulanziBleAutoPair(char* reason, size_t reasonCap);  // 최대 2대 저장·첫 대 연결
 bool ulanziBleApply(int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
+/// 저장 칸(0·1) 한 대만. 묶음이 아닙니다.
+bool ulanziBleApplyIndex(uint8_t index, int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
 bool ulanziBleApplyAll(int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
 void ulanziBleFillList(JsonDocument& doc);
+/// 저장된 울란지 2칸을 hello·응답에 넣습니다. 앱 개별 UI용입니다.
+void ulanziBleFillSaved(JsonDocument& doc);
 uint8_t ulanziBleSavedCount();
+const char* ulanziBleSavedName(uint8_t index);
+const char* ulanziBleSavedId(uint8_t index);

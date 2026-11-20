@@ -7,6 +7,8 @@ struct SeenBoard: Identifiable {
     var name: String
     var kind: Kind
     var peripheral: CBPeripheral
+    /// MAC·슬롯을 읽기 전에도 광고 이름으로 추정합니다.
+    var hintSlot: C3Slot?
 
     enum Kind {
         case olimex
@@ -26,6 +28,26 @@ struct SeenBoard: Identifiable {
             }
         }
     }
+
+    var listTitle: String {
+        if kind == .olimex { return "올리멕스 · 고프로·액션5" }
+        if let hintSlot { return hintSlot.listTitle }
+        return "C3 기판"
+    }
+
+    var roleLine: String {
+        if kind == .olimex { return "역할 고프로·액션5" }
+        if let hintSlot { return "역할 \(hintSlot.roleTitle)" }
+        return "역할 미확인 · MAC을 읽는 중이면 잠시 기다리세요"
+    }
+
+    func suggestedIP(for radios: BoardRadios) -> String {
+        if kind == .olimex { return Kind.olimex.suggestedIP }
+        if let slot = C3Slot.from(mac: radios.wifi) ?? hintSlot {
+            return slot.defaultHost
+        }
+        return Kind.c3.suggestedIP
+    }
 }
 
 /// 기판이 알려 준 MAC 입니다. 공유기 고정 주소 예약에 씁니다.
@@ -33,13 +55,21 @@ struct BoardRadios: Equatable {
     var wifi = ""
     var ethernet = ""
     var hotspot = ""
+    var slot = ""
+    var job = ""
 
     static func parse(_ object: [String: Any]) -> BoardRadios {
         BoardRadios(
             wifi: (object["wifiMac"] as? String) ?? "",
             ethernet: (object["ethMac"] as? String) ?? "",
-            hotspot: (object["apMac"] as? String) ?? ""
+            hotspot: (object["apMac"] as? String) ?? "",
+            slot: (object["slot"] as? String) ?? "",
+            job: (object["job"] as? String) ?? ""
         )
+    }
+
+    var resolvedSlot: C3Slot? {
+        C3Slot.from(text: slot) ?? C3Slot.from(mac: wifi)
     }
 }
 
@@ -57,6 +87,8 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
     private enum Purpose { case idle, readMac, join }
     private var purpose = Purpose.idle
     private var job = 0
+    private var identifyQueue: [UUID] = []
+    private var identifyBusy = false
 
     func start() {
         if manager == nil {
@@ -72,7 +104,7 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
 
     func identify(board: SeenBoard) async -> BoardRadios {
         guard let manager, manager.state == .poweredOn else { return BoardRadios() }
-        phase = "\(board.kind.title) 의 MAC 을 읽는 중입니다. 다른 기판은 건드리지 않습니다."
+        phase = "\(board.listTitle) 의 MAC 을 읽는 중입니다. 다른 기판은 건드리지 않습니다."
         purpose = .readMac
         job += 1
         let token = job
@@ -94,7 +126,7 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
         guard let manager, manager.state == .poweredOn else {
             return (false, "", 0, radiosByBoard[board.id] ?? BoardRadios())
         }
-        phase = "\(board.kind.title) 만 집 와이파이에 넣는 중입니다."
+        phase = "\(board.listTitle) 만 집 와이파이에 넣는 중입니다."
         purpose = .join
         job += 1
         let token = job
@@ -129,7 +161,7 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
     }
 
     private func scan() {
-        phase = "Ronin-Olimex 와 Ronin-C3 를 찾는 중입니다."
+        phase = "Ronin-Olimex · Ronin-OLED · Ronin-RMSID · Ronin-S3 를 찾는 중입니다."
         manager?.scanForPeripherals(withServices: [Self.service], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
     }
 
@@ -138,21 +170,80 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
         let kind: SeenBoard.Kind?
         if name.contains("Olimex") {
             kind = .olimex
-        } else if name.contains("C3") {
+        } else if name.contains("C3") || name.contains("OLED") || name.contains("RMSID") || name.contains("Ronin-S3") || name.hasSuffix("-S3") {
             kind = .c3
         } else {
             kind = nil
         }
         guard let kind else { return }
         let title = name.isEmpty ? kind.title : name
+        let hint = kind == .c3 ? C3Slot.from(bleName: title) : nil
         if let index = boards.firstIndex(where: { $0.id == peripheral.identifier }) {
-            boards[index] = SeenBoard(id: peripheral.identifier, name: title, kind: kind, peripheral: peripheral)
+            var updated = SeenBoard(id: peripheral.identifier, name: title, kind: kind, peripheral: peripheral, hintSlot: hint ?? boards[index].hintSlot)
+            if let radios = radiosByBoard[peripheral.identifier], let slot = radios.resolvedSlot {
+                updated.hintSlot = slot
+            }
+            boards[index] = updated
         } else {
-            boards.append(SeenBoard(id: peripheral.identifier, name: title, kind: kind, peripheral: peripheral))
+            boards.append(SeenBoard(id: peripheral.identifier, name: title, kind: kind, peripheral: peripheral, hintSlot: hint))
+            if kind == .c3 {
+                enqueueIdentify(peripheral.identifier)
+            }
         }
+        sortBoards()
         phase = boards.count > 1
             ? "기판 \(boards.count)대를 찾았습니다. 한 대씩 따로 설정합니다."
             : "기판 1대를 찾았습니다."
+    }
+
+    private func enqueueIdentify(_ id: UUID) {
+        guard !identifyQueue.contains(id) else { return }
+        if let radios = radiosByBoard[id], radios.resolvedSlot != nil { return }
+        identifyQueue.append(id)
+        pumpIdentify()
+    }
+
+    private func pumpIdentify() {
+        guard !identifyBusy, purpose == .idle else { return }
+        guard let next = identifyQueue.first else { return }
+        identifyQueue.removeFirst()
+        guard let board = boards.first(where: { $0.id == next }) else {
+            pumpIdentify()
+            return
+        }
+        if let radios = radiosByBoard[next], radios.resolvedSlot != nil {
+            pumpIdentify()
+            return
+        }
+        identifyBusy = true
+        Task { @MainActor in
+            let radios = await identify(board: board)
+            applyRadios(boardId: board.id, radios: radios)
+            identifyBusy = false
+            pumpIdentify()
+        }
+    }
+
+    private func applyRadios(boardId: UUID, radios: BoardRadios) {
+        guard !radios.wifi.isEmpty || !radios.slot.isEmpty else { return }
+        radiosByBoard[boardId] = radios
+        if let index = boards.firstIndex(where: { $0.id == boardId }) {
+            var board = boards[index]
+            board.hintSlot = radios.resolvedSlot ?? C3Slot.from(bleName: board.name) ?? board.hintSlot
+            boards[index] = board
+        }
+        sortBoards()
+    }
+
+    private func sortBoards() {
+        let order: [C3Slot?] = [.oled, .rmsid, .s3, nil]
+        boards.sort { left, right in
+            if left.kind != right.kind { return left.kind == .olimex }
+            let li = order.firstIndex(of: left.hintSlot) ?? order.count
+            let ri = order.firstIndex(of: right.hintSlot) ?? order.count
+            if li != ri { return li < ri }
+            return left.name < right.name
+        }
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -195,8 +286,9 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
               let data = characteristic.value,
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         let parsed = BoardRadios.parse(object)
-        if !parsed.wifi.isEmpty || !parsed.ethernet.isEmpty {
+        if !parsed.wifi.isEmpty || !parsed.ethernet.isEmpty || !parsed.slot.isEmpty {
             radiosByBoard[peripheral.identifier] = parsed
+            applyRadios(boardId: peripheral.identifier, radios: parsed)
         }
         if purpose == .readMac, object["ok"] == nil {
             finish(ok: true, host: "", port: 0, note: parsed.wifi.isEmpty ? "MAC 이 비어 있습니다." : "MAC 을 읽었습니다.")
@@ -219,6 +311,9 @@ final class BoardProvision: NSObject, ObservableObject, CBCentralManagerDelegate
         }
         let id = target?.identifier ?? UUID()
         pending?(ok, host, port, radiosByBoard[id] ?? BoardRadios())
+        if !identifyBusy {
+            pumpIdentify()
+        }
     }
 }
 
@@ -266,24 +361,32 @@ struct FirstJoinSheet: View {
 
     private var boardList: some View {
         Section {
-            Text("올리멕스와 C3는 설정이 따로입니다. 하나를 골라 이름, 와이파이, 주소를 넣고 끝내세요. 그 다음에 다른 기판을 고릅니다. 한 화면의 값이 두 기판에 같이 들어가지 않습니다.")
+            Text("올리멕스·OLED·RMSID·S3는 설정이 따로입니다. 역할 라벨(RS2/SC/울란지)과 MAC으로 구분합니다. 하나를 골라 끝내고 다음을 고르세요.")
                 .font(.caption)
             if radio.boards.isEmpty {
                 Text(radio.phase)
             }
             ForEach(radio.boards) { board in
+                let radios = radio.radiosByBoard[board.id] ?? BoardRadios()
+                let slot = radios.resolvedSlot ?? board.hintSlot
                 Button {
                     open(board)
                 } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        Label(board.kind == .olimex ? "올리멕스 ESP32-PoE" : "C3 기판", systemImage: board.kind == .olimex ? "server.rack" : "dot.radiowaves.left.and.right")
+                        Label(slot?.listTitle ?? board.listTitle, systemImage: board.kind == .olimex ? "server.rack" : (slot == .s3 ? "lightbulb.fill" : "rotate.3d"))
                             .font(.headline)
-                        Text(board.kind == .olimex
-                             ? "액션 카메라 기판입니다. 이 줄을 누르면 올리멕스만 설정합니다."
-                             : "로닌 또는 조명 기판입니다. 이 줄을 누르면 C3만 설정합니다.")
-                            .font(.caption)
-                        Text("블루투스 이름 \(board.name)")
+                        Text(slot.map { "역할 \($0.roleTitle)" } ?? board.roleLine)
                             .font(.caption.weight(.semibold))
+                        Text("블루투스 이름 \(board.name)")
+                            .font(.caption)
+                        if BoardMac.isFull(radios.wifi) {
+                            Text("와이파이 MAC \(BoardMac.normalize(radios.wifi))")
+                                .font(.caption.monospaced())
+                        } else if board.kind == .c3 {
+                            Text("MAC 확인 중…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         if let host = finished[board.id] {
                             Text("이 기판 설정 끝 · \(host)")
                                 .font(.caption.weight(.bold))
@@ -296,7 +399,7 @@ struct FirstJoinSheet: View {
                 .buttonStyle(DeskButtonStyle(selected: finished[board.id] != nil, expand: true))
             }
             if !radio.boards.isEmpty, radio.boards.allSatisfy({ finished[$0.id] != nil }) {
-                Button("두 기판 설정을 마칩니다") { dismiss() }
+                Button("기판 설정을 마칩니다") { dismiss() }
                     .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             }
         } header: {
@@ -305,33 +408,36 @@ struct FirstJoinSheet: View {
     }
 
     private func oneBoard(_ board: SeenBoard) -> some View {
-        Group {
+        let radios = radio.radiosByBoard[board.id] ?? BoardRadios()
+        let slot = radios.resolvedSlot ?? board.hintSlot
+        return Group {
             Section {
-                Text(board.kind == .olimex
-                     ? "지금 설정하는 기판은 올리멕스 ESP32-PoE 입니다. C3 값은 이 화면에 없습니다."
-                     : "지금 설정하는 기판은 C3 입니다. 올리멕스 값은 이 화면에 없습니다.")
+                Text(slot.map { "지금 설정: \($0.listTitle) · 역할 \($0.roleTitle)" }
+                      ?? (board.kind == .olimex
+                          ? "지금 설정하는 기판은 올리멕스 · 고프로·액션5 입니다."
+                          : "지금 설정하는 기판은 C3 입니다. MAC이 오면 역할이 정해집니다."))
                     .font(.caption.weight(.semibold))
                 Text("블루투스 이름 \(board.name)")
                     .font(.caption)
-                Text(reading ? "이 기판의 MAC 을 읽는 중입니다." : macLine(radio.radiosByBoard[board.id] ?? BoardRadios(), kind: board.kind))
+                Text(reading ? "이 기판의 MAC 을 읽는 중입니다." : macLine(radios, kind: board.kind, slot: slot))
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
             } header: {
-                Text(board.kind == .olimex ? "올리멕스만" : "C3만")
+                Text(slot?.boardTitle ?? (board.kind == .olimex ? "올리멕스만" : "C3만"))
             }
             Section {
                 TextField("이 기판의 이름", text: $boardName)
                 TextField("이 기판이 붙을 와이파이 이름", text: $ssid)
                 SecureField("이 기판에 넣을 비밀번호", text: $password)
                 TextField("이 기판의 고정 주소, 비우면 공유기가 줍니다", text: $ip)
-                Text("고정 주소는 192.168.10.x 만 됩니다. 이 기판의 제안 주소는 \(board.kind.suggestedIP) 입니다.")
+                Text("고정 주소는 192.168.10.x 만 됩니다. 이 기판의 제안 주소는 \(board.suggestedIP(for: radios)) 입니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
                 Text("이 기판의 이름과 와이파이")
             }
             Section {
-                Button(busy ? "넣는 중" : "이 \(board.kind.title) 만 망에 넣기") {
+                Button(busy ? "넣는 중" : "이 \(slot?.boardTitle ?? board.kind.title) 만 망에 넣기") {
                     Task { await send(board) }
                 }
                 .buttonStyle(DeskButtonStyle(selected: true, expand: true))
@@ -342,11 +448,15 @@ struct FirstJoinSheet: View {
         }
     }
 
-    private func macLine(_ radios: BoardRadios, kind: SeenBoard.Kind) -> String {
+    private func macLine(_ radios: BoardRadios, kind: SeenBoard.Kind, slot: C3Slot?) -> String {
         if radios.wifi.isEmpty && radios.ethernet.isEmpty {
             return "MAC 은 이 기판이 알려 주면 여기에 나타납니다."
         }
-        var lines = ["와이파이 MAC \(radios.wifi.isEmpty ? "없음" : radios.wifi)"]
+        var lines: [String] = []
+        if let slot {
+            lines.append("슬롯 \(slot.rawValue) · \(slot.roleTitle)")
+        }
+        lines.append("와이파이 MAC \(radios.wifi.isEmpty ? "없음" : radios.wifi)")
         if kind == .olimex {
             lines.append("이더넷 MAC \(radios.ethernet.isEmpty ? "없음" : radios.ethernet)")
         }
@@ -355,12 +465,20 @@ struct FirstJoinSheet: View {
 
     private func open(_ board: SeenBoard) {
         editing = board.id
-        boardName = board.kind == .olimex ? "올리멕스" : "C3"
-        ip = board.kind.suggestedIP
+        let radios = radio.radiosByBoard[board.id] ?? BoardRadios()
+        let slot = radios.resolvedSlot ?? board.hintSlot
+        boardName = slot?.listTitle ?? (board.kind == .olimex ? "올리멕스 · 고프로·액션5" : board.listTitle)
+        ip = board.suggestedIP(for: radios)
         password = ""
         reading = true
         Task {
-            _ = await radio.identify(board: board)
+            let got = await radio.identify(board: board)
+            if let resolved = got.resolvedSlot {
+                boardName = resolved.listTitle
+                if ip == board.kind.suggestedIP || ip.isEmpty {
+                    ip = resolved.defaultHost
+                }
+            }
             reading = false
         }
     }
@@ -377,7 +495,8 @@ struct FirstJoinSheet: View {
         password = ""
         guard result.ok, !result.host.isEmpty else { return }
         let port = result.port == 0 ? (board.kind == .olimex ? 81 : 82) : result.port
-        onReady(board.kind, result.host, port, result.radios, boardName.trimmingCharacters(in: .whitespaces))
+        let name = boardName.trimmingCharacters(in: .whitespaces)
+        onReady(board.kind, result.host, port, result.radios, name)
         finished[board.id] = result.host
         editing = nil
     }

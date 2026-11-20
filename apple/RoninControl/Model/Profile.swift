@@ -647,6 +647,15 @@ enum C3Slot: String, Codable, CaseIterable, Identifiable, Sendable {
         let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
         return allCases.first { $0.defaultHost == h }
     }
+
+    /// 블루투스 광고 이름(Ronin-OLED / Ronin-RMSID / Ronin-S3)으로 슬롯을 읽습니다.
+    static func from(bleName: String) -> C3Slot? {
+        let text = bleName.lowercased()
+        if text.contains("oled") || text.contains("rs2") { return .oled }
+        if text.contains("rmsid") || text.contains("-sc") { return .rmsid }
+        if text.contains("s3") || text.contains("ulanzi") || text.contains("light") { return .s3 }
+        return nil
+    }
 }
 
 /// 등록한 C3·S3 입니다. 액션 카메라 기판이 아닙니다.

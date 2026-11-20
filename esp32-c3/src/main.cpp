@@ -76,6 +76,7 @@ static void replyDoc(uint8_t num, JsonDocument& doc) {
   } else if (job == "light") {
     if (ulanziBleLinked()) doc["paired"] = ulanziBleName();
     doc["savedLights"] = ulanziBleSavedCount();
+    ulanziBleFillSaved(doc);
   }
   String out;
   serializeJson(doc, out);
@@ -122,6 +123,9 @@ static void showIdentity() {
   JsonDocument doc;
   doc["wifiMac"] = WiFi.macAddress();
   doc["apMac"] = WiFi.softAPmacAddress();
+  doc["slot"] = slotId(slot);
+  doc["job"] = slotIsLight(slot) ? "light" : "ronin";
+  doc["host"] = slotDefaultIp(slot);
   String out;
   serializeJson(doc, out);
   provChar->setValue(out.c_str());
@@ -152,17 +156,21 @@ class ProvCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 static void startProvision() {
-  NimBLEDevice::init("Ronin-C3");
+  NimBLEDevice::init(slotBleName(slot));
   NimBLEServer* server = NimBLEDevice::createServer();
   NimBLEService* service = server->createService(kProvService);
   provChar = service->createCharacteristic(
       kProvChar, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY, 240);
   provChar->setCallbacks(new ProvCallbacks());
   service->start();
+  showIdentity();
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(kProvService);
+  advertising->setName(slotBleName(slot));
   advertising->start();
-  Serial.println("블루투스 이름 Ronin-C3. 처음 설정은 이 이름으로 받습니다.");
+  Serial.print("블루투스 이름 ");
+  Serial.print(slotBleName(slot));
+  Serial.println(". 처음 설정은 이 이름으로 받습니다.");
 }
 
 static void allowKoreaChannels() {
@@ -307,7 +315,9 @@ static void finishJoin() {
     return;
   }
   const String ip = WiFi.localIP().toString();
-  String note = "{\"ok\":true,\"ip\":\"" + ip + "\",\"port\":82,\"wifiMac\":\"" + WiFi.macAddress() + "\",\"apMac\":\"" + WiFi.softAPmacAddress() + "\"}";
+  String note = "{\"ok\":true,\"ip\":\"" + ip + "\",\"port\":82,\"wifiMac\":\"" + WiFi.macAddress() +
+                "\",\"apMac\":\"" + WiFi.softAPmacAddress() + "\",\"slot\":\"" + slotId(slot) +
+                "\",\"job\":\"" + (slotIsLight(slot) ? "light" : "ronin") + "\"}";
   tellProvision(note.c_str());
   Serial.print("같은 와이파이 주소 ");
   Serial.println(ip);
@@ -540,10 +550,41 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     int kelvin = doc["kelvin"] | 4500;
     bool on = doc["on"] | true;
     char reason[200];
-    bool ok = (ulanziBleSavedCount() > 1)
-                  ? ulanziBleApplyAll(brightness, kelvin, on, reason, sizeof(reason))
-                  : ulanziBleApply(brightness, kelvin, on, reason, sizeof(reason));
-    reply(num, ok, reason);
+    bool ok = false;
+    // 개별이 기본입니다. index / id / name 중 하나로 한 대만 보냅니다.
+    // action=all 일 때만 묶음입니다.
+    if (strcmp(action, "all") == 0) {
+      ok = ulanziBleApplyAll(brightness, kelvin, on, reason, sizeof(reason));
+    } else if (doc["index"].is<int>()) {
+      int idx = doc["index"] | -1;
+      ok = (idx >= 0 && idx < 2)
+               ? ulanziBleApplyIndex((uint8_t)idx, brightness, kelvin, on, reason, sizeof(reason))
+               : false;
+      if (!ok && reason[0] == 0) snprintf(reason, sizeof(reason), "울란지 칸 번호가 잘못되었습니다.");
+    } else {
+      const char* name = doc["name"] | "";
+      const char* id = doc["id"] | "";
+      if (id[0] || name[0]) {
+        char pairReason[160];
+        if (!ulanziBlePair(name, id, pairReason, sizeof(pairReason))) {
+          snprintf(reason, sizeof(reason), "%s", pairReason);
+          ok = false;
+        } else {
+          ok = ulanziBleApply(brightness, kelvin, on, reason, sizeof(reason));
+        }
+      } else if (ulanziBleSavedCount() == 1) {
+        ok = ulanziBleApplyIndex(0, brightness, kelvin, on, reason, sizeof(reason));
+      } else {
+        snprintf(reason, sizeof(reason),
+                 "울란지 칸(index) 또는 이름을 지정하세요. 2대는 묶음이 아니라 개별로 조절합니다.");
+        ok = false;
+      }
+    }
+    JsonDocument out;
+    out["ack"] = ok;
+    out["reason"] = reason;
+    ulanziBleFillSaved(out);
+    replyDoc(num, out);
     return;
   }
   reply(num, false, "이 기판이 받지 않는 명령입니다.");

@@ -330,10 +330,75 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     }
 }
 
-/// C3 가 스캔해 준 로닌 블루투스 이름입니다.
+/// C3 가 스캔해 준 로닌·울란지 이름입니다.
 struct C3Gimbal: Identifiable, Equatable {
     var id: String
     var name: String
+    /// 저장 칸(0·1). 스캔 후보는 nil.
+    var index: Int? = nil
+}
+
+/// S3 에 저장된 울란지 한 대입니다. 개별 밝기·색온도 UI에 씁니다.
+struct SavedLight: Identifiable, Equatable {
+    var id: String
+    var name: String
+    var index: Int
+}
+
+/// 고정 IP 보드가 살아 있는지 WS hello 한 줄로 확인합니다.
+enum BoardHello {
+    struct Info {
+        var slot: String
+        var wifiMac: String
+        var host: String
+        var job: String
+    }
+
+    static func probe(host: String, port: Int = 82, timeout: TimeInterval = 2.5) async -> Info? {
+        let clean = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, let url = URL(string: "ws://\(clean):\(port)") else { return nil }
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.webSocketTask(with: url)
+        task.resume()
+        defer {
+            task.cancel(with: .goingAway, reason: nil)
+            session.invalidateAndCancel()
+        }
+        do {
+            let message = try await withTimeout(timeout) {
+                try await task.receive()
+            }
+            let text: String?
+            switch message {
+            case .string(let value): text = value
+            case .data(let data): text = String(data: data, encoding: .utf8)
+            @unknown default: text = nil
+            }
+            guard let text, let data = text.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            let slot = (object["slot"] as? String) ?? ""
+            let wifi = (object["wifiMac"] as? String) ?? ""
+            let reported = (object["host"] as? String) ?? clean
+            let job = (object["job"] as? String) ?? ""
+            guard !slot.isEmpty || BoardMac.isFull(wifi) else { return nil }
+            return Info(slot: slot, wifiMac: wifi, host: reported, job: job)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func withTimeout<T>(_ seconds: TimeInterval, _ work: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await work() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            let value = try await group.next()!
+            group.cancelAll()
+            return value
+        }
+    }
 }
 
 /// C3 한 대의 웹소켓입니다. 로닌이나 조명 명령의 성공은 ack 가 true 일 때만입니다.
@@ -344,6 +409,8 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     @Published private(set) var wifiMac = ""
     @Published private(set) var apMac = ""
     @Published private(set) var gimbals: [C3Gimbal] = []
+    /// S3 저장 울란지(최대 2). 개별 조작 UI용.
+    @Published private(set) var savedLights: [SavedLight] = []
     @Published private(set) var pairedName = ""
     @Published private(set) var otaNote = ""
     private var session: URLSession?
@@ -354,6 +421,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     private var lastHost = ""
     @Published private(set) var lastSlot = ""
     private var lastFw = ""
+    private var lastBoard: C3BoardRecord?
 
     func connect(_ board: C3BoardRecord) {
         guard board.link.shoots, !board.link.c3Host.isEmpty else {
@@ -361,11 +429,24 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             detail = "USB는 펌웨어와 점검입니다."
             return
         }
+        // 같은 보드가 이미 온라인이면 끊었다 붙이지 않습니다. 조명·로닌 조작과 「지금 연결」이 꼬이지 않게.
+        if boardId == board.id, state == .online, task != nil {
+            lastBoard = board
+            detail = "연결됨 \(board.socketHost)"
+            return
+        }
+        if boardId == board.id, state == .connecting { return }
         disconnect()
         generation += 1
         let token = generation
         boardId = board.id
+        lastBoard = board
         state = .connecting
+        wifiMac = ""
+        apMac = ""
+        gimbals = []
+        savedLights = []
+        pairedName = ""
         let host = board.socketHost
         detail = "\(host):\(board.link.c3Port) 에 붙는 중"
         let url = URL(string: "ws://\(host):\(board.link.c3Port)")!
@@ -378,6 +459,19 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             guard let self, self.generation == token, self.state == .connecting else { return }
             self.fail("\(host):\(board.link.c3Port) 이 열리지 않았습니다. C3 는 2.4GHz만 붙습니다.")
         }
+    }
+
+    /// 온라인이 될 때까지 기다립니다. 이미 붙어 있으면 바로 true 입니다.
+    func ensureOnline(_ board: C3BoardRecord, timeout: TimeInterval = 5) async -> Bool {
+        if boardId == board.id, state == .online { return true }
+        connect(board)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if boardId == board.id, state == .online { return true }
+            if boardId == board.id, state == .offline { return false }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return boardId == board.id && state == .online
     }
 
     func disconnect() {
@@ -495,7 +589,17 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
                 let id = (row["id"] as? String) ?? ""
                 let name = (row["name"] as? String) ?? ""
                 guard !name.isEmpty else { return nil }
-                return C3Gimbal(id: id.isEmpty ? name : id, name: name)
+                let index = row["index"] as? Int
+                return C3Gimbal(id: id.isEmpty ? name : id, name: name, index: index)
+            }
+        }
+        if let saved = object["savedLightsList"] as? [[String: Any]] {
+            savedLights = saved.compactMap { row in
+                let name = (row["name"] as? String) ?? ""
+                guard !name.isEmpty else { return nil }
+                let index = (row["index"] as? Int) ?? 0
+                let id = (row["id"] as? String) ?? "\(index)"
+                return SavedLight(id: id.isEmpty ? "\(index)-\(name)" : id, name: name, index: index)
             }
         }
         if let ack = object["ack"] as? Bool {
@@ -527,15 +631,19 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         let host = lastHost
         let slot = lastSlot
         let fw = lastFw
+        let board = lastBoard
         Task { @MainActor in
             otaNote = "펌웨어 확인 중…"
             let outcome = await BoardOta.ensureOnConnect(host: host, slot: slot, reportedFw: fw)
             switch outcome {
-            case .skipped(let text), .updated(let text), .failed(let text):
+            case .skipped(let text), .failed(let text):
                 otaNote = text
-                if case .updated = outcome {
-                    detail = "OTA 후 다시 연결하세요. \(text)"
-                }
+            case .updated(let text):
+                otaNote = text
+                detail = "OTA 반영 후 다시 붙는 중… \(text)"
+                // 보드 재부팅 뒤 「지금 연결」을 다시 누르지 않게 자동 재연결합니다.
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                if let board { connect(board) }
             }
         }
     }

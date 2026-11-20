@@ -7,7 +7,7 @@
 // s3    = 울란지 VL200BI 두 대(조명)
 
 #ifndef FW_VERSION
-#define FW_VERSION "1.0.47"
+#define FW_VERSION "1.0.49"
 #endif
 
 enum class BoardSlot : uint8_t { OledRs2 = 0, RmsidSc = 1, S3Light = 2 };
@@ -49,6 +49,16 @@ inline BoardSlot slotFromText(const char* text, BoardSlot fallback = kDefaultSlo
 }
 
 inline bool slotIsLight(BoardSlot s) { return s == BoardSlot::S3Light; }
+
+/// 처음 연결 블루투스 광고 이름. 세 보드가 같은 Ronin-C3 로 뭉개지지 않게 합니다.
+inline const char* slotBleName(BoardSlot s) {
+  switch (s) {
+    case BoardSlot::OledRs2: return "Ronin-OLED";
+    case BoardSlot::RmsidSc: return "Ronin-RMSID";
+    case BoardSlot::S3Light: return "Ronin-S3";
+  }
+  return "Ronin-OLED";
+}
 
 // OLED=.152, S3=.153, RMSID=.154 — 서로 겹치지 않게.
 inline const char* slotDefaultIp(BoardSlot s) {
