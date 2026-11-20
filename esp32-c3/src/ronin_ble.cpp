@@ -201,12 +201,19 @@ size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
   scan->setWindow(48);
   scan->setDuplicateFilter(false);
   foundCount = 0;
-  // 2초×5회 = 약 10초. 매 라운드마다 웹소켓을 펌핑해 online 깜빡임을 막습니다.
-  for (int round = 0; round < 5; round++) {
+  // SC 약전계(-100 근처)는 짧으면 놓칩니다. SC 전용은 2초×8=16초.
+  const int rounds = (targetFilter == RoninTarget::ScOnly) ? 8 : 5;
+  // SC 는 윈도우를 조금 넓혀 약한 광고를 더 받습니다(와이파이와 타협).
+  if (targetFilter == RoninTarget::ScOnly) {
+    scan->setInterval(120);
+    scan->setWindow(80);
+  }
+  for (int round = 0; round < rounds; round++) {
     NimBLEScanResults results = scan->start(2, false);
     absorbScanResults(results);
     scan->clearResults();
     boardNetPump();
+    if (foundCount > 0 && targetFilter == RoninTarget::ScOnly) break;  // 하나라도 잡히면 바로 끝
   }
   if (!roninBleLinked()) resumeProvision();
   if (manageBusy) busy = false;
