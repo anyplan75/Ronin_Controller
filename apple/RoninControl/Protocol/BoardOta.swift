@@ -39,6 +39,7 @@ enum BoardOta {
         if let bundled = Bundle.main.url(forResource: name, withExtension: "bin") {
             return bundled
         }
+        #if os(macOS)
         // 맥 개발용: 저장소 빌드 산출물을 찾습니다.
         let home = FileManager.default.homeDirectoryForCurrentUser
         let candidates: [String]
@@ -56,6 +57,7 @@ enum BoardOta {
             let url = home.appendingPathComponent(rel)
             if FileManager.default.fileExists(atPath: url.path) { return url }
         }
+        #endif
         return nil
     }
 
