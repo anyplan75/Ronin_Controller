@@ -37,10 +37,10 @@ enum BoardLane: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    /// C3 제어 소켓입니다. PoE는 올리멕스만 씁니다.
+    /// C3 제어 소켓입니다. PoE는 올리멕스만 씁니다. 실제 주소는 보드 슬롯 고정 IP를 씁니다.
     var c3Detail: String {
         switch self {
-        case .lan: return "192.168.10.152:82"
+        case .lan: return "집 망 · 슬롯 고정 IP:82 (OLED .152 / S3 .153 / RMSID .154)"
         case .ap: return "Ronin-C3 · 192.168.4.1:82"
         case .usb, .poe: return "USB는 펌웨어와 점검입니다. 촬영 명령은 나가지 않습니다."
         }
@@ -352,7 +352,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     private var waiter: ((Bool, String) -> Void)?
     private var otaStarted = false
     private var lastHost = ""
-    private var lastSlot = ""
+    @Published private(set) var lastSlot = ""
     private var lastFw = ""
 
     func connect(_ board: C3BoardRecord) {

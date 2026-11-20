@@ -161,7 +161,13 @@ final class Studio: ObservableObject {
     }
 
     var roninC3: C3BoardRecord? {
-        profile.c3Boards.first { $0.duty == .ronin }
+        if let id = c3Socket.boardId,
+           let live = profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+            return live
+        }
+        return profile.c3Boards.first { $0.boardSlot == .oled }
+            ?? profile.c3Boards.first { $0.boardSlot == .rmsid }
+            ?? profile.c3Boards.first { $0.duty == .ronin }
     }
 
     /// 올리멕스 ESP32-PoE 를 스튜디오 기판으로 등록합니다. 액션 카메라는 이 기판 블루투스입니다.
@@ -171,30 +177,122 @@ final class Studio: ObservableObject {
             return
         }
         profile.olimexRegistered = true
-        note("올리멕스 ESP32-PoE 를 등록했습니다. PoE 또는 와이파이 웹소켓과 액션 카메라를 이 기판이 맡습니다. 로닌 짐벌은 로닌 제어 C3 가 맡습니다.")
+        if profile.olimexName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            profile.olimexName = "올리멕스 · 고프로·액션5"
+        }
+        note("올리멕스 ESP32-PoE 를 등록했습니다. 고프로·액션5는 이 기판, 로닌은 OLED/RMSID C3, 조명은 S3 가 맡습니다.")
     }
 
-    /// C3 를 하나 등록합니다. 고른 일만 하고, 액션 카메라는 맡지 않습니다.
+    /// 예전 등록 창용. 슬롯 없이 job만 고르면 기본 슬롯으로 맞춥니다.
     func registerC3(_ job: C3Job) {
-        if job == .ronin, roninC3 != nil {
-            note("로닌 제어 C3 는 한 대만 등록합니다.")
-            return
+        registerBoardSlot(job == .light ? .s3 : .oled)
+    }
+
+    /// 슬롯 하나로 등록하거나 갱신합니다. MAC·고정 IP로 구분합니다.
+    func registerBoardSlot(_ slot: C3Slot) {
+        let id = upsertKnownSlot(slot)
+        sortBoardRoles()
+        if let board = profile.c3Boards.first(where: { $0.id == id }) {
+            note("\(board.listTitle) 자리를 잡았습니다. \(slot.defaultHost) · \(slot.knownWifiMac)")
+        }
+    }
+
+    /// OLED→RS2, RMSID→SC, S3→울란지 자리를 맞추고, 구 C3 중복을 뺍니다.
+    func syncBoardRoles() {
+        var keep: [UUID] = []
+        for slot in C3Slot.allCases {
+            keep.append(upsertKnownSlot(slot))
+        }
+        let knownMacs = Set(C3Slot.allCases.map { BoardMac.normalize($0.knownWifiMac) })
+        let knownHosts = Set(C3Slot.allCases.map(\.defaultHost))
+        let before = profile.c3Boards.count
+        profile.c3Boards.removeAll { board in
+            if keep.contains(board.id) { return false }
+            let mac = BoardMac.normalize(board.wifiMac)
+            if BoardMac.isFull(mac), knownMacs.contains(mac) { return true }
+            let host = board.lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            if knownHosts.contains(host) { return true }
+            if board.slot.isEmpty { return true }
+            return false
+        }
+        sortBoardRoles()
+        let dropped = before - profile.c3Boards.count
+        if dropped > 0 {
+            note("보드 자리: OLED·RS2, RMSID·SC, S3·울란지. 중복 \(dropped)개를 뺐습니다.")
+        } else {
+            note("보드 자리: OLED·RS2, RMSID·SC, S3·울란지.")
+        }
+    }
+
+    @discardableResult
+    private func upsertKnownSlot(_ slot: C3Slot) -> UUID {
+        let mac = BoardMac.normalize(slot.knownWifiMac)
+        if let index = profile.c3Boards.firstIndex(where: { BoardMac.same($0.wifiMac, mac) })
+            ?? profile.c3Boards.firstIndex(where: { $0.boardSlot == slot })
+            ?? profile.c3Boards.firstIndex(where: {
+                $0.lanHost.trimmingCharacters(in: .whitespacesAndNewlines) == slot.defaultHost
+            }) {
+            profile.c3Boards[index].slot = slot.rawValue
+            profile.c3Boards[index].job = slot.job.rawValue
+            profile.c3Boards[index].wifiMac = mac
+            profile.c3Boards[index].lanHost = slot.defaultHost
+            profile.c3Boards[index].linkMode = BoardLane.lan.rawValue
+            if profile.c3Boards[index].name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || profile.c3Boards[index].name.hasPrefix("C3 ")
+                || profile.c3Boards[index].name == "C3 로닌"
+                || profile.c3Boards[index].name == "C3 울란지 조명" {
+                profile.c3Boards[index].name = slot.listTitle
+            }
+            return profile.c3Boards[index].id
         }
         let board = C3BoardRecord(
             id: UUID(),
-            name: profile.lastC3Name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? (job == .ronin ? "C3 로닌" : "C3 울란지 조명")
-                : profile.lastC3Name.trimmingCharacters(in: .whitespacesAndNewlines),
-            job: job.rawValue,
-            lanHost: profile.lastC3Host
+            name: slot.listTitle,
+            job: slot.job.rawValue,
+            slot: slot.rawValue,
+            lanHost: slot.defaultHost,
+            wifiMac: mac
         )
         profile.c3Boards.append(board)
-        note("\(board.name) 을 등록했습니다. 이 C3 는 \(job.title)만 합니다.")
+        return board.id
+    }
+
+    private func sortBoardRoles() {
+        let order: [C3Slot?] = [.oled, .rmsid, .s3, nil]
+        profile.c3Boards.sort { left, right in
+            let li = order.firstIndex(of: left.boardSlot) ?? order.count
+            let ri = order.firstIndex(of: right.boardSlot) ?? order.count
+            return li < ri
+        }
+    }
+
+    /// 웹소켓 hello 의 슬롯·MAC·주소로 해당 보드를 맞춥니다.
+    func applyBoardHello(boardId: UUID?, slot: String, wifi: String, host: String) {
+        let inferred = C3Slot.from(text: slot)
+            ?? C3Slot.from(mac: wifi)
+            ?? C3Slot.from(host: host)
+        guard let inferred else {
+            if let boardId {
+                rememberC3(boardId, wifi: wifi, hotspot: "")
+            }
+            return
+        }
+        let id = upsertKnownSlot(inferred)
+        if let index = profile.c3Boards.firstIndex(where: { $0.id == id }) {
+            if !host.isEmpty { profile.c3Boards[index].lanHost = host }
+            if BoardMac.isFull(wifi) { profile.c3Boards[index].wifiMac = BoardMac.normalize(wifi) }
+            profile.c3Boards[index].slot = inferred.rawValue
+            profile.c3Boards[index].job = inferred.job.rawValue
+        }
+        if let boardId, boardId != id {
+            profile.c3Boards.removeAll { $0.id == boardId && $0.boardSlot == nil }
+        }
+        sortBoardRoles()
     }
 
     var olimexTitle: String {
         let name = profile.olimexName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "올리멕스" : name
+        return name.isEmpty ? "올리멕스 · 고프로·액션5" : name
     }
 
     func renameOlimex(_ name: String) {
@@ -219,7 +317,22 @@ final class Studio: ObservableObject {
 
     func rememberC3(_ id: UUID, wifi: String, hotspot: String) {
         guard let index = profile.c3Boards.firstIndex(where: { $0.id == id }) else { return }
-        if !wifi.isEmpty { profile.c3Boards[index].wifiMac = wifi }
+        if !wifi.isEmpty {
+            let mac = BoardMac.normalize(wifi)
+            profile.c3Boards[index].wifiMac = mac
+            if let slot = C3Slot.from(mac: mac) {
+                profile.c3Boards[index].slot = slot.rawValue
+                profile.c3Boards[index].job = slot.job.rawValue
+                if profile.c3Boards[index].lanHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    profile.c3Boards[index].lanHost = slot.defaultHost
+                }
+                if profile.c3Boards[index].name.hasPrefix("C3 ")
+                    || profile.c3Boards[index].name == "C3 로닌"
+                    || profile.c3Boards[index].name == "C3 울란지 조명" {
+                    profile.c3Boards[index].name = slot.listTitle
+                }
+            }
+        }
         if !hotspot.isEmpty { profile.c3Boards[index].apMac = hotspot }
     }
 
@@ -253,14 +366,27 @@ final class Studio: ObservableObject {
         case .c3:
             profile.lastC3Host = host
             if !cleanName.isEmpty { profile.lastC3Name = cleanName }
-            if let index = profile.c3Boards.firstIndex(where: { $0.duty == .ronin }) ?? profile.c3Boards.indices.first {
+            let slot = C3Slot.from(mac: radios.wifi)
+                ?? C3Slot.from(host: host)
+                ?? (cleanName.lowercased().contains("light") || cleanName.lowercased().contains("ulanzi") ? .s3 : nil)
+            if let slot {
+                let id = upsertKnownSlot(slot)
+                if let index = profile.c3Boards.firstIndex(where: { $0.id == id }) {
+                    profile.c3Boards[index].lanHost = host
+                    profile.c3Boards[index].linkMode = BoardLane.lan.rawValue
+                    rememberC3(id, wifi: radios.wifi, hotspot: radios.hotspot)
+                    note("\(profile.c3Boards[index].listTitle) 주소를 \(host):\(port) 로 저장했습니다.")
+                }
+                sortBoardRoles()
+            } else if let index = profile.c3Boards.firstIndex(where: { BoardMac.same($0.wifiMac, radios.wifi) && BoardMac.isFull(radios.wifi) })
+                ?? profile.c3Boards.firstIndex(where: { $0.lanHost == host }) {
                 profile.c3Boards[index].lanHost = host
                 profile.c3Boards[index].linkMode = BoardLane.lan.rawValue
                 if !cleanName.isEmpty { profile.c3Boards[index].name = cleanName }
                 rememberC3(profile.c3Boards[index].id, wifi: radios.wifi, hotspot: radios.hotspot)
-                note("\(profile.c3Boards[index].name) 주소를 \(host):\(port) 로 저장했습니다. 명령을 보내면 그 주소로 붙습니다.")
+                note("\(profile.c3Boards[index].listTitle) 주소를 \(host):\(port) 로 저장했습니다.")
             } else {
-                note("C3 \(cleanName.isEmpty ? "" : cleanName) 가 \(host):\(port) 로 붙었다고 답했습니다. C3 역할을 등록하면 그 이름과 주소를 씁니다.")
+                note("C3 \(cleanName.isEmpty ? "" : cleanName) 가 \(host):\(port) 로 붙었다고 답했습니다. 「보드 자리 맞추기」로 OLED/RMSID/S3 를 등록하세요.")
             }
         }
     }
@@ -780,14 +906,15 @@ final class Studio: ObservableObject {
     }
 
     /// C3 가 주변 로닌 블루투스 이름을 읽습니다.
-    func scanRoninGimbals() async {
-        guard let board = roninC3 else {
-            noteOffline("로닌 제어 C3 를 먼저 등록하세요.")
+    func scanRoninGimbals(_ boardId: UUID? = nil) async {
+        let board = boardId.flatMap { id in profile.c3Boards.first { $0.id == id && $0.duty == .ronin } } ?? roninC3
+        guard let board else {
+            noteOffline("로닌용 OLED/RMSID C3 를 먼저 등록하세요.")
             return
         }
         if c3Socket.boardId != board.id || c3Socket.state != .online {
             c3Socket.connect(board)
-            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 스캔하세요.")
+            note("\(board.listTitle) 에 붙는 중입니다. 붙은 뒤 다시 스캔하세요.")
             return
         }
         let result = await c3Socket.command(["op": "scan"], timeout: 10)
@@ -795,14 +922,15 @@ final class Studio: ObservableObject {
     }
 
     /// 고른 로닌 이름으로 C3 블루투스를 붙입니다.
-    func pairRoninGimbal(name: String, id: String = "") async {
-        guard let board = roninC3 else {
-            noteOffline("로닌 제어 C3 를 먼저 등록하세요.")
+    func pairRoninGimbal(name: String, id: String = "", boardId: UUID? = nil) async {
+        let board = boardId.flatMap { bid in profile.c3Boards.first { $0.id == bid && $0.duty == .ronin } } ?? roninC3
+        guard let board else {
+            noteOffline("로닌용 OLED/RMSID C3 를 먼저 등록하세요.")
             return
         }
         if c3Socket.boardId != board.id || c3Socket.state != .online {
             c3Socket.connect(board)
-            note("\(board.name) 에 붙는 중입니다. 붙은 뒤 다시 누르세요.")
+            note("\(board.listTitle) 에 붙는 중입니다. 붙은 뒤 다시 누르세요.")
             return
         }
         var payload: [String: Any] = ["op": "pair", "name": name]

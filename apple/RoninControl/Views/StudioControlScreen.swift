@@ -78,12 +78,14 @@ struct StudioControlScreen: View {
         .background(canvas)
         .foregroundStyle(ink)
         .preferredColorScheme(.dark)
-        .confirmationDialog("이 C3 의 일", isPresented: $askC3Job, titleVisibility: .visible) {
-            Button("로닌 제어") { studio.registerC3(.ronin) }
-            Button("조명 · 울란지 VL120BI/VL200BI") { studio.registerC3(.light) }
+        .confirmationDialog("보드 자리", isPresented: $askC3Job, titleVisibility: .visible) {
+            Button("OLED C3 · 로닌 RS2") { studio.registerBoardSlot(.oled) }
+            Button("RMSID C3 · 로닌 SC") { studio.registerBoardSlot(.rmsid) }
+            Button("S3 · 울란지 조명") { studio.registerBoardSlot(.s3) }
+            Button("자리 맞추기 (3대·중복 제거)") { studio.syncBoardRoles() }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
+            Text("슬롯·MAC·주소로 구분합니다. 고프로·액션5는 올리멕스입니다.")
         }
         .sheet(isPresented: $showJoin) {
             FirstJoinSheet { kind, host, port, radios, name in
@@ -97,7 +99,12 @@ struct StudioControlScreen: View {
             studio.rememberOlimex(wifi: link.wifiMac, ethernet: link.ethMac, hotspot: link.apMac)
         }
         .onChange(of: c3Link.wifiMac) { _, _ in
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: "")
             if let id = c3Link.boardId { studio.rememberC3(id, wifi: c3Link.wifiMac, hotspot: c3Link.apMac) }
+        }
+        .onChange(of: c3Link.lastSlot) { _, slot in
+            guard !slot.isEmpty else { return }
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: "")
         }
         .sheet(isPresented: $showPtz) {
             ptzSheet
@@ -184,8 +191,8 @@ struct StudioControlScreen: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
                 }
                 Menu {
-                    Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
-                    Button("C3") { askC3Job = true }
+                    Button("올리멕스 · 고프로·액션5") { studio.registerOlimex() }
+                    Button("보드 (C3·S3)") { askC3Job = true }
                     Button("PTZ 카메라") { showPtz = true }
                 } label: {
                     Text("기판 등록")
@@ -230,12 +237,14 @@ struct StudioControlScreen: View {
 
     private var deviceList: some View {
         List {
-            Section("올리멕스") {
+            Section("올리멕스 · 고프로·액션5") {
                 Button {
                     pick = .olimex
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(studio.profile.olimexRegistered ? studio.olimexTitle : "아직 등록하지 않음", systemImage: "server.rack")
+                        Text("역할 고프로·액션5")
+                            .font(.caption.weight(.semibold))
                         Text(studio.profile.olimexRegistered ? "\(link.lane.title) · \(link.state == .online ? "온라인 \(link.endpoint)" : "오프라인")" : "연결을 고르세요")
                         Text("녹화 \(link.reportedRecording == nil ? "모름" : "기판 보고") · HDMI/USB 모름")
                             .font(.caption)
@@ -273,9 +282,9 @@ struct StudioControlScreen: View {
                     }
                 }
             }
-            Section("C3") {
+            Section("보드 · OLED/RMSID/S3") {
                 if studio.profile.c3Boards.isEmpty {
-                    Text("한 C3 는 로닌 또는 조명 중 하나만 맡습니다. 조명은 카메라 탈리와 별개입니다.")
+                    Text("OLED→RS2, RMSID→SC, S3→울란지. 「보드 자리 맞추기」로 등록하세요.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -284,8 +293,10 @@ struct StudioControlScreen: View {
                         pick = .c3(board.id)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Label(board.name, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
-                            Text("\(board.duty.title) · \(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
+                            Label(board.listTitle, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
+                            Text("역할 \(board.roleTitle)")
+                                .font(.caption.weight(.semibold))
+                            Text("\(board.socketHost) · \(board.wifiMac.isEmpty ? "MAC 없음" : board.wifiMac) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -443,8 +454,10 @@ struct StudioControlScreen: View {
 
     private var olimexInspector: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("올리멕스 ESP32-PoE", systemImage: "server.rack")
+            Label("올리멕스 · 고프로·액션5", systemImage: "server.rack")
                 .font(.headline)
+            Text("역할 고프로·액션5")
+                .font(.caption.weight(.semibold))
             TextField("기판 이름", text: Binding(get: { studio.profile.olimexName }, set: { studio.renameOlimex($0) }))
                 .textFieldStyle(.roundedBorder)
             Text(studio.profile.olimexRegistered ? (link.state == .online ? "온라인" : "오프라인") : "등록 전")
@@ -458,7 +471,7 @@ struct StudioControlScreen: View {
             Text("공유기에서 고정 주소를 예약할 때 이 MAC을 적습니다. 와이파이는 와이파이 MAC, 랜 케이블은 이더넷 MAC 입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("액션 카메라는 이 기판 블루투스입니다. 로닌 짐벌은 로닌 제어 C3 블루투스가 맡습니다. 웹소켓이 열리기 전에는 온라인으로 두지 않습니다.")
+            Text("고프로·액션5만 이 기판입니다. 로닌은 OLED/RMSID C3, 울란지 조명은 S3 입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -486,11 +499,14 @@ struct StudioControlScreen: View {
 
     private func c3Inspector(_ board: C3BoardRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(board.duty == .light ? "조명" : "로닌", systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
+            Label(board.listTitle, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
                 .font(.headline)
+            Text("역할 \(board.roleTitle)")
+                .font(.caption.weight(.semibold))
             TextField("기판 이름", text: Binding(get: { board.name }, set: { studio.renameC3(board.id, $0) }))
                 .textFieldStyle(.roundedBorder)
-            Text("이 C3 는 \(board.duty.title)만 합니다.")
+            Text(board.boardSlot.map { "슬롯 \($0.rawValue) · \($0.boardTitle)" } ?? "슬롯 미정 · \(board.duty.title)")
+                .font(.caption)
             Text("\(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인 \(board.socketHost):82" : "오프라인 \(board.socketHost):82")")
                 .font(.caption.weight(.semibold))
                 .textSelection(.enabled)
@@ -523,7 +539,7 @@ struct StudioControlScreen: View {
                      : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
                     .font(.caption.weight(.semibold))
                 Button("로닌 블루투스 스캔") {
-                    Task { await studio.scanRoninGimbals() }
+                    Task { await studio.scanRoninGimbals(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle(expand: true))
                 .disabled(c3Link.boardId != board.id || c3Link.state != .online)
@@ -534,14 +550,14 @@ struct StudioControlScreen: View {
                 } else {
                     ForEach(c3Link.gimbals) { gimbal in
                         Button("붙이기 · \(gimbal.name)") {
-                            Task { await studio.pairRoninGimbal(name: gimbal.name, id: gimbal.id) }
+                            Task { await studio.pairRoninGimbal(name: gimbal.name, id: gimbal.id, boardId: board.id) }
                         }
                         .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3Link.pairedName == gimbal.name, expand: true))
                     }
                 }
                 if !board.gimbalName.isEmpty {
                     Button("저장 이름으로 다시 붙이기") {
-                        Task { await studio.pairRoninGimbal(name: board.gimbalName) }
+                        Task { await studio.pairRoninGimbal(name: board.gimbalName, boardId: board.id) }
                     }
                     .buttonStyle(DeskButtonStyle(expand: true))
                     .disabled(c3Link.boardId != board.id || c3Link.state != .online)
@@ -584,7 +600,7 @@ struct StudioControlScreen: View {
                 Text("울란지 VL120BI·VL200BI 조명입니다. 카메라 탈리(고프로 LED·액션 5 전면)와는 별개입니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("로닌용 C3 와 같은 기판이면 안 됩니다. 조명 전용 C3 가 필요합니다.")
+                Text("S3 슬롯 전용입니다. OLED·RMSID C3 와 같은 기판이면 안 됩니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(board.gimbalName.isEmpty
