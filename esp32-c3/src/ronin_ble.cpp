@@ -32,17 +32,35 @@ static bool textHas(const char* hay, const char* needle) {
   return strstr(hay, needle) != nullptr;
 }
 
+// RS·SC 공통: 이름에 ronin/rs/rsc 가 있거나, FFF0+DJI(0x08AA)이면서 액션캠 이름이 아닐 때.
+// 공식 앱은 SC를 "Ronin-SC" 로 찾고 FFF0 을 씁니다. RS 2 실기 광고도 FFF0·DJI 제조사입니다.
+static bool isActionCamName(const char* lower) {
+  return textHas(lower, "osmo") || textHas(lower, "action") || textHas(lower, "pocket");
+}
+
+static bool hasDjiManufacturer(NimBLEAdvertisedDevice& device) {
+  std::string raw = device.getManufacturerData();
+  if (raw.size() < 2) return false;
+  uint16_t company = (uint8_t)raw[0] | ((uint16_t)(uint8_t)raw[1] << 8);
+  return company == 0x08AA;
+}
+
 static bool looksLikeRonin(NimBLEAdvertisedDevice& device) {
   std::string name = device.getName();
   char lower[64];
   lowerCopy(lower, sizeof(lower), name.c_str());
-  if (textHas(lower, "ronin") || textHas(lower, "dji rs") || textHas(lower, "rs 2") || textHas(lower, "rs2") ||
-      textHas(lower, "rsc") || textHas(lower, "rs 3") || textHas(lower, "rs3")) {
+  if (isActionCamName(lower)) return false;
+  // 우리 기판 핫스팟 이름은 짐벌이 아닙니다.
+  if (textHas(lower, "ronin-olimex") || textHas(lower, "ronin-c3")) return false;
+  if (textHas(lower, "ronin") || textHas(lower, "ronin-sc") || textHas(lower, "ronin sc") ||
+      textHas(lower, "dji rs") || textHas(lower, "rs 2") || textHas(lower, "rs2") ||
+      textHas(lower, "rsc") || textHas(lower, "rsc2") || textHas(lower, "rsc 2") ||
+      textHas(lower, "rs 3") || textHas(lower, "rs3") || textHas(lower, "rs 4") || textHas(lower, "rs4")) {
     return true;
   }
-  if (device.isAdvertisingService(NimBLEUUID((uint16_t)0xFFF0)) && name.size() > 0) {
-    if (textHas(lower, "osmo") || textHas(lower, "action") || textHas(lower, "pocket")) return false;
-    if (textHas(lower, "dji")) return true;
+  const bool fff0 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xFFF0));
+  if (fff0 && name.size() > 0) {
+    if (textHas(lower, "dji") || hasDjiManufacturer(device)) return true;
   }
   return false;
 }
@@ -175,9 +193,13 @@ static bool openServices(NimBLEClient* next, char* reason, size_t reasonCap) {
   if (notify != nullptr && notify->canNotify()) {
     notify->subscribe(true, nullptr, true);
   }
+  // RS 계열은 보통 FFF5(응답 없이 쓰기). SC 등에서 FFF5 가 없으면 FFF3 도 시도합니다.
   NimBLERemoteCharacteristic* write = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF5));
   if (write == nullptr || !(write->canWrite() || write->canWriteNoResponse())) {
-    snprintf(reason, reasonCap, "로닌 쓰기 특성 FFF5 를 찾지 못했습니다.");
+    write = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF3));
+  }
+  if (write == nullptr || !(write->canWrite() || write->canWriteNoResponse())) {
+    snprintf(reason, reasonCap, "로닌 쓰기 특성 FFF5·FFF3 을 찾지 못했습니다.");
     return false;
   }
   writeChar = write;

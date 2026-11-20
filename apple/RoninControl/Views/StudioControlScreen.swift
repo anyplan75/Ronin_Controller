@@ -250,7 +250,7 @@ struct StudioControlScreen: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else if link.cameras.isEmpty {
-                        Text("아직 고프로·액션 5 이름이 안 보입니다. 장치 연결 또는 블루투스 리모컨 화면을 여세요.")
+                        Text("고프로·액션 5만 여기에 나옵니다. 로닌 짐벌은 C3 로닌 제어에서 스캔·붙입니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
@@ -528,7 +528,7 @@ struct StudioControlScreen: View {
                 .buttonStyle(DeskButtonStyle(expand: true))
                 .disabled(c3Link.boardId != board.id || c3Link.state != .online)
                 if c3Link.gimbals.isEmpty {
-                    Text("스캔하면 주변 로닌 이름이 여기에 나옵니다. 짐벌에서 블루투스를 켠 뒤 누르세요.")
+                    Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 짐벌 블루투스를 켠 뒤 누르세요. 올리멕스에 붙은 것처럼 보여도 조종은 여기 C3만입니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {

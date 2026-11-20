@@ -235,6 +235,8 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             cameras = rows.compactMap { row in
                 let name = (row["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 guard !name.isEmpty else { return nil }
+                // 로닌 짐벌은 올리멕스 목록에 두지 않습니다. 조종은 C3 로닌 역할만입니다.
+                if BoardSocket.looksLikeRoninGimbal(name) { return nil }
                 let id = (row["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let kind = (row["kind"] as? String) ?? ""
                 let ble = (row["ble"] as? String) ?? BoardSocket.ble(for: kind)
@@ -314,6 +316,17 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if text.contains("osmo") || text.contains("dji") { return "FFF0" }
         if text.contains("insta") { return "CE80" }
         return "FEA6"
+    }
+
+    /// 올리멕스 카메라 목록에서 걸러 낼 로닌 RS·SC 짐벌 이름입니다. C3 로닌 역할만 붙입니다.
+    static func looksLikeRoninGimbal(_ name: String) -> Bool {
+        let text = name.lowercased()
+        let keys = [
+            "ronin", "ronin-sc", "ronin sc",
+            "dji rs", "rs 2", "rs2", "rsc", "rsc2", "rsc 2",
+            "rs 3", "rs3", "rs 4", "rs4",
+        ]
+        return keys.contains { text.contains($0) }
     }
 }
 
