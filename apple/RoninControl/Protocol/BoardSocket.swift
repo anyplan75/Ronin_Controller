@@ -345,10 +345,15 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     @Published private(set) var apMac = ""
     @Published private(set) var gimbals: [C3Gimbal] = []
     @Published private(set) var pairedName = ""
+    @Published private(set) var otaNote = ""
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var generation = 0
     private var waiter: ((Bool, String) -> Void)?
+    private var otaStarted = false
+    private var lastHost = ""
+    private var lastSlot = ""
+    private var lastFw = ""
 
     func connect(_ board: C3BoardRecord) {
         guard board.link.shoots, !board.link.c3Host.isEmpty else {
@@ -385,6 +390,11 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         state = .offline
         boardId = nil
         detail = "오프라인"
+        otaStarted = false
+        lastHost = ""
+        lastSlot = ""
+        lastFw = ""
+        otaNote = ""
     }
 
     /// 열린 소켓으로만 보냅니다. 기판이 ack true 를 주기 전에는 성공으로 보지 않습니다.
@@ -470,11 +480,15 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if let mac = object["wifiMac"] as? String, !mac.isEmpty { wifiMac = mac }
         if let mac = object["apMac"] as? String, !mac.isEmpty { apMac = mac }
         if let host = object["host"] as? String, !host.isEmpty {
+            lastHost = host
             detail = state == .online ? "연결됨 \(host)" : detail
         }
+        if let slot = object["slot"] as? String, !slot.isEmpty { lastSlot = slot }
+        if let fw = object["fw"] as? String, !fw.isEmpty { lastFw = fw }
         if let paired = object["paired"] as? String, !paired.isEmpty {
             pairedName = paired
         }
+        maybeStartOta()
         let lightRows = (object["lights"] as? [[String: Any]]) ?? (object["gimbals"] as? [[String: Any]])
         if let rows = lightRows {
             gimbals = rows.compactMap { row in
@@ -504,5 +518,25 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         session = nil
         state = .offline
         detail = text
+    }
+
+    private func maybeStartOta() {
+        guard state == .online, !otaStarted else { return }
+        guard !lastHost.isEmpty, !lastSlot.isEmpty else { return }
+        otaStarted = true
+        let host = lastHost
+        let slot = lastSlot
+        let fw = lastFw
+        Task { @MainActor in
+            otaNote = "펌웨어 확인 중…"
+            let outcome = await BoardOta.ensureOnConnect(host: host, slot: slot, reportedFw: fw)
+            switch outcome {
+            case .skipped(let text), .updated(let text), .failed(let text):
+                otaNote = text
+                if case .updated = outcome {
+                    detail = "OTA 후 다시 연결하세요. \(text)"
+                }
+            }
+        }
     }
 }
