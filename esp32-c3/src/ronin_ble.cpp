@@ -1,6 +1,7 @@
 #include "ronin_ble.h"
 #include "board_net.h"
 #include "board_slot.h"
+#include "dji_duml.h"
 #include "dji_r_frame.h"
 
 #include <Preferences.h>
@@ -13,13 +14,83 @@ static size_t foundCount = 0;
 
 static NimBLEClient* client = nullptr;
 static NimBLERemoteCharacteristic* writeChar = nullptr;
+static NimBLERemoteCharacteristic* notifyChar = nullptr;
 static bool linked = false;
 static bool busy = false;
+static bool authed = false;
 static char linkedName[40] = {};
 static char linkedId[24] = {};
+static char writeUuid[8] = {};
 static uint16_t seq = 1;
+static uint16_t dumlSeq = 0x0100;
 static Preferences store;
 static RoninTarget targetFilter = RoninTarget::Any;
+
+// FFF4 알림을 모아 응답 코드를 봅니다. write 성공만으로 움직였다고 치지 않습니다.
+static constexpr size_t kRxCap = 256;
+static uint8_t rxBuf[kRxCap];
+static volatile size_t rxLen = 0;
+static volatile uint8_t lastAaCmdSet = 0;
+static volatile uint8_t lastAaCmdId = 0;
+static volatile uint8_t lastAaRet = 0xFF;
+static volatile bool lastAaOk = false;
+static volatile uint8_t lastDumlCmdSet = 0;
+static volatile uint8_t lastDumlCmdId = 0;
+static volatile bool lastDumlSeen = false;
+
+static void clearRx() {
+  rxLen = 0;
+  lastAaOk = false;
+  lastAaRet = 0xFF;
+  lastAaCmdSet = 0;
+  lastAaCmdId = 0;
+  lastDumlSeen = false;
+  lastDumlCmdSet = 0;
+  lastDumlCmdId = 0;
+}
+
+static void ingestNotify(const uint8_t* data, size_t len) {
+  if (data == nullptr || len == 0) return;
+  size_t at = rxLen;
+  if (at >= kRxCap) {
+    at = 0;
+    rxLen = 0;
+  }
+  size_t n = len;
+  if (at + n > kRxCap) n = kRxCap - at;
+  memcpy(rxBuf + at, data, n);
+  rxLen = at + n;
+
+  // AA 프레임 스캔
+  for (size_t i = 0; i + 16 <= rxLen; i++) {
+    if (rxBuf[i] != 0xAA) continue;
+    size_t total = (size_t)rxBuf[i + 1] | (((size_t)(rxBuf[i + 2] & 0x03)) << 8);
+    if (total < 16 || total > 128 || i + total > rxLen) continue;
+    uint8_t cmdSet = 0, cmdId = 0, cmdType = 0;
+    const uint8_t* payload = nullptr;
+    size_t payloadLen = 0;
+    if (!djiParseHeader(rxBuf + i, total, &cmdSet, &cmdId, &cmdType, &payload, &payloadLen)) continue;
+    lastAaCmdSet = cmdSet;
+    lastAaCmdId = cmdId;
+    if ((cmdType & 0x20) != 0 && payloadLen >= 1) {
+      lastAaRet = payload[0];
+      lastAaOk = true;
+    }
+  }
+  // DUML 프레임 스캔
+  for (size_t i = 0; i + 13 <= rxLen; i++) {
+    if (rxBuf[i] != 0x55) continue;
+    size_t total = (size_t)rxBuf[i + 1] | (((size_t)(rxBuf[i + 2] & 0x03)) << 8);
+    if (total < 13 || total > 200 || i + total > rxLen) continue;
+    lastDumlCmdSet = rxBuf[i + 9];
+    lastDumlCmdId = rxBuf[i + 10];
+    lastDumlSeen = true;
+  }
+}
+
+static void onNotify(NimBLERemoteCharacteristic* /*c*/, uint8_t* data, size_t len, bool /*isNotify*/) {
+  ingestNotify(data, len);
+}
 
 void roninBleSetTarget(RoninTarget target) { targetFilter = target; }
 RoninTarget roninBleTarget() { return targetFilter; }
@@ -92,7 +163,11 @@ static void resumeProvision() {
 
 static void clearLink(bool keepPrefs) {
   writeChar = nullptr;
+  notifyChar = nullptr;
   linked = false;
+  authed = false;
+  writeUuid[0] = 0;
+  clearRx();
   linkedName[0] = 0;
   linkedId[0] = 0;
   if (client != nullptr) {
@@ -238,26 +313,90 @@ void roninBleFillList(JsonDocument& doc) {
   }
 }
 
+static bool bleWrite(const uint8_t* frame, size_t len) {
+  if (writeChar == nullptr || frame == nullptr || len == 0) return false;
+  if (writeChar->canWriteNoResponse()) {
+    return writeChar->writeValue(frame, len, false);
+  }
+  return writeChar->writeValue(frame, len, true);
+}
+
+static bool waitAaReply(uint8_t wantSet, uint8_t wantId, uint32_t ms) {
+  uint32_t start = millis();
+  while (millis() - start < ms) {
+    boardNetPump();
+    if (lastAaOk && lastAaCmdSet == wantSet && lastAaCmdId == wantId) return true;
+    delay(5);
+  }
+  return lastAaOk && lastAaCmdSet == wantSet && lastAaCmdId == wantId;
+}
+
+static bool waitAnyNotify(uint32_t ms) {
+  uint32_t start = millis();
+  size_t before = rxLen;
+  while (millis() - start < ms) {
+    boardNetPump();
+    if (rxLen > before || lastAaOk || lastDumlSeen) return true;
+    delay(5);
+  }
+  return rxLen > before || lastAaOk || lastDumlSeen;
+}
+
 static bool openServices(NimBLEClient* next, char* reason, size_t reasonCap) {
   NimBLERemoteService* service = next->getService(NimBLEUUID((uint16_t)0xFFF0));
   if (service == nullptr) {
     snprintf(reason, reasonCap, "로닌 서비스 FFF0 을 찾지 못했습니다.");
     return false;
   }
-  NimBLERemoteCharacteristic* notify = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF4));
-  if (notify != nullptr && notify->canNotify()) {
-    notify->subscribe(true, nullptr, true);
+  clearRx();
+  notifyChar = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF4));
+  if (notifyChar != nullptr && notifyChar->canNotify()) {
+    notifyChar->subscribe(true, onNotify, true);
+    delay(80);
   }
-  // RS 계열은 보통 FFF5(응답 없이 쓰기). SC 등에서 FFF5 가 없으면 FFF3 도 시도합니다.
+  // FFF5 만 씁니다. FFF3 은 쓰기가 받아도 짐벌이 무시하는 경우가 있습니다.
   NimBLERemoteCharacteristic* write = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF5));
+  const char* uuidUsed = "FFF5";
   if (write == nullptr || !(write->canWrite() || write->canWriteNoResponse())) {
     write = service->getCharacteristic(NimBLEUUID((uint16_t)0xFFF3));
+    uuidUsed = "FFF3";
   }
   if (write == nullptr || !(write->canWrite() || write->canWriteNoResponse())) {
     snprintf(reason, reasonCap, "로닌 쓰기 특성 FFF5·FFF3 을 찾지 못했습니다.");
     return false;
   }
   writeChar = write;
+  strncpy(writeUuid, uuidUsed, sizeof(writeUuid) - 1);
+  Serial.printf("로닌 쓰기 특성 %s (notify=%s)\n", writeUuid, notifyChar ? "FFF4" : "없음");
+
+  // FFF4 에 [0x01,0x00] 페어 트리거(오즈모·로닌 공통 패턴).
+  if (notifyChar != nullptr && (notifyChar->canWrite() || notifyChar->canWriteNoResponse())) {
+    uint8_t kick[2] = {0x01, 0x00};
+    if (notifyChar->canWriteNoResponse()) notifyChar->writeValue(kick, 2, false);
+    else notifyChar->writeValue(kick, 2, true);
+    delay(120);
+    waitAnyNotify(250);
+  }
+
+  // AA 연결 요청(0x00/0x19). 저장 페어 모드.
+  uint8_t mac[6] = {};
+  NimBLEAddress addr = next->getPeerAddress();
+  // NimBLEAddress 문자열 "aa:bb:..." 파싱은 생략하고 0 으로 둡니다.
+  (void)addr;
+  uint8_t auth[64];
+  size_t authLen = djiAuthConnect(auth, sizeof(auth), seq++, 0xC3000001u, mac, 0, 0);
+  if (authLen > 0) {
+    clearRx();
+    if (bleWrite(auth, authLen)) {
+      waitAaReply(0x00, 0x19, 800);
+      if (lastAaOk && lastAaCmdSet == 0x00 && lastAaCmdId == 0x19) {
+        authed = (lastAaRet == 0);
+        Serial.printf("로닌 AA 인증 응답 ret=%u\n", (unsigned)lastAaRet);
+      } else {
+        Serial.println("로닌 AA 인증 응답 없음(계속 시도).");
+      }
+    }
+  }
   return true;
 }
 
@@ -399,6 +538,17 @@ bool roninBleAutoPair(char* reason, size_t reasonCap) {
   return roninBlePair(rows[0].name, rows[0].id, reason, reasonCap);
 }
 
+static void hexShort(char* out, size_t cap, const uint8_t* data, size_t len) {
+  if (out == nullptr || cap < 3) return;
+  size_t n = len;
+  if (n > 12) n = 12;
+  size_t at = 0;
+  for (size_t i = 0; i < n && at + 3 < cap; i++) {
+    at += (size_t)snprintf(out + at, cap - at, "%02x", data[i]);
+  }
+  if (len > n && at + 2 < cap) snprintf(out + at, cap - at, "..");
+}
+
 bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t reasonCap) {
   if (reason == nullptr || reasonCap == 0) return false;
   reason[0] = 0;
@@ -418,27 +568,89 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
     yawDeg = 0;
     pitchDeg = 0;
   }
-  uint8_t frame[40];
-  size_t len = djiMoveTo(frame, sizeof(frame), seq++, yawDeg, pitchDeg, 1.0f, true);
-  if (len == 0 || writeChar == nullptr) {
-    snprintf(reason, reasonCap, "이동 명령을 만들지 못했습니다.");
-    return false;
+
+  char path[48] = {};
+  char txHex[40] = {};
+  bool moved = false;
+
+  // 로닌 BLE 는 DUML(0x55) 응답이 확인됨. AA(R SDK)는 CAN 용이라 BLE 에서는 먼저 쓰지 않습니다.
+  // 1) DUML follow 모드 + 절대각
+  {
+    uint8_t mode[40];
+    size_t modeLen = dumlSetMode(mode, sizeof(mode), dumlSeq++, 1);
+    if (modeLen > 0) bleWrite(mode, modeLen);
+    delay(40);
+    uint8_t frame[48];
+    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, pitchDeg, yawDeg, 2.0f);
+    clearRx();
+    hexShort(txHex, sizeof(txHex), frame, len);
+    if (len > 0 && bleWrite(frame, len)) {
+      if (waitAnyNotify(800) && lastDumlSeen) {
+        moved = true;
+        snprintf(path, sizeof(path), "DUML-abs notify");
+      }
+    }
   }
-  bool ok = false;
-  if (writeChar->canWriteNoResponse()) {
-    ok = writeChar->writeValue(frame, len, false);
-  } else {
-    ok = writeChar->writeValue(frame, len, true);
+
+  // 2) DUML 속도 버스트(눈에 보이는 움직임)
+  if (!moved) {
+    uint8_t frame[48];
+    float yawSpeed = home ? 0.0f : (yawDeg >= 0 ? 20.0f : -20.0f);
+    size_t len = dumlSpeed(frame, sizeof(frame), dumlSeq++, 0, yawSpeed);
+    clearRx();
+    if (len > 0 && bleWrite(frame, len)) {
+      hexShort(txHex, sizeof(txHex), frame, len);
+      bool seen = waitAnyNotify(600);
+      delay(500);
+      uint8_t stop[48];
+      size_t stopLen = dumlSpeed(stop, sizeof(stop), dumlSeq++, 0, 0);
+      if (stopLen > 0) bleWrite(stop, stopLen);
+      if (seen && lastDumlSeen) {
+        moved = true;
+        snprintf(path, sizeof(path), "DUML-speed notify");
+      }
+    }
   }
-  if (!ok) {
-    snprintf(reason, reasonCap, "로닌에 팬·틸트를 쓰지 못했습니다. 블루투스를 다시 붙이세요.");
-    clearLink(true);
-    return false;
+
+  // 3) AA 절대 — 예전 CAN/액션캠 경로 폴백
+  if (!moved) {
+    uint8_t frame[48];
+    size_t len = djiMoveTo(frame, sizeof(frame), seq++, yawDeg, pitchDeg, 2.0f, true);
+    clearRx();
+    if (len > 0 && bleWrite(frame, len)) {
+      hexShort(txHex, sizeof(txHex), frame, len);
+      if (waitAaReply(0x0E, 0x00, 500) && lastAaRet == 0) {
+        moved = true;
+        snprintf(path, sizeof(path), "AA-abs ret0");
+      }
+    }
   }
-  if (home) {
-    snprintf(reason, reasonCap, "로닌 %s 제자리(팬 0°, 틸트 0°)로 보냈습니다.", linkedName);
-  } else {
-    snprintf(reason, reasonCap, "로닌 %s 팬 %.0f°, 틸트 %.0f° 를 블루투스로 보냈습니다.", linkedName, yawDeg, pitchDeg);
+
+  // 4) AA 상대
+  if (!moved) {
+    uint8_t frame[48];
+    size_t len = djiMoveTo(frame, sizeof(frame), seq++, yawDeg, pitchDeg, 2.0f, false);
+    clearRx();
+    if (len > 0 && bleWrite(frame, len)) {
+      hexShort(txHex, sizeof(txHex), frame, len);
+      if (waitAaReply(0x0E, 0x00, 500) && lastAaRet == 0) {
+        moved = true;
+        snprintf(path, sizeof(path), "AA-rel ret0");
+      }
+    }
   }
-  return true;
+
+  if (moved) {
+    snprintf(reason, reasonCap,
+             "로닌 %s 팬 %.0f° 틸트 %.0f° · %s · 특성 %s · 프로토콜응답 있음. 지금 움직이는지 봐 주세요.",
+             linkedName, yawDeg, pitchDeg, path, writeUuid[0] ? writeUuid : "?");
+    return true;
+  }
+
+  // write 만 되고 응답이 없으면 가짜 성공이므로 false.
+  snprintf(reason, reasonCap,
+           "로닌 %s BLE write 는 됐지만 짐벌 응답 없음(특성 %s tx %s aaRet=%u duml=%u). 프레임/모드 재확인 중.",
+           linkedName, writeUuid[0] ? writeUuid : "?", txHex[0] ? txHex : "-",
+           (unsigned)lastAaRet, (unsigned)lastDumlSeen);
+  return false;
 }

@@ -239,10 +239,13 @@ bool ulanziBleApplyIndex(uint8_t index, int brightness, int kelvin, bool on, cha
     snprintf(reason, reasonCap, "울란지 칸 %u 가 비어 있습니다. 먼저 스캔·붙이기를 하세요.", (unsigned)index);
     return false;
   }
-  char pairReason[160];
-  if (!ulanziBlePair(savedNames[index], savedIds[index], pairReason, sizeof(pairReason))) {
-    snprintf(reason, reasonCap, "%s", pairReason);
-    return false;
+  // 이미 같은 칸에 붙어 있으면 다시 페어하지 않습니다(~3초 지연 원인).
+  if (!(ulanziBleLinked() && linkedId[0] && strcasecmp(linkedId, savedIds[index]) == 0)) {
+    char pairReason[160];
+    if (!ulanziBlePair(savedNames[index], savedIds[index], pairReason, sizeof(pairReason))) {
+      snprintf(reason, reasonCap, "%s", pairReason);
+      return false;
+    }
   }
   return ulanziBleApply(brightness, kelvin, on, reason, reasonCap);
 }
@@ -459,7 +462,7 @@ bool ulanziBleApply(int brightness, int kelvin, bool on, char* reason, size_t re
       clearLink(true);
       return false;
     }
-    delay(80);
+    delay(30);
     if (!writePkt(off2, sizeof(off2))) {
       snprintf(reason, reasonCap, "울란지 끄기(2단계)를 쓰지 못했습니다.");
       clearLink(true);
@@ -482,14 +485,14 @@ bool ulanziBleApply(int brightness, int kelvin, bool on, char* reason, size_t re
     clearLink(true);
     return false;
   }
-  delay(50);
+  delay(20);
   uint8_t bri[] = {0xFF, 0xA2, 0x01, (uint8_t)level, (uint8_t)level, 0xAA};
   if (!writePkt(bri, sizeof(bri))) {
     snprintf(reason, reasonCap, "울란지 밝기를 쓰지 못했습니다.");
     clearLink(true);
     return false;
   }
-  delay(50);
+  delay(20);
   uint8_t hi = (uint8_t)((cct >> 8) & 0xFF);
   uint8_t lo = (uint8_t)(cct & 0xFF);
   uint8_t chk = (uint8_t)((hi + lo) & 0xFF);

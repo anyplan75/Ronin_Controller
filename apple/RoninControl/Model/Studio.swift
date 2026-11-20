@@ -1153,7 +1153,7 @@ final class Studio: ObservableObject {
             "brightness": brightness,
             "kelvin": kelvin,
             "on": on,
-        ], timeout: 14)
+        ], timeout: 4)
         if quiet && result.ack { return }
         if result.ack {
             note(result.reason.isEmpty

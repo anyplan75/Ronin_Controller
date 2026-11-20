@@ -69,9 +69,62 @@ inline size_t djiMoveTo(uint8_t* out, size_t cap, uint16_t seq, float yawDeg, fl
   payload[3] = (uint8_t)(roll >> 8);
   payload[4] = (uint8_t)(pitch & 0xFF);
   payload[5] = (uint8_t)(pitch >> 8);
+  // bit0=절대, bit1~3=축 무효(0=유효). 0x01 = 절대·3축 유효.
   payload[6] = absolute ? 0x01 : 0x00;
   if (timeSec < 0.1f) timeSec = 0.1f;
   if (timeSec > 25.0f) timeSec = 25.0f;
   payload[7] = (uint8_t)lroundf(timeSec * 10.0f);
   return djiBuild(out, cap, 0x0E, 0x00, 0x03, seq, payload, sizeof(payload));
+}
+
+inline size_t djiSpeed(uint8_t* out, size_t cap, uint16_t seq, float yawDps, float pitchDps) {
+  uint8_t payload[7];
+  int16_t yaw = djiDecideg(yawDps, -3600, 3600);
+  int16_t roll = 0;
+  int16_t pitch = djiDecideg(pitchDps, -3600, 3600);
+  payload[0] = (uint8_t)(yaw & 0xFF);
+  payload[1] = (uint8_t)(yaw >> 8);
+  payload[2] = (uint8_t)(roll & 0xFF);
+  payload[3] = (uint8_t)(roll >> 8);
+  payload[4] = (uint8_t)(pitch & 0xFF);
+  payload[5] = (uint8_t)(pitch >> 8);
+  payload[6] = 0x88;
+  return djiBuild(out, cap, 0x0E, 0x01, 0x03, seq, payload, sizeof(payload));
+}
+
+inline size_t djiGetAttitude(uint8_t* out, size_t cap, uint16_t seq) {
+  uint8_t payload[1] = {0x01};
+  return djiBuild(out, cap, 0x0E, 0x02, 0x03, seq, payload, sizeof(payload));
+}
+
+// 액션캠·로닌 BLE 공통 연결 요청(0x00/0x19). verifyMode 0=저장 페어 시도.
+inline size_t djiAuthConnect(uint8_t* out, size_t cap, uint16_t seq, uint32_t senderId, const uint8_t mac[6],
+                             uint8_t verifyMode, uint16_t verify) {
+  uint8_t payload[36];
+  memset(payload, 0, sizeof(payload));
+  payload[0] = (uint8_t)(senderId);
+  payload[1] = (uint8_t)(senderId >> 8);
+  payload[2] = (uint8_t)(senderId >> 16);
+  payload[3] = (uint8_t)(senderId >> 24);
+  payload[4] = 6;
+  if (mac != nullptr) {
+    for (int i = 0; i < 6; i++) payload[5 + i] = mac[i];
+  }
+  payload[25] = verifyMode;
+  payload[26] = (uint8_t)(verify & 0xFF);
+  payload[27] = (uint8_t)(verify >> 8);
+  return djiBuild(out, cap, 0x00, 0x19, 0x02, seq, payload, sizeof(payload));
+}
+
+inline bool djiParseHeader(const uint8_t* raw, size_t len, uint8_t* cmdSet, uint8_t* cmdId, uint8_t* cmdType,
+                           const uint8_t** payload, size_t* payloadLen) {
+  if (raw == nullptr || len < 16 || raw[0] != 0xAA) return false;
+  size_t total = (size_t)raw[1] | (((size_t)(raw[2] & 0x03)) << 8);
+  if (total != len || total < 16) return false;
+  if (cmdType) *cmdType = raw[3];
+  if (cmdSet) *cmdSet = raw[12];
+  if (cmdId) *cmdId = raw[13];
+  if (payload) *payload = raw + 14;
+  if (payloadLen) *payloadLen = total - 18;
+  return true;
 }

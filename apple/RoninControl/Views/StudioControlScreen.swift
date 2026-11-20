@@ -649,34 +649,24 @@ struct StudioControlScreen: View {
                             get: { lightKelvin[key] ?? 4500 },
                             set: { lightKelvin[key] = $0; queueLight(board.id, index: light.index) }
                         ), in: 2700...6500, step: 100)
-                        HStack {
-                            Button("켜기") {
-                                lightOnByKey[key] = true
+                        Toggle(isOn: Binding(
+                            get: { lightOnByKey[key] ?? true },
+                            set: { next in
+                                lightOnByKey[key] = next
                                 Task {
                                     await studio.setLight(
                                         board.id,
                                         index: light.index,
                                         brightness: Int(lightLevel[key] ?? 40),
                                         kelvin: Int(lightKelvin[key] ?? 4500),
-                                        on: true
+                                        on: next
                                     )
                                 }
                             }
-                            .buttonStyle(DeskButtonStyle(tone: .record))
-                            Button("끄기") {
-                                lightOnByKey[key] = false
-                                Task {
-                                    await studio.setLight(
-                                        board.id,
-                                        index: light.index,
-                                        brightness: Int(lightLevel[key] ?? 40),
-                                        kelvin: Int(lightKelvin[key] ?? 4500),
-                                        on: false
-                                    )
-                                }
-                            }
-                            .buttonStyle(DeskButtonStyle(tone: .stop))
+                        )) {
+                            Text(lightOnByKey[key] ?? true ? "켜짐" : "꺼짐")
                         }
+                        .toggleStyle(.switch)
                     }
                     .padding(.vertical, 4)
                 }
@@ -993,7 +983,7 @@ struct StudioControlScreen: View {
         let key = lightKey(boardId, index)
         lightSendTask[key]?.cancel()
         lightSendTask[key] = Task {
-            try? await Task.sleep(nanoseconds: 180_000_000)
+            try? await Task.sleep(nanoseconds: 50_000_000)
             guard !Task.isCancelled else { return }
             let brightness = Int(lightLevel[key] ?? 40)
             let kelvin = Int(lightKelvin[key] ?? 4500)
