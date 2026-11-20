@@ -946,8 +946,8 @@ final class Studio: ObservableObject {
         var payload: [String: Any] = ["op": "ronin", "pan": yaw, "yaw": yaw, "pitch": pitch]
         if roll != 0 { payload["roll"] = roll }
         if home { payload["home"] = true }
-        // 연속 팬·틸트는 짧은 대기. hello ack 가로채기 수정 후 실응답은 보통 수십 ms 입니다.
-        let result = await c3Socket.command(payload, timeout: home ? 6 : (quiet ? 1.2 : 3))
+        // 연속 팬·틸트는 짧은 대기(fw 1.0.58: DUML notify ≤280ms). 큐가 쌓이지 않게 합니다.
+        let result = await c3Socket.command(payload, timeout: home ? 4 : (quiet ? 0.7 : 2))
         if result.ack, !c3Socket.pairedName.isEmpty {
             rememberGimbalName(board.id, c3Socket.pairedName)
         }

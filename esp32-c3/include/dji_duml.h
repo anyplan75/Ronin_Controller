@@ -99,14 +99,16 @@ inline size_t dumlSpeed(uint8_t* out, size_t cap, uint16_t seq,
 }
 
 // RS2 줌: R SDK dial(0x0E/0x0A) 을 DUML 프레임에 실어 FFF5 로 보냅니다. AA 단독은 BLE 에서 무시됨.
-inline size_t dumlDial(uint8_t* out, size_t cap, uint16_t seq, int16_t speed) {
+// target: 0x0402=짐벌, 0x0102=카메라. flags 기본 0x40(실행), 필요 시 0x00(응답 요청).
+inline size_t dumlDial(uint8_t* out, size_t cap, uint16_t seq, int16_t speed,
+                       uint16_t target = 0x0402, uint8_t flags = 0x40) {
   if (speed < -2048) speed = -2048;
   if (speed > 2048) speed = 2048;
   uint8_t payload[3];
   payload[0] = 0x02;
   payload[1] = (uint8_t)(speed & 0xFF);
   payload[2] = (uint8_t)(speed >> 8);
-  return dumlBuild(out, cap, 0x0402, seq, 0x40, 0x0E, 0x0A, payload, sizeof(payload));
+  return dumlBuild(out, cap, target, seq, flags, 0x0E, 0x0A, payload, sizeof(payload));
 }
 
 inline size_t dumlSetMode(uint8_t* out, size_t cap, uint16_t seq, uint8_t mode) {

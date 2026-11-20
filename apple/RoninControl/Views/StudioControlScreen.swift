@@ -1018,7 +1018,8 @@ struct StudioControlScreen: View {
             while let next = roninPending {
                 roninPending = nil
                 await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true, home: sendHome && next.0 == 0 && next.1 == 0, boardId: boardId)
-                try? await Task.sleep(nanoseconds: 80_000_000)
+                // 펌웨어가 빠르게 ack 하면 큐 간격도 짧게(체감 <0.5s).
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             roninTask = nil
             if let pending = roninPending {

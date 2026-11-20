@@ -18,6 +18,8 @@ static NimBLERemoteCharacteristic* notifyChar = nullptr;
 static bool linked = false;
 static bool busy = false;
 static bool authed = false;
+static bool followModeSet = false;   // 페어 뒤 follow 모드 한 번만
+static bool dumlPathOk = false;      // DUML 응답을 본 적 있으면 짧은 대기
 static char linkedName[40] = {};
 static char linkedId[24] = {};
 static char writeUuid[8] = {};
@@ -166,20 +168,30 @@ static void clearLink(bool keepPrefs) {
   notifyChar = nullptr;
   linked = false;
   authed = false;
+  followModeSet = false;
+  dumlPathOk = false;
   writeUuid[0] = 0;
   clearRx();
-  linkedName[0] = 0;
-  linkedId[0] = 0;
   if (client != nullptr) {
     if (client->isConnected()) client->disconnect();
     NimBLEDevice::deleteClient(client);
     client = nullptr;
   }
   if (!keepPrefs) {
+    linkedName[0] = 0;
+    linkedId[0] = 0;
     store.begin("ronin-c3", false);
     store.remove("gimbalName");
     store.remove("gimbalId");
     store.end();
+  } else if (!linkedName[0]) {
+    // 끊김·페어 실패 뒤에도 저장 이름으로 자동 재연결되게 이름을 유지/복구합니다.
+    store.begin("ronin-c3", true);
+    String savedName = store.getString("gimbalName", "");
+    String savedId = store.getString("gimbalId", "");
+    store.end();
+    if (!savedName.isEmpty()) strncpy(linkedName, savedName.c_str(), sizeof(linkedName) - 1);
+    if (!savedId.isEmpty()) strncpy(linkedId, savedId.c_str(), sizeof(linkedId) - 1);
   }
   resumeProvision();
 }
@@ -553,6 +565,7 @@ bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t 
   if (reason == nullptr || reasonCap == 0) return false;
   reason[0] = 0;
   if (!roninBleLinked()) {
+    // 붙어 있을 때는 절대 재연결하지 않음(연속 제어 지연 방지). 끊긴 뒤에만 저장 이름으로 한 번 붙입니다.
     if (linkedName[0]) {
       char pairReason[160];
       if (!roninBlePair(linkedName, linkedId, pairReason, sizeof(pairReason))) {
@@ -569,32 +582,45 @@ bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t 
     pitchDeg = 0;
     rollDeg = 0;
   }
+  // 준 확인: 같은 요 명령에 RS2·SC가 서로 반대로 기울음 → SC(RMSID) 롤 부호를 뒤집어 RS2와 같은 쪽으로 맞춤.
+  const float reportRoll = rollDeg;
+#if defined(BOARD_SLOT_RMSID)
+  rollDeg = -rollDeg;
+#endif
 
   char path[48] = {};
   char txHex[40] = {};
   bool moved = false;
-  const bool yawOnly = (rollDeg != 0 && panDeg == 0 && pitchDeg == 0);
+  const bool yawOnly = (reportRoll != 0 && panDeg == 0 && pitchDeg == 0);
+  // 목표 체감 <0.5s: 이미 검증된 DUML 경로는 짧게, 처음만 조금 더 기다립니다.
+  const uint32_t notifyMs = dumlPathOk ? 180 : 300;
+  // 절대각 이동 시간도 짧게(예전 2.0s 는 느리게 보였음).
+  const float durationSec = home ? 0.45f : 0.30f;
 
-  // 로닌 BLE 는 DUML(0x55). AA 는 CAN 용.
-  // 1) DUML follow 모드 + 절대각 (팬·요(롤)·틸트 분리)
-  {
+  // follow 모드는 페어 뒤 한 번만. 매 명령 delay(40) 제거.
+  if (!followModeSet) {
     uint8_t mode[40];
     size_t modeLen = dumlSetMode(mode, sizeof(mode), dumlSeq++, 1);
     if (modeLen > 0) bleWrite(mode, modeLen);
-    delay(40);
+    followModeSet = true;
+  }
+
+  // 1) DUML 절대각 — 즉시 write, 짧은 notify
+  {
     uint8_t frame[48];
-    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, panDeg, pitchDeg, 2.0f, rollDeg);
+    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, panDeg, pitchDeg, durationSec, rollDeg);
     clearRx();
     hexShort(txHex, sizeof(txHex), frame, len);
     if (len > 0 && bleWrite(frame, len)) {
-      if (waitAnyNotify(800) && lastDumlSeen) {
+      if (waitAnyNotify(notifyMs) && lastDumlSeen) {
         moved = true;
+        dumlPathOk = true;
         snprintf(path, sizeof(path), "DUML-abs notify");
       }
     }
   }
 
-  // 2) DUML 속도 버스트
+  // 2) DUML 속도 폴백 — 고정 delay(500) 제거, 짧은 펄스만
   if (!moved) {
     uint8_t frame[48];
     float panSpeed = home ? 0.0f : (panDeg == 0 ? 0.0f : (panDeg >= 0 ? 20.0f : -20.0f));
@@ -604,41 +630,28 @@ bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t 
     clearRx();
     if (len > 0 && bleWrite(frame, len)) {
       hexShort(txHex, sizeof(txHex), frame, len);
-      bool seen = waitAnyNotify(600);
-      delay(500);
+      bool seen = waitAnyNotify(150);
       uint8_t stop[48];
       size_t stopLen = dumlSpeed(stop, sizeof(stop), dumlSeq++, 0, 0, 0);
       if (stopLen > 0) bleWrite(stop, stopLen);
       if (seen && lastDumlSeen) {
         moved = true;
+        dumlPathOk = true;
         snprintf(path, sizeof(path), "DUML-speed notify");
       }
     }
   }
 
-  // 3) AA 절대 폴백 (팬·틸트만 — 롤은 DUML 우선)
-  if (!moved && !yawOnly) {
+  // 3) AA 폴백은 DUML 이 한 번도 안 통했을 때만(느린 경로). 롤은 DUML 전용.
+  if (!moved && !yawOnly && !dumlPathOk) {
     uint8_t frame[48];
-    size_t len = djiMoveTo(frame, sizeof(frame), seq++, panDeg, pitchDeg, 2.0f, true);
+    size_t len = djiMoveTo(frame, sizeof(frame), seq++, panDeg, pitchDeg, 0.4f, true);
     clearRx();
     if (len > 0 && bleWrite(frame, len)) {
       hexShort(txHex, sizeof(txHex), frame, len);
-      if (waitAaReply(0x0E, 0x00, 500) && lastAaRet == 0) {
+      if (waitAaReply(0x0E, 0x00, 200) && lastAaRet == 0) {
         moved = true;
         snprintf(path, sizeof(path), "AA-abs ret0");
-      }
-    }
-  }
-
-  if (!moved && !yawOnly) {
-    uint8_t frame[48];
-    size_t len = djiMoveTo(frame, sizeof(frame), seq++, panDeg, pitchDeg, 2.0f, false);
-    clearRx();
-    if (len > 0 && bleWrite(frame, len)) {
-      hexShort(txHex, sizeof(txHex), frame, len);
-      if (waitAaReply(0x0E, 0x00, 500) && lastAaRet == 0) {
-        moved = true;
-        snprintf(path, sizeof(path), "AA-rel ret0");
       }
     }
   }
@@ -646,12 +659,12 @@ bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t 
   if (moved) {
     if (yawOnly) {
       snprintf(reason, reasonCap,
-               "로닌 %s 요(롤) %.0f° · %s · 특성 %s · 프로토콜응답 있음. 카메라가 옆으로 기울는지 봐 주세요.",
-               linkedName, rollDeg, path, writeUuid[0] ? writeUuid : "?");
+               "로닌 %s 요(롤) %.0f° · %s · 특성 %s · 프로토콜응답 있음. RS2·SC가 같은 쪽으로 기울는지 봐 주세요.",
+               linkedName, reportRoll, path, writeUuid[0] ? writeUuid : "?");
     } else {
       snprintf(reason, reasonCap,
                "로닌 %s 팬 %.0f° 틸트 %.0f° 요 %.0f° · %s · 특성 %s · 프로토콜응답 있음. 지금 움직이는지 봐 주세요.",
-               linkedName, panDeg, pitchDeg, rollDeg, path, writeUuid[0] ? writeUuid : "?");
+               linkedName, panDeg, pitchDeg, reportRoll, path, writeUuid[0] ? writeUuid : "?");
     }
     return true;
   }
@@ -693,46 +706,48 @@ bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
   char path[40] = {};
   char txHex[40] = {};
   bool ok = false;
+  uint8_t seenSet = 0;
+  uint8_t seenId = 0;
 
-  // 1) DUML 에 dial(0x0E/0x0A) 적재 — BLE 는 DUML 만 실행
-  {
-    uint8_t frame[48];
-    size_t len = dumlDial(frame, sizeof(frame), dumlSeq++, speed);
-    clearRx();
-    hexShort(txHex, sizeof(txHex), frame, len);
-    if (len > 0 && bleWrite(frame, len)) {
+  auto waitDialReply = [&](uint32_t ms) -> bool {
+    uint32_t t0 = millis();
+    while (millis() - t0 < ms) {
+      boardNetPump();
+      if (lastDumlSeen && lastDumlCmdSet == 0x0E && lastDumlCmdId == 0x0A) return true;
+      if (lastAaOk && lastAaCmdSet == 0x0E && lastAaCmdId == 0x0A && lastAaRet == 0) return true;
+      delay(5);
+    }
+    return (lastDumlSeen && lastDumlCmdSet == 0x0E && lastDumlCmdId == 0x0A) ||
+           (lastAaOk && lastAaCmdSet == 0x0E && lastAaCmdId == 0x0A && lastAaRet == 0);
+  };
+
+  // DUML dial: 짐벌/카메라 × flags 0x40·0x00. 0x0E/0x0A 응답만 ack(0x04/0x47 푸시는 가짜).
+  const uint16_t targets[2] = {0x0402, 0x0102};
+  const uint8_t flagOpts[2] = {0x40, 0x00};
+  for (uint16_t target : targets) {
+    for (uint8_t flags : flagOpts) {
+      if (ok) break;
+      uint8_t frame[48];
+      size_t len = dumlDial(frame, sizeof(frame), dumlSeq++, speed, target, flags);
+      clearRx();
+      hexShort(txHex, sizeof(txHex), frame, len);
+      if (len == 0 || !bleWrite(frame, len)) continue;
       if (speed == 0) {
-        snprintf(reason, reasonCap, "로닌 %s 줌 멈춤(DUML dial).", linkedName);
+        snprintf(reason, reasonCap, "로닌 %s 줌 멈춤(DUML dial tgt %04x).", linkedName, (unsigned)target);
         return true;
       }
-      uint32_t t0 = millis();
-      while (millis() - t0 < 900) {
-        boardNetPump();
-        if (lastDumlSeen && lastDumlCmdSet == 0x0E && lastDumlCmdId == 0x0A) {
-          ok = true;
-          snprintf(path, sizeof(path), "DUML-dial");
-          break;
-        }
-        delay(10);
-      }
-      // 연속 유지: 응답 없어도 짧게 더 밀어 눈확인용(ack 는 아래 엄격)
-      if (!ok) {
-        for (int i = 0; i < 6; i++) {
-          bleWrite(frame, len);
-          delay(120);
-        }
-        uint8_t stop[48];
-        size_t stopLen = dumlDial(stop, sizeof(stop), dumlSeq++, 0);
-        if (stopLen > 0) bleWrite(stop, stopLen);
-        if (lastDumlSeen && lastDumlCmdSet == 0x0E && lastDumlCmdId == 0x0A) {
-          ok = true;
-          snprintf(path, sizeof(path), "DUML-dial-burst");
-        }
+      if (waitDialReply(180)) {
+        ok = true;
+        snprintf(path, sizeof(path), "DUML-dial-%04x-f%02x", (unsigned)target, (unsigned)flags);
+      } else {
+        seenSet = lastDumlCmdSet;
+        seenId = lastDumlCmdId;
       }
     }
+    if (ok) break;
   }
 
-  // 2) AA dial 폴백 — ret0 있을 때만 성공(임의 notify 는 가짜 ack)
+  // 3) AA dial — ret0 있을 때만(임의 notify 가짜 ack 금지)
   if (!ok) {
     uint8_t frame[48];
     size_t len = djiDial(frame, sizeof(frame), seq++, speed);
@@ -743,7 +758,7 @@ bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
         snprintf(reason, reasonCap, "로닌 %s 줌 멈춤(AA dial).", linkedName);
         return true;
       }
-      if (waitAaReply(0x0E, 0x0A, 900) && lastAaRet == 0) {
+      if (waitAaReply(0x0E, 0x0A, 220) && lastAaRet == 0) {
         ok = true;
         snprintf(path, sizeof(path), "AA-dial ret0");
       }
@@ -758,9 +773,10 @@ bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
   }
 
   snprintf(reason, reasonCap,
-           "로닌 %s 줌 %s write 는 됐지만 dial 응답 없음(속도 %d tx %s aaRet=%u dumlSet=%u id=%u). 안 돌면 가짜 경로입니다.",
+           "로닌 %s 줌 %s write 는 됐지만 dial 응답 없음(속도 %d tx %s aaRet=%u dumlSet=%u id=%u seen=%u/%u). 안 돌면 가짜 경로입니다.",
            linkedName, speed > 0 ? "인" : "아웃", (int)speed, txHex[0] ? txHex : "-",
-           (unsigned)lastAaRet, (unsigned)lastDumlCmdSet, (unsigned)lastDumlCmdId);
+           (unsigned)lastAaRet, (unsigned)lastDumlCmdSet, (unsigned)lastDumlCmdId,
+           (unsigned)seenSet, (unsigned)seenId);
   return false;
 #endif
 }
