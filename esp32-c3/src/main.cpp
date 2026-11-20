@@ -7,6 +7,7 @@
 #include <esp_netif.h>
 #include <esp_wifi.h>
 
+#include "board_net.h"
 #include "board_oled.h"
 #include "board_ota.h"
 #include "board_slot.h"
@@ -29,6 +30,11 @@ static BoardSlot slot = kDefaultSlot;
 static String job = "ronin";
 static bool clientUp = false;
 static uint32_t nextAutoPairAt = 0;
+
+void boardNetPump() {
+  socket.loop();
+  yield();
+}
 
 static void applySlot(BoardSlot next) {
   slot = next;
@@ -408,6 +414,13 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     return;
   }
   const char* op = doc["op"] | "";
+  if (strcmp(op, "ping") == 0) {
+    // ack 없이 pong 만. 대기 중인 명령을 가로채지 않습니다.
+    JsonDocument pong;
+    pong["pong"] = true;
+    replyDoc(num, pong);
+    return;
+  }
   if (strcmp(op, "slot") == 0) {
     BoardSlot next = slotFromText(doc["slot"] | slotId(slot), slot);
     applySlot(next);
@@ -617,8 +630,10 @@ void setup() {
   Serial.println(WiFi.macAddress());
   socket.begin();
   socket.onEvent(onEvent);
+  // 앱 keepalive 와 맞춥니다. 스캔 라운드(2초)보다 여유 있게.
+  socket.enableHeartbeat(20000, 8000, 3);
   Serial.println("웹소켓 82번을 열었습니다.");
-  nextAutoPairAt = millis() + 8000;
+  nextAutoPairAt = millis() + 12000;
   refreshOled();
 }
 
@@ -635,20 +650,10 @@ void loop() {
       else Serial.println(reason);
     }
   } else {
+    // 로닌 자동 재페어는 roninBleLoop 한곳만. 여기서 또 스캔하면 WS 가 깜빡입니다.
     roninBleLoop();
-    if (WiFi.status() == WL_CONNECTED && !roninBleLinked() && !roninBleBusy() && millis() >= nextAutoPairAt) {
-      nextAutoPairAt = millis() + 20000;
-      char reason[180];
-      if (roninBleAutoPair(reason, sizeof(reason))) {
-        Serial.println(reason);
-        refreshOled();
-      } else {
-        Serial.println(reason);
-        refreshOled();
-      }
-    }
   }
   if (millis() % 3000 < 30) refreshOled();
-  socket.loop();
+  boardNetPump();
   (void)clientUp;
 }

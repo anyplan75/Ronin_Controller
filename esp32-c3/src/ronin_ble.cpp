@@ -1,4 +1,5 @@
 #include "ronin_ble.h"
+#include "board_net.h"
 #include "board_slot.h"
 #include "dji_r_frame.h"
 
@@ -129,15 +130,17 @@ void roninBleLoop() {
     clearLink(true);
     nextAutoPairMs = millis() + 2000;
   }
-  // OTA·재부팅 뒤 저장 이름으로 다시 붙습니다. 앱이 「지금 연결」을 다시 누르지 않아도 됩니다.
+  // OTA·재부팅 뒤 저장 이름으로 다시 붙습니다. 실패 시 간격을 늘려 스캔 폭주를 막습니다.
   if (!busy && !roninBleLinked() && linkedName[0] && millis() >= nextAutoPairMs) {
-    nextAutoPairMs = millis() + 15000;
+    nextAutoPairMs = millis() + 45000;
     char reason[160];
     if (roninBlePair(linkedName, linkedId, reason, sizeof(reason))) {
       Serial.println(reason);
+      nextAutoPairMs = millis() + 8000;
     } else {
       Serial.println(reason);
     }
+    boardNetPump();
   }
 }
 
@@ -149,22 +152,7 @@ bool roninBleLinked() { return linked && client != nullptr && client->isConnecte
 
 const char* roninBleName() { return linkedName[0] ? linkedName : ""; }
 
-size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
-  if (out == nullptr || cap == 0) return 0;
-  if (manageBusy) busy = true;
-  pauseProvision();
-  if (NimBLEDevice::getScan()->isScanning()) {
-    NimBLEDevice::getScan()->stop();
-  }
-  NimBLEScan* scan = NimBLEDevice::getScan();
-  scan->setActiveScan(true);
-  scan->setInterval(100);
-  scan->setWindow(90);
-  scan->setDuplicateFilter(true);
-  // SC 광고가 약할 때 4초면 놓칩니다. 중복 필터를 끄고 10초로 잡습니다.
-  scan->setDuplicateFilter(false);
-  NimBLEScanResults results = scan->start(10, false);
-  foundCount = 0;
+static void absorbScanResults(NimBLEScanResults& results) {
   for (int i = 0; i < results.getCount() && foundCount < kMaxFound; i++) {
     NimBLEAdvertisedDevice device = results.getDevice(i);
     if (!looksLikeRonin(device)) continue;
@@ -174,7 +162,6 @@ size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
     }
     char lower[64];
     lowerCopy(lower, sizeof(lower), name.c_str());
-    // 이름 없는 FFF0 후보는 SC 전용 보드에서만 통과시킵니다.
     if (textHas(lower, "dji-fff0-")) {
       if (targetFilter != RoninTarget::ScOnly && targetFilter != RoninTarget::Any) continue;
     } else if (!passesTarget(lower)) {
@@ -198,7 +185,29 @@ size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
     Serial.print(" ");
     Serial.println(row.id);
   }
-  scan->clearResults();
+}
+
+size_t roninBleScan(RoninFound* out, size_t cap, bool manageBusy) {
+  if (out == nullptr || cap == 0) return 0;
+  if (manageBusy) busy = true;
+  pauseProvision();
+  if (NimBLEDevice::getScan()->isScanning()) {
+    NimBLEDevice::getScan()->stop();
+  }
+  NimBLEScan* scan = NimBLEDevice::getScan();
+  scan->setActiveScan(true);
+  // 윈도우를 절반만 열어 와이파이·웹소켓이 BLE 스캔에 질식하지 않게 합니다.
+  scan->setInterval(160);
+  scan->setWindow(48);
+  scan->setDuplicateFilter(false);
+  foundCount = 0;
+  // 2초×5회 = 약 10초. 매 라운드마다 웹소켓을 펌핑해 online 깜빡임을 막습니다.
+  for (int round = 0; round < 5; round++) {
+    NimBLEScanResults results = scan->start(2, false);
+    absorbScanResults(results);
+    scan->clearResults();
+    boardNetPump();
+  }
   if (!roninBleLinked()) resumeProvision();
   if (manageBusy) busy = false;
   size_t n = foundCount < cap ? foundCount : cap;
@@ -320,8 +329,10 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
     snprintf(reason, reasonCap, "블루투스 클라이언트를 만들지 못했습니다.");
     return false;
   }
-  next->setConnectTimeout(8);
+  next->setConnectTimeout(6);
+  boardNetPump();
   if (!next->connect(address)) {
+    boardNetPump();
     // public 실패 시 random 주소로 한 번 더(SC 일부).
     if (hit == nullptr) {
       NimBLEAddress alt(std::string(connectId), BLE_ADDR_RANDOM);
@@ -340,6 +351,7 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
       return false;
     }
   }
+  boardNetPump();
   if (!openServices(next, reason, reasonCap)) {
     next->disconnect();
     NimBLEDevice::deleteClient(next);

@@ -1493,16 +1493,21 @@ final class Studio: ObservableObject {
         await watchBoards()
     }
 
-    /// 등록된 올리멕스와 C3 가 오프라인이면 저장된 192.168.10 주소로 다시 엽니다.
+    /// 등록된 올리멕스와 C3 가 오래 오프라인이면 다시 엽니다. 소켓 안의 softDrop 재연결이 우선입니다.
     private func keepFieldLinks() async {
         while !Task.isCancelled {
             if profile.olimexRegistered && boardSocket.state == .offline && boardSocket.lane.shoots {
                 reconnectOlimex(quiet: true)
             }
+            // connecting(다시 붙는 중)이면 건드리지 않습니다. 깜빡임·재연결 루프를 막습니다.
             if c3Socket.state == .offline {
-                reconnectC3()
+                if let id = c3Socket.boardId {
+                    reconnectC3(id)
+                } else {
+                    reconnectC3()
+                }
             }
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
         }
     }
 

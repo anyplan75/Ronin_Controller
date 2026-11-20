@@ -1,4 +1,5 @@
 #include "ulanzi_ble.h"
+#include "board_net.h"
 
 #include <Preferences.h>
 #include <ctype.h>
@@ -149,33 +150,37 @@ size_t ulanziBleScan(UlanziFound* out, size_t cap, bool manageBusy) {
   }
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
-  scan->setInterval(100);
-  scan->setWindow(90);
-  scan->setDuplicateFilter(true);
-  NimBLEScanResults results = scan->start(5, false);
+  scan->setInterval(160);
+  scan->setWindow(48);
+  scan->setDuplicateFilter(false);
   foundCount = 0;
-  for (int i = 0; i < results.getCount() && foundCount < kMaxFound; i++) {
-    NimBLEAdvertisedDevice device = results.getDevice(i);
-    if (!looksLikeUlanzi(device)) continue;
-    std::string name = device.getName();
-    if (name.empty()) name = "Ulanzi light";
-    UlanziFound row = {};
-    strncpy(row.name, name.c_str(), sizeof(row.name) - 1);
-    strncpy(row.id, device.getAddress().toString().c_str(), sizeof(row.id) - 1);
-    row.addrType = device.getAddressType();
-    bool dup = false;
-    for (size_t j = 0; j < foundCount; j++) {
-      if (strcmp(found[j].id, row.id) == 0) {
-        dup = true;
-        break;
+  for (int round = 0; round < 3; round++) {
+    NimBLEScanResults results = scan->start(2, false);
+    for (int i = 0; i < results.getCount() && foundCount < kMaxFound; i++) {
+      NimBLEAdvertisedDevice device = results.getDevice(i);
+      if (!looksLikeUlanzi(device)) continue;
+      std::string name = device.getName();
+      if (name.empty()) name = "Ulanzi light";
+      UlanziFound row = {};
+      strncpy(row.name, name.c_str(), sizeof(row.name) - 1);
+      strncpy(row.id, device.getAddress().toString().c_str(), sizeof(row.id) - 1);
+      row.addrType = device.getAddressType();
+      bool dup = false;
+      for (size_t j = 0; j < foundCount; j++) {
+        if (strcmp(found[j].id, row.id) == 0) {
+          dup = true;
+          break;
+        }
       }
+      if (dup) continue;
+      found[foundCount++] = row;
+      Serial.print("울란지 후보 ");
+      Serial.print(row.name);
+      Serial.print(" ");
+      Serial.println(row.id);
     }
-    if (dup) continue;
-    found[foundCount++] = row;
-    Serial.print("울란지 후보 ");
-    Serial.print(row.name);
-    Serial.print(" ");
-    Serial.println(row.id);
+    scan->clearResults();
+    boardNetPump();
   }
   scan->clearResults();
   if (!ulanziBleLinked()) resumeProvision();

@@ -627,6 +627,10 @@ static void handleText(const char* text) {
   JsonDocument doc;
   if (deserializeJson(doc, text)) return;
   const char* op = doc["op"] | "";
+  if (strcmp(op, "ping") == 0) {
+    // keepalive. 상태 방송은 하지 않습니다.
+    return;
+  }
   if (strcmp(op, "record") == 0 || strcmp(op, "record-one") == 0) {
     bool start = doc["start"] | false;
     bool led = doc["tally"] | start;
