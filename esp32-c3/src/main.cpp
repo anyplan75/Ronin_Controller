@@ -553,7 +553,13 @@ void setup() {
   Serial.begin(115200);
   delay(400);
   prefs.begin("ronin-c3", false);
+  // 빌드 env 슬롯이 담당을 고정합니다. 예전 prefs(slot) 때문에 OLED/SC/조명이 섞이지 않게 합니다.
+#if defined(BOARD_SLOT_OLED) || defined(BOARD_SLOT_RMSID) || defined(BOARD_SLOT_S3)
+  slot = kDefaultSlot;
+  prefs.putString("slot", slotId(slot));
+#else
   slot = slotFromText(prefs.getString("slot", slotId(kDefaultSlot)).c_str(), kDefaultSlot);
+#endif
   startProvision();
   applySlot(slot);
   banner();
