@@ -549,7 +549,7 @@ static void hexShort(char* out, size_t cap, const uint8_t* data, size_t len) {
   if (len > n && at + 2 < cap) snprintf(out + at, cap - at, "..");
 }
 
-bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t reasonCap) {
+bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t reasonCap, float rollDeg) {
   if (reason == nullptr || reasonCap == 0) return false;
   reason[0] = 0;
   if (!roninBleLinked()) {
@@ -565,23 +565,25 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
     }
   }
   if (home) {
-    yawDeg = 0;
+    panDeg = 0;
     pitchDeg = 0;
+    rollDeg = 0;
   }
 
   char path[48] = {};
   char txHex[40] = {};
   bool moved = false;
+  const bool yawOnly = (rollDeg != 0 && panDeg == 0 && pitchDeg == 0);
 
-  // 로닌 BLE 는 DUML(0x55) 응답이 확인됨. AA(R SDK)는 CAN 용이라 BLE 에서는 먼저 쓰지 않습니다.
-  // 1) DUML follow 모드 + 절대각
+  // 로닌 BLE 는 DUML(0x55). AA 는 CAN 용.
+  // 1) DUML follow 모드 + 절대각 (팬·요(롤)·틸트 분리)
   {
     uint8_t mode[40];
     size_t modeLen = dumlSetMode(mode, sizeof(mode), dumlSeq++, 1);
     if (modeLen > 0) bleWrite(mode, modeLen);
     delay(40);
     uint8_t frame[48];
-    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, yawDeg, pitchDeg, 2.0f);
+    size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, panDeg, pitchDeg, 2.0f, rollDeg);
     clearRx();
     hexShort(txHex, sizeof(txHex), frame, len);
     if (len > 0 && bleWrite(frame, len)) {
@@ -592,20 +594,20 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
     }
   }
 
-  // 2) DUML 속도 버스트(눈에 보이는 움직임)
+  // 2) DUML 속도 버스트
   if (!moved) {
     uint8_t frame[48];
-    float yawSpeed = home ? 0.0f : (yawDeg >= 0 ? 20.0f : -20.0f);
+    float panSpeed = home ? 0.0f : (panDeg == 0 ? 0.0f : (panDeg >= 0 ? 20.0f : -20.0f));
     float pitchSpeed = home ? 0.0f : (pitchDeg == 0 ? 0.0f : (pitchDeg >= 0 ? 15.0f : -15.0f));
-    if (yawDeg == 0 && pitchDeg != 0) yawSpeed = 0;
-    size_t len = dumlSpeed(frame, sizeof(frame), dumlSeq++, yawSpeed, pitchSpeed);
+    float rollSpeed = home ? 0.0f : (rollDeg == 0 ? 0.0f : (rollDeg >= 0 ? 15.0f : -15.0f));
+    size_t len = dumlSpeed(frame, sizeof(frame), dumlSeq++, panSpeed, pitchSpeed, rollSpeed);
     clearRx();
     if (len > 0 && bleWrite(frame, len)) {
       hexShort(txHex, sizeof(txHex), frame, len);
       bool seen = waitAnyNotify(600);
       delay(500);
       uint8_t stop[48];
-      size_t stopLen = dumlSpeed(stop, sizeof(stop), dumlSeq++, 0, 0);
+      size_t stopLen = dumlSpeed(stop, sizeof(stop), dumlSeq++, 0, 0, 0);
       if (stopLen > 0) bleWrite(stop, stopLen);
       if (seen && lastDumlSeen) {
         moved = true;
@@ -614,10 +616,10 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
     }
   }
 
-  // 3) AA 절대 — 예전 CAN/액션캠 경로 폴백
-  if (!moved) {
+  // 3) AA 절대 폴백 (팬·틸트만 — 롤은 DUML 우선)
+  if (!moved && !yawOnly) {
     uint8_t frame[48];
-    size_t len = djiMoveTo(frame, sizeof(frame), seq++, yawDeg, pitchDeg, 2.0f, true);
+    size_t len = djiMoveTo(frame, sizeof(frame), seq++, panDeg, pitchDeg, 2.0f, true);
     clearRx();
     if (len > 0 && bleWrite(frame, len)) {
       hexShort(txHex, sizeof(txHex), frame, len);
@@ -628,10 +630,9 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
     }
   }
 
-  // 4) AA 상대
-  if (!moved) {
+  if (!moved && !yawOnly) {
     uint8_t frame[48];
-    size_t len = djiMoveTo(frame, sizeof(frame), seq++, yawDeg, pitchDeg, 2.0f, false);
+    size_t len = djiMoveTo(frame, sizeof(frame), seq++, panDeg, pitchDeg, 2.0f, false);
     clearRx();
     if (len > 0 && bleWrite(frame, len)) {
       hexShort(txHex, sizeof(txHex), frame, len);
@@ -643,13 +644,18 @@ bool roninBleMove(float yawDeg, float pitchDeg, bool home, char* reason, size_t 
   }
 
   if (moved) {
-    snprintf(reason, reasonCap,
-             "로닌 %s 팬 %.0f° 틸트 %.0f° · %s · 특성 %s · 프로토콜응답 있음. 지금 움직이는지 봐 주세요.",
-             linkedName, yawDeg, pitchDeg, path, writeUuid[0] ? writeUuid : "?");
+    if (yawOnly) {
+      snprintf(reason, reasonCap,
+               "로닌 %s 요(롤) %.0f° · %s · 특성 %s · 프로토콜응답 있음. 카메라가 옆으로 기울는지 봐 주세요.",
+               linkedName, rollDeg, path, writeUuid[0] ? writeUuid : "?");
+    } else {
+      snprintf(reason, reasonCap,
+               "로닌 %s 팬 %.0f° 틸트 %.0f° 요 %.0f° · %s · 특성 %s · 프로토콜응답 있음. 지금 움직이는지 봐 주세요.",
+               linkedName, panDeg, pitchDeg, rollDeg, path, writeUuid[0] ? writeUuid : "?");
+    }
     return true;
   }
 
-  // write 만 되고 응답이 없으면 가짜 성공이므로 false.
   snprintf(reason, reasonCap,
            "로닌 %s BLE write 는 됐지만 짐벌 응답 없음(특성 %s tx %s aaRet=%u duml=%u). 프레임/모드 재확인 중.",
            linkedName, writeUuid[0] ? writeUuid : "?", txHex[0] ? txHex : "-",
@@ -684,44 +690,77 @@ bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
   if (speed < -2048) speed = -2048;
   if (speed > 2048) speed = 2048;
 
-  uint8_t frame[48];
-  size_t len = djiDial(frame, sizeof(frame), seq++, speed);
-  if (len == 0) {
-    snprintf(reason, reasonCap, "줌 프레임을 만들지 못했습니다.");
-    return false;
-  }
-
+  char path[40] = {};
   char txHex[40] = {};
-  hexShort(txHex, sizeof(txHex), frame, len);
-  clearRx();
-  if (!bleWrite(frame, len)) {
-    snprintf(reason, reasonCap, "로닌 줌 쓰기 실패(특성 %s).", writeUuid[0] ? writeUuid : "?");
-    return false;
+  bool ok = false;
+
+  // 1) DUML 에 dial(0x0E/0x0A) 적재 — BLE 는 DUML 만 실행
+  {
+    uint8_t frame[48];
+    size_t len = dumlDial(frame, sizeof(frame), dumlSeq++, speed);
+    clearRx();
+    hexShort(txHex, sizeof(txHex), frame, len);
+    if (len > 0 && bleWrite(frame, len)) {
+      if (speed == 0) {
+        snprintf(reason, reasonCap, "로닌 %s 줌 멈춤(DUML dial).", linkedName);
+        return true;
+      }
+      uint32_t t0 = millis();
+      while (millis() - t0 < 900) {
+        boardNetPump();
+        if (lastDumlSeen && lastDumlCmdSet == 0x0E && lastDumlCmdId == 0x0A) {
+          ok = true;
+          snprintf(path, sizeof(path), "DUML-dial");
+          break;
+        }
+        delay(10);
+      }
+      // 연속 유지: 응답 없어도 짧게 더 밀어 눈확인용(ack 는 아래 엄격)
+      if (!ok) {
+        for (int i = 0; i < 6; i++) {
+          bleWrite(frame, len);
+          delay(120);
+        }
+        uint8_t stop[48];
+        size_t stopLen = dumlDial(stop, sizeof(stop), dumlSeq++, 0);
+        if (stopLen > 0) bleWrite(stop, stopLen);
+        if (lastDumlSeen && lastDumlCmdSet == 0x0E && lastDumlCmdId == 0x0A) {
+          ok = true;
+          snprintf(path, sizeof(path), "DUML-dial-burst");
+        }
+      }
+    }
   }
 
-  if (speed == 0) {
-    snprintf(reason, reasonCap, "로닌 %s 줌 멈춤.", linkedName);
-    return true;
+  // 2) AA dial 폴백 — ret0 있을 때만 성공(임의 notify 는 가짜 ack)
+  if (!ok) {
+    uint8_t frame[48];
+    size_t len = djiDial(frame, sizeof(frame), seq++, speed);
+    clearRx();
+    if (len > 0) hexShort(txHex, sizeof(txHex), frame, len);
+    if (len > 0 && bleWrite(frame, len)) {
+      if (speed == 0) {
+        snprintf(reason, reasonCap, "로닌 %s 줌 멈춤(AA dial).", linkedName);
+        return true;
+      }
+      if (waitAaReply(0x0E, 0x0A, 900) && lastAaRet == 0) {
+        ok = true;
+        snprintf(path, sizeof(path), "AA-dial ret0");
+      }
+    }
   }
 
-  // dial(0x0E/0x0A) 응답이 오면 성공. 없으면 write-only 가짜 성공으로 치지 않습니다.
-  if (waitAaReply(0x0E, 0x0A, 900) && lastAaRet == 0) {
+  if (ok) {
     snprintf(reason, reasonCap,
-             "로닌 %s 줌 %s(속도 %d) · AA dial ret0 · 특성 %s. 렌즈/모터가 도는지 봐 주세요.",
-             linkedName, speed > 0 ? "인" : "아웃", (int)speed, writeUuid[0] ? writeUuid : "?");
-    return true;
-  }
-  if (waitAnyNotify(200) && lastDumlSeen) {
-    snprintf(reason, reasonCap,
-             "로닌 %s 줌 %s write+notify(속도 %d, aaRet=%u). 렌즈가 도는지 봐 주세요.",
-             linkedName, speed > 0 ? "인" : "아웃", (int)speed, (unsigned)lastAaRet);
+             "로닌 %s 줌 %s(속도 %d) · %s · 특성 %s. 렌즈/앞다이얼이 도는지 봐 주세요.",
+             linkedName, speed > 0 ? "인" : "아웃", (int)speed, path, writeUuid[0] ? writeUuid : "?");
     return true;
   }
 
   snprintf(reason, reasonCap,
-           "로닌 %s 줌 %s write 는 됐지만 응답 없음(속도 %d tx %s aaRet=%u). 렌즈가 도는지 확인해 주세요.",
+           "로닌 %s 줌 %s write 는 됐지만 dial 응답 없음(속도 %d tx %s aaRet=%u dumlSet=%u id=%u). 안 돌면 가짜 경로입니다.",
            linkedName, speed > 0 ? "인" : "아웃", (int)speed, txHex[0] ? txHex : "-",
-           (unsigned)lastAaRet);
+           (unsigned)lastAaRet, (unsigned)lastDumlCmdSet, (unsigned)lastDumlCmdId);
   return false;
 #endif
 }

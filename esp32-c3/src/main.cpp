@@ -525,11 +525,20 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       return;
     }
     bool home = doc["home"] | false;
-    float yaw = doc["yaw"] | 0.0f;
+    // 팬: pan 우선, 없으면 예전 호환 yaw. 요: roll(롤 모터). 팬≠요.
+    float pan = doc["pan"] | (doc["yaw"] | 0.0f);
     float pitch = doc["pitch"] | 0.0f;
+    float roll = doc["roll"] | 0.0f;
     if (strcmp(action, "home") == 0) home = true;
-    char reason[180];
-    bool ok = roninBleMove(yaw, pitch, home, reason, sizeof(reason));
+    // action:yaw → 요(롤)만. 팬·틸트 필드는 무시.
+    if (strcmp(action, "yaw") == 0) {
+      roll = doc["roll"] | (doc["yaw"] | 0.0f);
+      pan = 0;
+      pitch = 0;
+      home = false;
+    }
+    char reason[200];
+    bool ok = roninBleMove(pan, pitch, home, reason, sizeof(reason), roll);
     reply(num, ok, reason);
     return;
   }

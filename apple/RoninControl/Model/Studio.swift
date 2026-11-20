@@ -928,7 +928,9 @@ final class Studio: ObservableObject {
     }
 
     /// 화면의 팬·틸트입니다. 오프라인이면 붙인 뒤 바로 명령을 보냅니다. 「지금 연결」을 다시 누르지 않습니다.
-    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false, home: Bool = false, boardId: UUID? = nil) async {
+    /// - pan: 좌우(팬). 예전 인자 이름 yaw 는 호환용이며 팬으로 보냅니다.
+    /// - roll: 요(롤 모터). 팬과 다릅니다.
+    func nudgeRonin(yaw: Double, pitch: Double, quiet: Bool = false, home: Bool = false, boardId: UUID? = nil, roll: Double = 0) async {
         guard let board = roninBoard(boardId) else {
             noteOffline("짐벌은 로닌용 OLED/RMSID C3 가 블루투스로 움직입니다. 보드 자리를 먼저 맞추세요.")
             return
@@ -941,7 +943,8 @@ final class Studio: ObservableObject {
             if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
-        var payload: [String: Any] = ["op": "ronin", "yaw": yaw, "pitch": pitch]
+        var payload: [String: Any] = ["op": "ronin", "pan": yaw, "yaw": yaw, "pitch": pitch]
+        if roll != 0 { payload["roll"] = roll }
         if home { payload["home"] = true }
         // 연속 팬·틸트는 짧은 대기. hello ack 가로채기 수정 후 실응답은 보통 수십 ms 입니다.
         let result = await c3Socket.command(payload, timeout: home ? 6 : (quiet ? 1.2 : 3))
@@ -952,6 +955,8 @@ final class Studio: ObservableObject {
         if result.ack {
             if home {
                 note("\(board.listTitle) 이 로닌 제자리를 블루투스로 보냈다고 답했습니다.")
+            } else if roll != 0 && yaw == 0 && pitch == 0 {
+                note("\(board.listTitle) 이 요 \(Int(roll))° 를 블루투스로 받았다고 답했습니다.")
             } else {
                 note("\(board.listTitle) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
             }
@@ -962,6 +967,26 @@ final class Studio: ObservableObject {
                 note(result.sent ? result.reason : "\(board.listTitle) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
             }
         }
+    }
+
+    /// 요(롤 모터)만 보냅니다. 팬·틸트와 다른 축입니다.
+    func nudgeRoninYaw(roll: Double, boardId: UUID? = nil, quiet: Bool = false) async {
+        guard let board = roninBoard(boardId) else {
+            noteOffline("요는 로닌용 C3 가 블루투스로 보냅니다. 보드 자리를 먼저 맞추세요.")
+            return
+        }
+        guard board.link.shoots else {
+            noteOffline("\(board.listTitle) 은 USB 점검입니다. 요를 보내지 않았습니다.")
+            return
+        }
+        if !(await c3Socket.ensureOnline(board)) {
+            if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
+            return
+        }
+        let payload: [String: Any] = ["op": "ronin", "action": "yaw", "roll": roll, "yaw": roll]
+        let result = await c3Socket.command(payload, timeout: quiet ? 1.5 : 4)
+        if quiet && result.ack { return }
+        note(result.sent ? result.reason : "\(board.listTitle) 에 요를 보내지 않았습니다. \(result.reason)")
     }
 
     /// C3 가 주변 로닌 블루투스 이름을 읽습니다.

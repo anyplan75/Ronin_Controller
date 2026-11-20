@@ -11,6 +11,8 @@ struct StudioControlScreen: View {
     @State private var fov = "와이드"
     @State private var yaw = 0.0
     @State private var pitch = 0.0
+    /// 요(롤 모터). 팬(좌우)과 다른 축입니다.
+    @State private var rollYaw = 0.0
     /// 키: "보드UUID-칸index" — 울란지마다 밝기·색온도를 따로 둡니다.
     @State private var lightLevel: [String: Double] = [:]
     @State private var lightKelvin: [String: Double] = [:]
@@ -600,6 +602,11 @@ struct StudioControlScreen: View {
                 Slider(value: Binding(get: { yaw }, set: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -180...180, step: 1)
                 Text("틸트 \(Int(spot.homePitch + pitch))°")
                 Slider(value: Binding(get: { pitch }, set: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -56...90, step: 1)
+                Text("요 \(Int(rollYaw))° (롤·팬과 다름)")
+                Slider(value: Binding(get: { rollYaw }, set: {
+                    rollYaw = $0
+                    Task { await studio.nudgeRoninYaw(roll: $0, boardId: board.id, quiet: true) }
+                }), in: -30...30, step: 1)
                 Text("속도 \(Int(stickSpeed * 100))%")
                 Slider(value: $stickSpeed, in: 0.15...1)
                 if board.boardSlot == .oled {

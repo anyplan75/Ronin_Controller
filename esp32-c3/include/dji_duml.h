@@ -54,24 +54,27 @@ inline size_t dumlBuild(uint8_t* out, size_t cap, uint16_t target, uint16_t seq,
 }
 
 // App(0x02) → Gimbal(0x04) = 0x0402
-// 로닌 RS2/SC: 페이로드는 R SDK와 같이 yaw·roll·pitch 순서.
-// (Osmo Pocket 문서의 pitch-first 는 로닌에서 yaw가 틸트로 가는 오매핑이 났음.)
-// flags bit0=pitch, bit1=roll, bit2=yaw — 쓰는 축만 켭니다.
-inline size_t dumlAbsAngle(uint8_t* out, size_t cap, uint16_t seq, float yawDeg, float pitchDeg, float durationSec) {
+// 페이로드 순서: pan(좌우) · roll(요/기울기) · pitch(틸트). R SDK 와 같음.
+// 준 님 확정: 팬≠요. 팬=첫 칸(axis bit2), 요=롤 칸(axis bit1), 틸트=pitch(axis bit0).
+inline size_t dumlAbsAngle(uint8_t* out, size_t cap, uint16_t seq,
+                           float panDeg, float pitchDeg, float durationSec, float rollDeg = 0) {
   uint8_t payload[8];
-  int16_t yaw = (int16_t)lroundf(yawDeg * 10.0f);
-  int16_t roll = 0;
+  int16_t pan = (int16_t)lroundf(panDeg * 10.0f);
+  int16_t roll = (int16_t)lroundf(rollDeg * 10.0f);
   int16_t pitch = (int16_t)lroundf(pitchDeg * 10.0f);
-  payload[0] = (uint8_t)(yaw & 0xFF);
-  payload[1] = (uint8_t)(yaw >> 8);
+  if (roll < -300) roll = -300;
+  if (roll > 300) roll = 300;
+  payload[0] = (uint8_t)(pan & 0xFF);
+  payload[1] = (uint8_t)(pan >> 8);
   payload[2] = (uint8_t)(roll & 0xFF);
   payload[3] = (uint8_t)(roll >> 8);
   payload[4] = (uint8_t)(pitch & 0xFF);
   payload[5] = (uint8_t)(pitch >> 8);
   uint8_t axis = 0;
-  if (yaw != 0) axis |= 0x04;    // yaw/팬
-  if (pitch != 0) axis |= 0x01;  // pitch/틸트
-  if (axis == 0) axis = 0x05;    // 제자리: 팬+틸트
+  if (pan != 0) axis |= 0x04;     // 팬
+  if (roll != 0) axis |= 0x02;    // 요(롤 모터)
+  if (pitch != 0) axis |= 0x01;   // 틸트
+  if (axis == 0) axis = 0x05;     // 제자리: 팬+틸트
   payload[6] = axis;
   if (durationSec < 0.1f) durationSec = 0.1f;
   if (durationSec > 25.0f) durationSec = 25.0f;
@@ -79,19 +82,31 @@ inline size_t dumlAbsAngle(uint8_t* out, size_t cap, uint16_t seq, float yawDeg,
   return dumlBuild(out, cap, 0x0402, seq, 0x40, 0x04, 0x14, payload, sizeof(payload));
 }
 
-inline size_t dumlSpeed(uint8_t* out, size_t cap, uint16_t seq, float yawDps, float pitchDps) {
+inline size_t dumlSpeed(uint8_t* out, size_t cap, uint16_t seq,
+                        float panDps, float pitchDps, float rollDps = 0) {
   uint8_t payload[7];
-  int16_t yaw = (int16_t)lroundf(yawDps * 10.0f);
-  int16_t roll = 0;
+  int16_t pan = (int16_t)lroundf(panDps * 10.0f);
+  int16_t roll = (int16_t)lroundf(rollDps * 10.0f);
   int16_t pitch = (int16_t)lroundf(pitchDps * 10.0f);
-  payload[0] = (uint8_t)(yaw & 0xFF);
-  payload[1] = (uint8_t)(yaw >> 8);
+  payload[0] = (uint8_t)(pan & 0xFF);
+  payload[1] = (uint8_t)(pan >> 8);
   payload[2] = (uint8_t)(roll & 0xFF);
   payload[3] = (uint8_t)(roll >> 8);
   payload[4] = (uint8_t)(pitch & 0xFF);
   payload[5] = (uint8_t)(pitch >> 8);
   payload[6] = 0x01;
   return dumlBuild(out, cap, 0x0402, seq, 0x40, 0x04, 0x0C, payload, sizeof(payload));
+}
+
+// RS2 줌: R SDK dial(0x0E/0x0A) 을 DUML 프레임에 실어 FFF5 로 보냅니다. AA 단독은 BLE 에서 무시됨.
+inline size_t dumlDial(uint8_t* out, size_t cap, uint16_t seq, int16_t speed) {
+  if (speed < -2048) speed = -2048;
+  if (speed > 2048) speed = 2048;
+  uint8_t payload[3];
+  payload[0] = 0x02;
+  payload[1] = (uint8_t)(speed & 0xFF);
+  payload[2] = (uint8_t)(speed >> 8);
+  return dumlBuild(out, cap, 0x0402, seq, 0x40, 0x0E, 0x0A, payload, sizeof(payload));
 }
 
 inline size_t dumlSetMode(uint8_t* out, size_t cap, uint16_t seq, uint8_t mode) {
