@@ -809,6 +809,32 @@ struct PtzScene: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// 이동형 프리셋 한 칸입니다. 정지 장면 번호를 순서대로 부릅니다(뮤비·생방 경로).
+struct PtzMoveStep: Codable, Equatable, Sendable, Identifiable {
+    var id: UUID
+    var sceneNumber: Int
+    /// 그 장면에 머무는 초.
+    var dwellSeconds: Double
+
+    init(id: UUID = UUID(), sceneNumber: Int, dwellSeconds: Double = 2) {
+        self.id = id
+        self.sceneNumber = sceneNumber
+        self.dwellSeconds = dwellSeconds
+    }
+}
+
+struct PtzMovePath: Codable, Equatable, Sendable, Identifiable {
+    var id: UUID
+    var name: String
+    var steps: [PtzMoveStep]
+
+    init(id: UUID = UUID(), name: String, steps: [PtzMoveStep] = []) {
+        self.id = id
+        self.name = name
+        self.steps = steps
+    }
+}
+
 /// 같은 망의 ONVIF PTZ 입니다. 비밀번호는 프로필에 넣지 않습니다.
 struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
@@ -823,8 +849,10 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
     var viscaPort: Int
     /// 장면 1–10 입니다. 번호는 바뀌지 않습니다.
     var scenes: [PtzScene]
+    /// 이동형 프리셋(경로). 정지 장면을 순서대로 부릅니다.
+    var movePaths: [PtzMovePath]
 
-    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "", onvifPort: Int = 2000, viscaPort: Int = 1259, scenes: [PtzScene] = []) {
+    init(id: UUID, name: String, host: String, username: String, endpoint: String = "", mac: String = "", onvifPort: Int = 2000, viscaPort: Int = 1259, scenes: [PtzScene] = [], movePaths: [PtzMovePath] = []) {
         self.id = id
         self.name = name
         self.host = host
@@ -834,9 +862,10 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         self.onvifPort = onvifPort
         self.viscaPort = viscaPort
         self.scenes = PtzScene.ten(scenes)
+        self.movePaths = movePaths
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac, onvifPort, viscaPort, scenes }
+    enum CodingKeys: String, CodingKey { case id, name, host, username, endpoint, mac, onvifPort, viscaPort, scenes, movePaths }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
@@ -849,6 +878,7 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         onvifPort = try box.decodeIfPresent(Int.self, forKey: .onvifPort) ?? 2000
         viscaPort = try box.decodeIfPresent(Int.self, forKey: .viscaPort) ?? 1259
         scenes = PtzScene.ten(try box.decodeIfPresent([PtzScene].self, forKey: .scenes) ?? [])
+        movePaths = try box.decodeIfPresent([PtzMovePath].self, forKey: .movePaths) ?? []
     }
 
     func encode(to encoder: Encoder) throws {
@@ -862,6 +892,7 @@ struct PtzRecord: Identifiable, Codable, Equatable, Sendable {
         try box.encode(onvifPort, forKey: .onvifPort)
         try box.encode(viscaPort, forKey: .viscaPort)
         try box.encode(PtzScene.ten(scenes), forKey: .scenes)
+        try box.encode(movePaths, forKey: .movePaths)
     }
 }
 

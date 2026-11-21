@@ -47,7 +47,23 @@ enum Visca {
     static func stop(host: String, port: UInt16 = 1259) async -> Bool {
         let pan = await send(host: host, port: port, bytes: [0x81, 0x01, 0x06, 0x01, 0x01, 0x01, 0x03, 0x03, 0xFF])
         let zoom = await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x07, 0x00, 0xFF])
-        return pan || zoom
+        let focus = await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x08, 0x00, 0xFF])
+        return pan || zoom || focus
+    }
+
+    /// 포커스: + Far, − Near, 0 정지.
+    static func focus(host: String, port: UInt16 = 1259, direction: Int) async -> Bool {
+        let byte: UInt8 = direction > 0 ? 0x02 : (direction < 0 ? 0x03 : 0x00)
+        return await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x08, byte, 0xFF])
+    }
+
+    /// 조리개: + 열기, − 닫기, 0 정지. auto=true 이면 자동.
+    static func iris(host: String, port: UInt16 = 1259, direction: Int, auto: Bool = false) async -> Bool {
+        if auto {
+            return await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x39, 0x00, 0xFF])
+        }
+        let byte: UInt8 = direction > 0 ? 0x02 : (direction < 0 ? 0x03 : 0x00)
+        return await send(host: host, port: port, bytes: [0x81, 0x01, 0x04, 0x0B, byte, 0xFF])
     }
 
     private static func nibbles(_ value: Int) -> [UInt8] {
