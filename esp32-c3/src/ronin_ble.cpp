@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <ctype.h>
 #include <string.h>
+#include <math.h>
 
 static constexpr size_t kMaxFound = 8;
 static RoninFound found[kMaxFound];
@@ -488,8 +489,6 @@ static bool openServices(NimBLEClient* next, char* reason, size_t reasonCap) {
   }
   writeChar = write;
   strncpy(writeUuid, uuidUsed, sizeof(writeUuid) - 1);
-  Serial.printf("로닌 쓰기 특성 %s (notify=%s)\n", writeUuid, notifyChar ? "FFF4" : "없음");
-
   // FFF4 에 [0x01,0x00] 페어 트리거(오즈모·로닌 공통 패턴).
   if (notifyChar != nullptr && (notifyChar->canWrite() || notifyChar->canWriteNoResponse())) {
     uint8_t kick[2] = {0x01, 0x00};
@@ -499,11 +498,8 @@ static bool openServices(NimBLEClient* next, char* reason, size_t reasonCap) {
     waitAnyNotify(250);
   }
 
-  // AA 연결 요청(0x00/0x19). 저장 페어 모드.
+  // AA 연결 요청(0x00/0x19). 로그 문자열은 생략(플래시).
   uint8_t mac[6] = {};
-  NimBLEAddress addr = next->getPeerAddress();
-  // NimBLEAddress 문자열 "aa:bb:..." 파싱은 생략하고 0 으로 둡니다.
-  (void)addr;
   uint8_t auth[64];
   size_t authLen = djiAuthConnect(auth, sizeof(auth), seq++, 0xC3000001u, mac, 0, 0);
   if (authLen > 0) {
@@ -512,9 +508,6 @@ static bool openServices(NimBLEClient* next, char* reason, size_t reasonCap) {
       waitAaReply(0x00, 0x19, 800);
       if (lastAaOk && lastAaCmdSet == 0x00 && lastAaCmdId == 0x19) {
         authed = (lastAaRet == 0);
-        Serial.printf("로닌 AA 인증 응답 ret=%u\n", (unsigned)lastAaRet);
-      } else {
-        Serial.println("로닌 AA 인증 응답 없음(계속 시도).");
       }
     }
   }
@@ -756,38 +749,24 @@ bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t 
     }
   }
 
-  // 3) AA 폴백은 DUML 이 한 번도 안 통했을 때만(느린 경로). 롤은 DUML 전용.
-  if (!moved && !yawOnly && !dumlPathOk) {
-    uint8_t frame[48];
-    size_t len = djiMoveTo(frame, sizeof(frame), seq++, panDeg, pitchDeg, 0.4f, true);
-    clearRx();
-    if (len > 0 && bleWrite(frame, len)) {
-      hexShort(txHex, sizeof(txHex), frame, len);
-      if (waitAaReply(0x0E, 0x00, 200) && lastAaRet == 0) {
-        moved = true;
-        snprintf(path, sizeof(path), "AA-abs ret0");
-      }
-    }
-  }
+  // AA 이동 폴백 제거(플래시·지연). DUML 만.
 
   if (moved) {
     lastBleSendMs = millis();
     if (yawOnly) {
-      snprintf(reason, reasonCap,
-               "로닌 %s 요(롤) %.0f° · %s · 특성 %s · 프로토콜응답 있음. RS2·SC가 같은 쪽으로 기울는지 봐 주세요.",
-               linkedName, reportRoll, path, writeUuid[0] ? writeUuid : "?");
+      snprintf(reason, reasonCap, "%s yaw %d %s %s — 눈확인",
+               linkedName, (int)lroundf(reportRoll), path, writeUuid[0] ? writeUuid : "?");
     } else {
-      snprintf(reason, reasonCap,
-               "로닌 %s 팬 %.0f° 틸트 %.0f° 요 %.0f° · %s · 특성 %s · 프로토콜응답 있음. 지금 움직이는지 봐 주세요.",
-               linkedName, panDeg, pitchDeg, reportRoll, path, writeUuid[0] ? writeUuid : "?");
+      snprintf(reason, reasonCap, "%s p%d t%d r%d %s %s — 눈확인",
+               linkedName, (int)lroundf(panDeg), (int)lroundf(pitchDeg), (int)lroundf(reportRoll),
+               path, writeUuid[0] ? writeUuid : "?");
     }
     return true;
   }
 
-  snprintf(reason, reasonCap,
-           "로닌 %s BLE write 는 됐지만 짐벌 응답 없음(특성 %s tx %s aaRet=%u duml=%u). 프레임/모드 재확인 중.",
+  snprintf(reason, reasonCap, "%s no gimbal reply (%s tx %s duml=%u)",
            linkedName, writeUuid[0] ? writeUuid : "?", txHex[0] ? txHex : "-",
-           (unsigned)lastAaRet, (unsigned)lastDumlSeen);
+           (unsigned)lastDumlSeen);
   return false;
 }
 
@@ -862,35 +841,15 @@ bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
     if (ok) break;
   }
 
-  // 3) AA dial — ret0 있을 때만(임의 notify 가짜 ack 금지)
-  if (!ok) {
-    uint8_t frame[48];
-    size_t len = djiDial(frame, sizeof(frame), seq++, speed);
-    clearRx();
-    if (len > 0) hexShort(txHex, sizeof(txHex), frame, len);
-    if (len > 0 && bleWrite(frame, len)) {
-      if (speed == 0) {
-        snprintf(reason, reasonCap, "로닌 %s 줌 멈춤(AA dial).", linkedName);
-        return true;
-      }
-      if (waitAaReply(0x0E, 0x0A, 220) && lastAaRet == 0) {
-        ok = true;
-        snprintf(path, sizeof(path), "AA-dial ret0");
-      }
-    }
-  }
+  // AA dial 폴백 제거(플래시). 0x0E/0x0A 없으면 실패(가짜 ack 금지).
 
   if (ok) {
-    snprintf(reason, reasonCap,
-             "로닌 %s 줌 %s(속도 %d) · %s · 특성 %s. 렌즈/앞다이얼이 도는지 봐 주세요.",
-             linkedName, speed > 0 ? "인" : "아웃", (int)speed, path, writeUuid[0] ? writeUuid : "?");
+    snprintf(reason, reasonCap, "%s zoom %d %s — 눈확인", linkedName, (int)speed, path);
     return true;
   }
 
-  snprintf(reason, reasonCap,
-           "로닌 %s 줌 %s write 는 됐지만 dial 응답 없음(속도 %d tx %s aaRet=%u dumlSet=%u id=%u seen=%u/%u). 안 돌면 가짜 경로입니다.",
-           linkedName, speed > 0 ? "인" : "아웃", (int)speed, txHex[0] ? txHex : "-",
-           (unsigned)lastAaRet, (unsigned)lastDumlCmdSet, (unsigned)lastDumlCmdId,
+  snprintf(reason, reasonCap, "%s zoom no dial reply spd=%d tx %s set=%u id=%u",
+           linkedName, (int)speed, txHex[0] ? txHex : "-",
            (unsigned)seenSet, (unsigned)seenId);
   return false;
 #endif
@@ -924,7 +883,7 @@ bool roninBleProbePayload(int axisSlot, float deg, int rawByte, int rawValue, ch
     payload[6] = (uint8_t)(axisSlot == 0 ? 0x04 : (axisSlot == 1 ? 0x02 : 0x01));
     payload[7] = 3;
     const char* axisName = axisSlot == 0 ? "pan" : (axisSlot == 1 ? "roll/yaw" : "pitch");
-    snprintf(label, sizeof(label), "axis %s=%.1f°", axisName, deg);
+    snprintf(label, sizeof(label), "axis %s=%d°", axisName, (int)lroundf(deg));
   } else {
     snprintf(reason, reasonCap, "probe 는 axis(0~2) 또는 rawByte(0~7) 가 필요합니다.");
     return false;

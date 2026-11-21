@@ -6,13 +6,18 @@
 #include <WiFi.h>
 #include <esp_netif.h>
 #include <esp_wifi.h>
+#include <math.h>
 
 #include "board_net.h"
 #include "board_oled.h"
 #include "board_ota.h"
 #include "board_slot.h"
+#if defined(BOARD_HAS_RONIN)
 #include "ronin_ble.h"
+#endif
+#if defined(BOARD_HAS_LIGHT)
 #include "ulanzi_ble.h"
+#endif
 
 #if __has_include("wifi_local.h")
 #include "wifi_local.h"
@@ -41,13 +46,21 @@ static void applySlot(BoardSlot next) {
   prefs.putString("slot", slotId(slot));
   if (slotIsLight(slot)) {
     job = "light";
+#if defined(BOARD_HAS_RONIN)
     roninBleDrop();
+#endif
+#if defined(BOARD_HAS_LIGHT)
     ulanziBleBegin();
+#endif
   } else {
     job = "ronin";
+#if defined(BOARD_HAS_LIGHT)
     ulanziBleDrop();
+#endif
+#if defined(BOARD_HAS_RONIN)
     roninBleSetTarget(slot == BoardSlot::OledRs2 ? RoninTarget::Rs2Only : RoninTarget::ScOnly);
     roninBleBegin();
+#endif
   }
   prefs.putString("job", job);
 }
@@ -68,8 +81,12 @@ static void refreshOled(bool force = false) {
   } else {
     snprintf(l2, sizeof(l2), "WiFi...");
   }
+#if defined(BOARD_HAS_RONIN)
   if (roninBleLinked()) snprintf(l3, sizeof(l3), "%s", roninBleName());
   else snprintf(l3, sizeof(l3), "no pair");
+#else
+  snprintf(l3, sizeof(l3), "light");
+#endif
   char sig[72];
   snprintf(sig, sizeof(sig), "%s|%s|%s", l1, l2, l3);
   uint32_t now = millis();
@@ -90,11 +107,15 @@ static void replyDoc(uint8_t num, JsonDocument& doc) {
   if (WiFi.status() == WL_CONNECTED) doc["host"] = WiFi.localIP().toString();
   if (slot == BoardSlot::OledRs2) doc["oledReady"] = boardOledReady() ? 1 : 0;
   if (job == "ronin") {
+#if defined(BOARD_HAS_RONIN)
     if (roninBleLinked()) doc["paired"] = roninBleName();
+#endif
   } else if (job == "light") {
+#if defined(BOARD_HAS_LIGHT)
     if (ulanziBleLinked()) doc["paired"] = ulanziBleName();
     doc["savedLights"] = ulanziBleSavedCount();
     ulanziBleFillSaved(doc);
+#endif
   }
   String out;
   serializeJson(doc, out);
@@ -354,14 +375,18 @@ static void banner() {
   Serial.print("같은 와이파이 기본 ");
   Serial.print(slotDefaultIp(slot));
   Serial.println(":82. CAN 아님. 조명은 탈리와 별개.");
+#if defined(BOARD_HAS_RONIN)
   if (job == "ronin" && roninBleName()[0]) {
     Serial.print("저장된 로닌 이름: ");
     Serial.println(roninBleName());
   }
+#endif
+#if defined(BOARD_HAS_LIGHT)
   if (job == "light" && ulanziBleName()[0]) {
     Serial.print("저장된 울란지 이름: ");
     Serial.println(ulanziBleName());
   }
+#endif
   refreshOled();
 }
 
@@ -458,6 +483,7 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     reply(num, true, "연결 방식을 저장했습니다. 웹소켓은 잠깐 끊길 수 있습니다.");
     return;
   }
+#if defined(BOARD_HAS_RONIN)
   if (strcmp(op, "scan") == 0) {
     if (job != "ronin") {
       reply(num, false, "이 C3 는 로닌 제어가 아닙니다. 스캔하지 않았습니다.");
@@ -586,16 +612,23 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       char reason[180];
       if (strcmp(action, "yaw") == 0) {
         snprintf(reason, sizeof(reason),
-                 "요(롤) 최신값 %.0f° 를 덮어썼습니다. 같은 쪽으로 기울는지 봐 주세요.", roll);
+                 "요(롤) 최신값 %d° 를 덮어썼습니다. 같은 쪽으로 기울는지 봐 주세요.", (int)lroundf(roll));
       } else {
         snprintf(reason, sizeof(reason),
-                 "팬 %.0f° 틸트 %.0f° 요 %.0f° 최신값을 덮어썼습니다. 따라오는지 봐 주세요.",
-                 pan, pitch, roll);
+                 "팬 %d° 틸트 %d° 요 %d° 최신값을 덮어썼습니다. 따라오는지 봐 주세요.",
+                 (int)lroundf(pan), (int)lroundf(pitch), (int)lroundf(roll));
       }
       reply(num, true, reason);
     }
     return;
   }
+#else
+  if (strcmp(op, "scan") == 0 || strcmp(op, "pair") == 0 || strcmp(op, "ronin") == 0) {
+    reply(num, false, "이 빌드는 로닌 제어가 아닙니다.");
+    return;
+  }
+#endif
+#if defined(BOARD_HAS_LIGHT)
   if (strcmp(op, "light") == 0) {
     if (job != "light") {
       reply(num, false, "이 C3 는 조명이 아닙니다. 명령을 수행하지 않았습니다.");
@@ -678,6 +711,12 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
     replyDoc(num, out);
     return;
   }
+#else
+  if (strcmp(op, "light") == 0) {
+    reply(num, false, "이 빌드는 조명이 아닙니다.");
+    return;
+  }
+#endif
   reply(num, false, "이 기판이 받지 않는 명령입니다.");
 }
 
@@ -715,6 +754,7 @@ void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
   boardOtaLoop();
+#if defined(BOARD_HAS_LIGHT)
   if (job == "light") {
     ulanziBleLoop();
     if (WiFi.status() == WL_CONNECTED && !ulanziBleBusy() && ulanziBleSavedCount() < 2 && millis() >= nextAutoPairAt) {
@@ -723,10 +763,14 @@ void loop() {
       if (ulanziBleAutoPair(reason, sizeof(reason))) Serial.println(reason);
       else Serial.println(reason);
     }
-  } else {
+  }
+#endif
+#if defined(BOARD_HAS_RONIN)
+  if (job != "light") {
     // 로닌 자동 재페어는 roninBleLoop 한곳만. 여기서 또 스캔하면 WS 가 깜빡입니다.
     roninBleLoop();
   }
+#endif
   refreshOled(false);
   boardNetPump();
   (void)clientUp;

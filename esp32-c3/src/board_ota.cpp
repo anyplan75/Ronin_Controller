@@ -1,11 +1,12 @@
 #include "board_ota.h"
 
-#include <ArduinoOTA.h>
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
 #include "board_slot.h"
+
+// ArduinoOTA(mDNS) 빼고 HTTP /update 만 — 플래시 절약. USB 비상 플래시는 그대로.
 
 static WebServer http(80);
 static bool started = false;
@@ -13,27 +14,17 @@ static bool started = false;
 static void handleUpdate() {
   HTTPUpload& upload = http.upload();
   if (upload.status == UPLOAD_FILE_START) {
-    Serial.printf("OTA 시작 %s\n", upload.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
   } else if (upload.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) {
-      Serial.printf("OTA 완료 %u 바이트\n", upload.totalSize);
-    } else {
-      Update.printError(Serial);
-    }
+    if (!Update.end(true)) Update.printError(Serial);
   }
 }
 
-void boardOtaBegin(const char* hostname) {
+void boardOtaBegin(const char* /*hostname*/) {
   if (WiFi.status() != WL_CONNECTED) return;
   if (started) return;
-  ArduinoOTA.setHostname(hostname && hostname[0] ? hostname : "Ronin-Board");
-  ArduinoOTA.onStart([]() { Serial.println("ArduinoOTA 시작"); });
-  ArduinoOTA.onEnd([]() { Serial.println("ArduinoOTA 끝"); });
-  ArduinoOTA.onError([](ota_error_t e) { Serial.printf("ArduinoOTA 오류 %u\n", (unsigned)e); });
-  ArduinoOTA.begin();
 
   http.on("/version", HTTP_GET, []() {
     String body = String("{\"fw\":\"") + FW_VERSION + "\"}";
@@ -57,7 +48,6 @@ void boardOtaBegin(const char* hostname) {
       handleUpdate);
   http.begin();
   started = true;
-  Serial.println("와이파이 OTA 준비: ArduinoOTA + http://ip/update");
 }
 
 void boardOtaLoop() {
@@ -65,6 +55,5 @@ void boardOtaLoop() {
     if (WiFi.status() == WL_CONNECTED) boardOtaBegin("Ronin-Board");
     return;
   }
-  ArduinoOTA.handle();
   http.handleClient();
 }
