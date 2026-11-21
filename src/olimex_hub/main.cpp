@@ -184,19 +184,36 @@ static void toLower(char* dest, size_t cap, const std::string& src) {
   dest[n] = 0;
 }
 
+// 로닌 RS·SC 짐벌도 FFF0 을 씁니다. 올리멕스는 액션캠만 잡고, 짐벌은 C3 로닌 역할만 붙입니다.
+static bool looksLikeRoninGimbal(const char* lower) {
+  return textHas(lower, "ronin") || textHas(lower, "ronin-sc") || textHas(lower, "ronin sc") ||
+         textHas(lower, "dji rs") || textHas(lower, "rs 2") || textHas(lower, "rs2") ||
+         textHas(lower, "rsc") || textHas(lower, "rsc2") || textHas(lower, "rsc 2") ||
+         textHas(lower, "rs 3") || textHas(lower, "rs3") || textHas(lower, "rs 4") || textHas(lower, "rs4");
+}
+
 static bool takeCamera(NimBLEAdvertisedDevice& device, LiveCam* out) {
   memset(out, 0, sizeof(*out));
   std::string raw = device.haveName() ? device.getName() : std::string();
   char lower[48];
   toLower(lower, sizeof(lower), raw);
-  if (textHas(lower, "ronin")) return false;
+  if (looksLikeRoninGimbal(lower)) return false;
   const bool fff0 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xFFF0));
   const bool fea6 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xFEA6));
   const bool ce80 = device.isAdvertisingService(NimBLEUUID((uint16_t)0xCE80));
   const bool nameOsmo = textHas(lower, "osmo") || textHas(lower, "action");
   const bool nameGo = textHas(lower, "gopro");
   const bool nameInsta = textHas(lower, "insta");
-  if (!(fff0 || fea6 || ce80 || nameOsmo || nameGo || nameInsta)) return false;
+  // FFF0 만으로는 안 됩니다. 로닌 RS 도 FFF0 이라 이름에 osmo/action 이 있을 때만 액션캠으로 봅니다.
+  if (fea6 || nameGo || ce80 || nameInsta) {
+    // ok
+  } else if (fff0 && nameOsmo) {
+    // ok
+  } else if (nameOsmo) {
+    // ok
+  } else {
+    return false;
+  }
   const char* ble = "FFF0";
   const char* kind = "osmo";
   if (fea6 || nameGo) {
@@ -610,6 +627,10 @@ static void handleText(const char* text) {
   JsonDocument doc;
   if (deserializeJson(doc, text)) return;
   const char* op = doc["op"] | "";
+  if (strcmp(op, "ping") == 0) {
+    // keepalive. 상태 방송은 하지 않습니다.
+    return;
+  }
   if (strcmp(op, "record") == 0 || strcmp(op, "record-one") == 0) {
     bool start = doc["start"] | false;
     bool led = doc["tally"] | start;

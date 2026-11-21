@@ -11,8 +11,12 @@ struct StudioControlScreen: View {
     @State private var fov = "와이드"
     @State private var yaw = 0.0
     @State private var pitch = 0.0
-    @State private var lightLevel: [UUID: Double] = [:]
-    @State private var lightKelvin: [UUID: Double] = [:]
+    /// 요(롤 모터). 팬(좌우)과 다른 축입니다.
+    @State private var rollYaw = 0.0
+    /// 키: "보드UUID-칸index" — 울란지마다 밝기·색온도를 따로 둡니다.
+    @State private var lightLevel: [String: Double] = [:]
+    @State private var lightKelvin: [String: Double] = [:]
+    @State private var lightOnByKey: [String: Bool] = [:]
     /// 카메라 자리입니다. x는 좌우 미터, y는 무대에서 객석 쪽 깊이 미터입니다.
     @State private var cameraMeters: [String: CGPoint] = [:]
     @State private var showJoin = false
@@ -39,6 +43,14 @@ struct StudioControlScreen: View {
     @State private var absolutePending: (PtzRecord, Double, Double, Double)?
     @State private var roninTask: Task<Void, Never>?
     @State private var roninPending: (Double, Double)?
+    @State private var askVenueSave = false
+    @State private var venueNameDraft = ""
+    @State private var askVenueRename: UUID?
+    @State private var venueRenameDraft = ""
+    @State private var lightSendTask: [String: Task<Void, Never>] = [:]
+    @State private var didLaunchBoards = false
+    @State private var zoomHolding = false
+    @State private var zoomSentAt = Date.distantPast
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -74,12 +86,14 @@ struct StudioControlScreen: View {
         .background(canvas)
         .foregroundStyle(ink)
         .preferredColorScheme(.dark)
-        .confirmationDialog("이 C3 의 일", isPresented: $askC3Job, titleVisibility: .visible) {
-            Button("로닌 제어") { studio.registerC3(.ronin) }
-            Button("조명 · 울란지 VL120BI") { studio.registerC3(.light) }
+        .confirmationDialog("보드 자리", isPresented: $askC3Job, titleVisibility: .visible) {
+            Button("OLED C3 · 로닌 RS2") { studio.registerBoardSlot(.oled) }
+            Button("RMSID C3 · 로닌 SC") { studio.registerBoardSlot(.rmsid) }
+            Button("S3 · 울란지 조명") { studio.registerBoardSlot(.s3) }
+            Button("자리 맞추기 (3대·중복 제거)") { studio.syncBoardRoles() }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("한 대는 고른 일만 합니다. 액션 카메라는 올리멕스 기판에 남습니다.")
+            Text("슬롯·MAC·주소로 구분합니다. 고프로·액션5는 올리멕스입니다.")
         }
         .sheet(isPresented: $showJoin) {
             FirstJoinSheet { kind, host, port, radios, name in
@@ -93,7 +107,22 @@ struct StudioControlScreen: View {
             studio.rememberOlimex(wifi: link.wifiMac, ethernet: link.ethMac, hotspot: link.apMac)
         }
         .onChange(of: c3Link.wifiMac) { _, _ in
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: "")
             if let id = c3Link.boardId { studio.rememberC3(id, wifi: c3Link.wifiMac, hotspot: c3Link.apMac) }
+        }
+        .onChange(of: c3Link.lastSlot) { _, slot in
+            guard !slot.isEmpty else { return }
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: "")
+        }
+        .task {
+            guard !didLaunchBoards else { return }
+            didLaunchBoards = true
+            await studio.ensureBoardRolesOnLaunch()
+        }
+        .onChange(of: pick) { _, next in
+            if case .c3(let id) = next {
+                studio.reconnectC3(id)
+            }
         }
         .sheet(isPresented: $showPtz) {
             ptzSheet
@@ -139,8 +168,49 @@ struct StudioControlScreen: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Menu {
-                    Button("올리멕스 ESP32-PoE") { studio.registerOlimex() }
-                    Button("C3") { askC3Job = true }
+                    Text("지금 · \(studio.venues.currentName)")
+                    Button("지금 장소 다시 저장") { studio.saveCurrentVenue() }
+                    Button("새 이름으로 저장…") {
+                        venueNameDraft = studio.venues.currentName == "이름 없는 장소" ? "" : studio.venues.currentName
+                        askVenueSave = true
+                    }
+                    if !studio.venues.places.isEmpty {
+                        Divider()
+                        ForEach(studio.venues.places) { place in
+                            Button {
+                                studio.loadVenue(place.id)
+                            } label: {
+                                HStack {
+                                    Text(place.name)
+                                    if studio.venues.currentId == place.id {
+                                        Text("✓")
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        ForEach(studio.venues.places) { place in
+                            Button("이름 바꾸기 · \(place.name)") {
+                                askVenueRename = place.id
+                                venueRenameDraft = place.name
+                            }
+                            Button("삭제 · \(place.name)", role: .destructive) {
+                                studio.deleteVenue(place.id)
+                            }
+                        }
+                    }
+                } label: {
+                    Text("장소 · \(studio.venues.currentName)")
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
+                }
+                Menu {
+                    Button("올리멕스 · 고프로·액션5") { studio.registerOlimex() }
+                    Button("보드 (C3·S3)") { askC3Job = true }
                     Button("PTZ 카메라") { showPtz = true }
                 } label: {
                     Text("기판 등록")
@@ -158,6 +228,24 @@ struct StudioControlScreen: View {
         .padding(12)
         .background(panel)
         .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
+        .alert("장소 이름", isPresented: $askVenueSave) {
+            TextField("예: 본당, FOH", text: $venueNameDraft)
+            Button("저장") { studio.saveVenue(named: venueNameDraft) }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("보드·무대·PTZ·카메라·로닌 설정을 이 이름으로 저장합니다.")
+        }
+        .alert("장소 이름 바꾸기", isPresented: Binding(
+            get: { askVenueRename != nil },
+            set: { if !$0 { askVenueRename = nil } }
+        )) {
+            TextField("새 이름", text: $venueRenameDraft)
+            Button("바꾸기") {
+                if let id = askVenueRename { studio.renameVenue(id, venueRenameDraft) }
+                askVenueRename = nil
+            }
+            Button("취소", role: .cancel) { askVenueRename = nil }
+        }
     }
 
     private var recordCount: String {
@@ -167,12 +255,14 @@ struct StudioControlScreen: View {
 
     private var deviceList: some View {
         List {
-            Section("올리멕스") {
+            Section("올리멕스 · 고프로·액션5") {
                 Button {
                     pick = .olimex
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(studio.profile.olimexRegistered ? studio.olimexTitle : "아직 등록하지 않음", systemImage: "server.rack")
+                        Text("역할 고프로·액션5")
+                            .font(.caption.weight(.semibold))
                         Text(studio.profile.olimexRegistered ? "\(link.lane.title) · \(link.state == .online ? "온라인 \(link.endpoint)" : "오프라인")" : "연결을 고르세요")
                         Text("녹화 \(link.reportedRecording == nil ? "모름" : "기판 보고") · HDMI/USB 모름")
                             .font(.caption)
@@ -187,7 +277,7 @@ struct StudioControlScreen: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else if link.cameras.isEmpty {
-                        Text("아직 고프로·액션 5 이름이 안 보입니다. 장치 연결 또는 블루투스 리모컨 화면을 여세요.")
+                        Text("고프로·액션 5만 여기에 나옵니다. 로닌 짐벌은 C3 로닌 제어에서 스캔·붙입니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
@@ -210,9 +300,9 @@ struct StudioControlScreen: View {
                     }
                 }
             }
-            Section("C3") {
+            Section("보드 · OLED/RMSID/S3") {
                 if studio.profile.c3Boards.isEmpty {
-                    Text("등록하면 로닌 또는 조명 중 하나만 맡습니다.")
+                    Text("OLED→RS2, RMSID→SC, S3→울란지. 「보드 자리 맞추기」로 등록하세요.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -221,8 +311,10 @@ struct StudioControlScreen: View {
                         pick = .c3(board.id)
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Label(board.name, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
-                            Text("\(board.duty.title) · \(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
+                            Label(board.listTitle, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
+                            Text("역할 \(board.roleTitle)")
+                                .font(.caption.weight(.semibold))
+                            Text("\(board.socketHost) · \(board.wifiMac.isEmpty ? "MAC 없음" : board.wifiMac) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -380,8 +472,10 @@ struct StudioControlScreen: View {
 
     private var olimexInspector: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("올리멕스 ESP32-PoE", systemImage: "server.rack")
+            Label("올리멕스 · 고프로·액션5", systemImage: "server.rack")
                 .font(.headline)
+            Text("역할 고프로·액션5")
+                .font(.caption.weight(.semibold))
             TextField("기판 이름", text: Binding(get: { studio.profile.olimexName }, set: { studio.renameOlimex($0) }))
                 .textFieldStyle(.roundedBorder)
             Text(studio.profile.olimexRegistered ? (link.state == .online ? "온라인" : "오프라인") : "등록 전")
@@ -395,7 +489,7 @@ struct StudioControlScreen: View {
             Text("공유기에서 고정 주소를 예약할 때 이 MAC을 적습니다. 와이파이는 와이파이 MAC, 랜 케이블은 이더넷 MAC 입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("액션 카메라는 이 기판 블루투스입니다. 로닌 짐벌은 로닌 제어 C3 가 맡습니다. 웹소켓이 열리기 전에는 온라인으로 두지 않습니다.")
+            Text("고프로·액션5만 이 기판입니다. 로닌은 OLED/RMSID C3, 울란지 조명은 S3 입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -423,11 +517,14 @@ struct StudioControlScreen: View {
 
     private func c3Inspector(_ board: C3BoardRecord) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label(board.duty == .light ? "조명" : "로닌", systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
+            Label(board.listTitle, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
                 .font(.headline)
+            Text("역할 \(board.roleTitle)")
+                .font(.caption.weight(.semibold))
             TextField("기판 이름", text: Binding(get: { board.name }, set: { studio.renameC3(board.id, $0) }))
                 .textFieldStyle(.roundedBorder)
-            Text("이 C3 는 \(board.duty.title)만 합니다.")
+            Text(board.boardSlot.map { "슬롯 \($0.rawValue) · \($0.boardTitle)" } ?? "슬롯 미정 · \(board.duty.title)")
+                .font(.caption)
             Text("\(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인 \(board.socketHost):82" : "오프라인 \(board.socketHost):82")")
                 .font(.caption.weight(.semibold))
                 .textSelection(.enabled)
@@ -452,6 +549,35 @@ struct StudioControlScreen: View {
             .disabled(c3Link.state == .connecting || !board.link.shoots)
             if board.duty == .ronin {
                 let spot = studio.stageSpot(for: board.id)
+                Text("로닌은 C3 블루투스로 붙입니다. CAN 배선이 아닙니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(board.gimbalName.isEmpty
+                     ? (c3Link.pairedName.isEmpty ? "아직 붙인 로닌 이름이 없습니다." : "붙음 \(c3Link.pairedName)")
+                     : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
+                    .font(.caption.weight(.semibold))
+                Button("로닌 블루투스 스캔") {
+                    Task { await studio.scanRoninGimbals(board.id) }
+                }
+                .buttonStyle(DeskButtonStyle(expand: true))
+                if c3Link.gimbals.isEmpty {
+                    Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 오프라인이면 붙인 뒤 바로 스캔합니다. 조종은 이 보드만입니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(c3Link.gimbals) { gimbal in
+                        Button("붙이기 · \(gimbal.name)") {
+                            Task { await studio.pairRoninGimbal(name: gimbal.name, id: gimbal.id, boardId: board.id) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3Link.pairedName == gimbal.name, expand: true))
+                    }
+                }
+                if !board.gimbalName.isEmpty {
+                    Button("저장 이름으로 다시 붙이기") {
+                        Task { await studio.pairRoninGimbal(name: board.gimbalName, boardId: board.id) }
+                    }
+                    .buttonStyle(DeskButtonStyle(expand: true))
+                }
                 Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 그 방향의 한계로 가고, 제자리는 기본 시선으로 돌아옵니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -463,7 +589,7 @@ struct StudioControlScreen: View {
                     home: {
                         yaw = 0
                         pitch = 0
-                        queueRonin(yaw: 0, pitch: 0)
+                        queueRonin(yaw: 0, pitch: 0, home: true)
                     },
                     panEnd: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
                     tiltEnd: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
@@ -476,8 +602,38 @@ struct StudioControlScreen: View {
                 Slider(value: Binding(get: { yaw }, set: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -180...180, step: 1)
                 Text("틸트 \(Int(spot.homePitch + pitch))°")
                 Slider(value: Binding(get: { pitch }, set: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -56...90, step: 1)
+                Text("요 \(Int(rollYaw))° (롤·팬과 다름)")
+                Slider(value: Binding(get: { rollYaw }, set: {
+                    rollYaw = $0
+                    Task { await studio.nudgeRoninYaw(roll: $0, boardId: board.id, quiet: true) }
+                }), in: -30...30, step: 1)
                 Text("속도 \(Int(stickSpeed * 100))%")
                 Slider(value: $stickSpeed, in: 0.15...1)
+                if board.boardSlot == .oled {
+                    Text("RS2 줌(앞 다이얼). 누르는 동안 돌고, 손을 떼면 멈춥니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("줌 아웃") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .simultaneousGesture(holdZoom(speed: -800, boardId: board.id))
+                        Button("줌 인") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .simultaneousGesture(holdZoom(speed: 800, boardId: board.id))
+                    }
+                } else if board.boardSlot == .rmsid {
+                    Text("SC 줌은 아직 없습니다. UI·프로토콜 자리만 두었고, 나중에 켭니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Button("줌 아웃 (나중에)") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .disabled(true)
+                        Button("줌 인 (나중에)") {}
+                            .buttonStyle(DeskButtonStyle(expand: true))
+                            .disabled(true)
+                    }
+                }
                 Button("기본 시선 고정") {
                     studio.setHomeAim(board.id, yaw: wrapDegrees(spot.homeYaw + yaw), pitch: spot.homePitch + pitch)
                     yaw = 0
@@ -485,21 +641,87 @@ struct StudioControlScreen: View {
                 }
                 .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             } else {
-                let level = lightLevel[board.id] ?? 40
-                let kelvin = lightKelvin[board.id] ?? 4500
-                Text("울란지 VL120BI. 밝기와 색온도만 다룹니다.")
+                Text("울란지 VL120BI·VL200BI 입니다. 대마다 밝기·색온도·켜기/끄기를 따로 보냅니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("밝기 \(Int(level))")
-                Slider(value: Binding(get: { lightLevel[board.id] ?? 40 }, set: { lightLevel[board.id] = $0 }), in: 0...100, step: 1)
-                Text("색온도 \(Int(kelvin))K")
-                Slider(value: Binding(get: { lightKelvin[board.id] ?? 4500 }, set: { lightKelvin[board.id] = $0 }), in: 2500...6500, step: 100)
-                HStack {
-                    Button("켜기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: true) } }
-                        .buttonStyle(DeskButtonStyle(tone: .record))
-                    Button("끄기") { Task { await studio.setLight(board.id, brightness: Int(level), kelvin: Int(kelvin), on: false) } }
-                        .buttonStyle(DeskButtonStyle(tone: .stop))
+                Text("S3 슬롯 전용입니다. OLED·RMSID 와 같은 기판이면 안 됩니다.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("울란지 블루투스 스캔") {
+                    Task { await studio.scanUlanziLights(board.id) }
                 }
+                .buttonStyle(DeskButtonStyle(expand: true))
+                if c3Link.gimbals.isEmpty {
+                    Text("스캔하면 주변 이름이 나옵니다. 붙이면 아래 칸에 저장됩니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(c3Link.gimbals) { light in
+                        Button("붙이기 · \(light.name)") {
+                            Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: c3Link.savedLights.contains(where: { $0.name == light.name }), expand: true))
+                    }
+                }
+                if c3Link.savedLights.isEmpty {
+                    Text("저장된 울란지가 없습니다. 스캔 후 붙이거나 보드가 예전에 저장한 2대를 기다리세요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(c3Link.savedLights) { light in
+                    let key = lightKey(board.id, light.index)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("칸 \(light.index) · \(light.name)")
+                            .font(.caption.weight(.semibold))
+                        Text("밝기 \(Int(lightLevel[key] ?? 40))")
+                        Slider(value: Binding(
+                            get: { lightLevel[key] ?? 40 },
+                            set: { lightLevel[key] = $0; queueLight(board.id, index: light.index) }
+                        ), in: 0...100, step: 1)
+                        Text("색온도 \(Int(lightKelvin[key] ?? 4500))K")
+                        Slider(value: Binding(
+                            get: { lightKelvin[key] ?? 4500 },
+                            set: { lightKelvin[key] = $0; queueLight(board.id, index: light.index) }
+                        ), in: 2700...6500, step: 100)
+                        Toggle(isOn: Binding(
+                            get: { lightOnByKey[key] ?? true },
+                            set: { next in
+                                lightOnByKey[key] = next
+                                Task {
+                                    await studio.setLight(
+                                        board.id,
+                                        index: light.index,
+                                        brightness: Int(lightLevel[key] ?? 40),
+                                        kelvin: Int(lightKelvin[key] ?? 4500),
+                                        on: next
+                                    )
+                                }
+                            }
+                        )) {
+                            Text(lightOnByKey[key] ?? true ? "켜짐" : "꺼짐")
+                        }
+                        .toggleStyle(.switch)
+                    }
+                    .padding(.vertical, 4)
+                }
+                if c3Link.savedLights.count > 1 {
+                    Button("모두 같은 값으로 (묶음)") {
+                        let first = c3Link.savedLights[0]
+                        let key = lightKey(board.id, first.index)
+                        Task {
+                            await studio.setAllLights(
+                                board.id,
+                                brightness: Int(lightLevel[key] ?? 40),
+                                kelvin: Int(lightKelvin[key] ?? 4500),
+                                on: lightOnByKey[key] ?? true
+                            )
+                        }
+                    }
+                    .buttonStyle(DeskButtonStyle(expand: true))
+                }
+                Text("칸마다 즉시 나갑니다. ack true 일 때만 성공입니다.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -567,8 +789,8 @@ struct StudioControlScreen: View {
                     .buttonStyle(DeskButtonStyle(tone: .stop))
             }
             Text(osmo
-                 ? "액션 5 앞 화면에 글이나 탈리 불을 그리는 블루투스 명령은 없습니다. 빨간 테두리는 녹화가 실제로 시작될 때만 카메라가 켭니다."
-                 : "고프로 탈리는 LED 설정 91입니다. 상태 0이 오기 전에는 켜졌다고 하지 않습니다. 앞 화면 글자는 그리지 않습니다.")
+                 ? "액션 5 전면 탈리 명령은 없습니다. 앱도 전면 켜짐을 확인하지 못합니다. 빨간 테두리는 녹화가 시작될 때만 카메라가 켭니다. 울란지 조명과는 별개입니다."
+                 : "고프로 탈리는 LED 설정 91입니다. 기판이 상태 0으로 답하기 전에는 켜졌다고 하지 않습니다. 전면 화면 글자는 그리지 않고, 앱도 전면 표시를 보지 못합니다. 울란지 조명과는 별개입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -746,6 +968,14 @@ struct StudioControlScreen: View {
         }
     }
 
+    private var selectedRoninId: UUID? {
+        if case .c3(let id) = pick,
+           let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+            return board.id
+        }
+        return studio.roninC3?.id
+    }
+
     private func steerRonin(pan: Double, tilt: Double, absolute: Bool = false) {
         if absolute {
             yaw = pan
@@ -760,19 +990,59 @@ struct StudioControlScreen: View {
         queueRonin(yaw: yaw, pitch: pitch)
     }
 
-    private func queueRonin(yaw: Double, pitch: Double) {
+    private func holdZoom(speed: Int, boardId: UUID) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { _ in
+                let now = Date()
+                if !zoomHolding {
+                    zoomHolding = true
+                    zoomSentAt = now
+                    Task { await studio.zoomRonin(speed: speed, boardId: boardId, quiet: true) }
+                } else if now.timeIntervalSince(zoomSentAt) >= 0.45 {
+                    zoomSentAt = now
+                    Task { await studio.zoomRonin(speed: speed, boardId: boardId, quiet: true) }
+                }
+            }
+            .onEnded { _ in
+                zoomHolding = false
+                Task { await studio.zoomRonin(speed: 0, boardId: boardId, quiet: true) }
+            }
+    }
+
+    private func queueRonin(yaw: Double, pitch: Double, home: Bool = false) {
         roninPending = (yaw, pitch)
+        let sendHome = home
+        let boardId = selectedRoninId
         guard roninTask == nil else { return }
         roninTask = Task {
             while let next = roninPending {
                 roninPending = nil
-                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true)
-                try? await Task.sleep(nanoseconds: 220_000_000)
+                await studio.nudgeRonin(yaw: next.0, pitch: next.1, quiet: true, home: sendHome && next.0 == 0 && next.1 == 0, boardId: boardId)
+                // 펌웨어가 빠르게 ack 하면 큐 간격도 짧게(체감 <0.5s).
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             roninTask = nil
             if let pending = roninPending {
                 queueRonin(yaw: pending.0, pitch: pending.1)
             }
+        }
+    }
+
+    private func lightKey(_ boardId: UUID, _ index: Int) -> String {
+        "\(boardId.uuidString)-\(index)"
+    }
+
+    /// 칸별 슬라이더: 디바운스 후 그 울란지 한 대만 S3로 보냅니다.
+    private func queueLight(_ boardId: UUID, index: Int) {
+        let key = lightKey(boardId, index)
+        lightSendTask[key]?.cancel()
+        lightSendTask[key] = Task {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard !Task.isCancelled else { return }
+            let brightness = Int(lightLevel[key] ?? 40)
+            let kelvin = Int(lightKelvin[key] ?? 4500)
+            let on = lightOnByKey[key] ?? true
+            await studio.setLight(boardId, index: index, brightness: brightness, kelvin: kelvin, on: on, quiet: true)
         }
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-// DJI R SDK 프레임입니다. 로닌 CAN 패킷과 같은 머리·검사합을 씁니다.
+// DJI R SDK 프레임입니다. C3 가 로닌 블루투스의 FFF5 에 쓰는 머리·검사합과 같습니다.
 // 검사합 표는 src/dji_rs.cpp 와 같고, 시작값은 0x3AA3 입니다.
 // 공식 모드 전환 예시 프레임과 같은지 앱이 켤 때 한 번 확인합니다.
 enum DjiRFrame {

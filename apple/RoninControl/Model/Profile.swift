@@ -22,7 +22,7 @@ enum DeviceKind: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .ronin: return "로닌 기판 · CAN"
+        case .ronin: return "로닌 · C3 블루투스"
         case .gopro: return "고프로 · 와이파이"
         case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
         case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
@@ -242,7 +242,7 @@ enum DeviceProduct: String, CaseIterable, Identifiable, Sendable {
 
     var label: String {
         switch self {
-        case .ronin: return "로닌 기판 · CAN"
+        case .ronin: return "로닌 · C3 블루투스"
         case .goproWifi: return "고프로 · 와이파이"
         case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
         case .action5Bluetooth: return "오즈모 액션 5 프로 · 블루투스"
@@ -392,7 +392,7 @@ struct DeviceRecord: Codable, Identifiable, Equatable, Sendable {
     /// 목록과 메뉴에 쓰는 이름입니다. 제품과 연결을 같이 적습니다.
     var linkLabel: String {
         switch kind {
-        case .ronin: return "로닌 기판 · CAN"
+        case .ronin: return "로닌 · C3 블루투스"
         case .gopro: return "고프로 · 와이파이"
         case .goproAction5: return "오즈모 액션 5 프로 · 블루투스"
         case .goproBridge: return "C3 중계 · 고프로 · 액션 5 프로"
@@ -572,7 +572,7 @@ struct StageSpot: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// C3 한 대가 맡는 일입니다. 한 대는 이 중 하나만 합니다.
+/// C3·S3 한 대가 맡는 일입니다. 슬롯과 함께 씁니다.
 enum C3Job: String, Codable, CaseIterable, Identifiable, Sendable {
     case ronin
     case light
@@ -581,17 +581,90 @@ enum C3Job: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .ronin: return "로닌 제어"
-        case .light: return "조명 · 울란지 VL120BI"
+        case .ronin: return "로닌"
+        case .light: return "울란지 조명"
         }
     }
 }
 
-/// 등록한 C3 입니다. 액션 카메라 기판이 아닙니다.
+/// 보드 슬롯. 빌드·고정 IP·역할과 맞춥니다.
+enum C3Slot: String, Codable, CaseIterable, Identifiable, Sendable {
+    case oled
+    case rmsid
+    case s3
+
+    var id: String { rawValue }
+
+    var roleTitle: String {
+        switch self {
+        case .oled: return "로닌 RS2"
+        case .rmsid: return "로닌 SC"
+        case .s3: return "울란지 조명"
+        }
+    }
+
+    var boardTitle: String {
+        switch self {
+        case .oled: return "OLED C3"
+        case .rmsid: return "RMSID C3"
+        case .s3: return "S3"
+        }
+    }
+
+    var listTitle: String { "\(boardTitle) · \(roleTitle)" }
+
+    var job: C3Job {
+        self == .s3 ? .light : .ronin
+    }
+
+    var defaultHost: String {
+        switch self {
+        case .oled: return "192.168.10.152"
+        case .rmsid: return "192.168.10.154"
+        case .s3: return "192.168.10.153"
+        }
+    }
+
+    var knownWifiMac: String {
+        switch self {
+        case .oled: return "14:63:93:90:49:E0"
+        case .rmsid: return "9C:CC:01:7B:CC:A4"
+        case .s3: return "44:BD:8D:75:E3:D8"
+        }
+    }
+
+    static func from(text: String?) -> C3Slot? {
+        guard let text else { return nil }
+        return C3Slot(rawValue: text.lowercased())
+    }
+
+    static func from(mac: String) -> C3Slot? {
+        let clean = BoardMac.normalize(mac)
+        return allCases.first { BoardMac.same($0.knownWifiMac, clean) }
+    }
+
+    static func from(host: String) -> C3Slot? {
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        return allCases.first { $0.defaultHost == h }
+    }
+
+    /// 블루투스 광고 이름(Ronin-OLED / Ronin-RMSID / Ronin-S3)으로 슬롯을 읽습니다.
+    static func from(bleName: String) -> C3Slot? {
+        let text = bleName.lowercased()
+        if text.contains("oled") || text.contains("rs2") { return .oled }
+        if text.contains("rmsid") || text.contains("-sc") { return .rmsid }
+        if text.contains("s3") || text.contains("ulanzi") || text.contains("light") { return .s3 }
+        return nil
+    }
+}
+
+/// 등록한 C3·S3 입니다. 액션 카메라 기판이 아닙니다.
 struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
     var id: UUID
     var name: String
     var job: String
+    /// oled / rmsid / s3. 비어 있으면 job·MAC·주소로 추정합니다.
+    var slot: String
     /// lan, ap, usb. PoE는 이 기판에 없습니다.
     var linkMode: String
 
@@ -599,16 +672,33 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         C3Job(rawValue: job) ?? .ronin
     }
 
+    var boardSlot: C3Slot? {
+        if let fromSlot = C3Slot.from(text: slot) { return fromSlot }
+        if let fromMac = C3Slot.from(mac: wifiMac) { return fromMac }
+        if let fromHost = C3Slot.from(host: lanHost) { return fromHost }
+        return duty == .light ? .s3 : nil
+    }
+
+    var roleTitle: String {
+        boardSlot?.roleTitle ?? duty.title
+    }
+
+    var listTitle: String {
+        boardSlot?.listTitle ?? name
+    }
+
     var link: BoardLane {
         let lane = BoardLane(stored: linkMode)
         return lane == .poe ? .lan : lane
     }
 
-    /// 블루투스로 받은 집 망 주소입니다. 비어 있으면 192.168.10.152 를 씁니다.
+    /// 블루투스로 받은 집 망 주소입니다. 비어 있으면 슬롯 기본 주소를 씁니다.
     var lanHost: String
     /// 공유기에서 고정 주소를 예약할 때 쓰는 와이파이 MAC 입니다.
     var wifiMac: String
     var apMac: String
+    /// C3 가 블루투스로 붙인 로닌 광고 이름입니다. CAN 이 아닙니다.
+    var gimbalName: String
 
     var socketHost: String {
         switch link {
@@ -616,34 +706,50 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
             return "192.168.4.1"
         case .lan:
             let saved = lanHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            if saved.isEmpty || saved == "192.168.10.205" { return "192.168.10.152" }
-            return saved.hasPrefix("192.168.10.") ? saved : "192.168.10.152"
+            if saved.isEmpty || saved == "192.168.10.205" {
+                return boardSlot?.defaultHost ?? "192.168.10.152"
+            }
+            return saved.hasPrefix("192.168.10.") ? saved : (boardSlot?.defaultHost ?? "192.168.10.152")
         case .poe, .usb:
             return ""
         }
     }
 
-    init(id: UUID, name: String, job: String, linkMode: String = BoardLane.lan.rawValue, lanHost: String = "", wifiMac: String = "", apMac: String = "") {
+    init(id: UUID, name: String, job: String, slot: String = "", linkMode: String = BoardLane.lan.rawValue, lanHost: String = "", wifiMac: String = "", apMac: String = "", gimbalName: String = "") {
         self.id = id
         self.name = name
         self.job = job
+        self.slot = slot
         self.linkMode = linkMode
         self.lanHost = lanHost
         self.wifiMac = wifiMac
         self.apMac = apMac
+        self.gimbalName = gimbalName
     }
 
-    enum CodingKeys: String, CodingKey { case id, name, job, linkMode, lanHost, wifiMac, apMac }
+    enum CodingKeys: String, CodingKey { case id, name, job, slot, linkMode, lanHost, wifiMac, apMac, gimbalName }
 
     init(from decoder: Decoder) throws {
         let box = try decoder.container(keyedBy: CodingKeys.self)
         id = try box.decode(UUID.self, forKey: .id)
         name = try box.decode(String.self, forKey: .name)
         job = try box.decode(String.self, forKey: .job)
+        slot = try box.decodeIfPresent(String.self, forKey: .slot) ?? ""
         linkMode = try box.decodeIfPresent(String.self, forKey: .linkMode) ?? BoardLane.lan.rawValue
         lanHost = try box.decodeIfPresent(String.self, forKey: .lanHost) ?? ""
         wifiMac = try box.decodeIfPresent(String.self, forKey: .wifiMac) ?? ""
         apMac = try box.decodeIfPresent(String.self, forKey: .apMac) ?? ""
+        gimbalName = try box.decodeIfPresent(String.self, forKey: .gimbalName) ?? ""
+        if slot.isEmpty, let inferred = boardSlot {
+            slot = inferred.rawValue
+            if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || name.hasPrefix("C3 ")
+                || name == "C3 로닌"
+                || name == "C3 울란지 조명" {
+                name = inferred.listTitle
+            }
+            job = inferred.job.rawValue
+        }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -651,10 +757,12 @@ struct C3BoardRecord: Codable, Identifiable, Equatable, Sendable {
         try box.encode(id, forKey: .id)
         try box.encode(name, forKey: .name)
         try box.encode(job, forKey: .job)
+        try box.encode(slot, forKey: .slot)
         try box.encode(linkMode, forKey: .linkMode)
         try box.encode(lanHost, forKey: .lanHost)
         try box.encode(wifiMac, forKey: .wifiMac)
         try box.encode(apMac, forKey: .apMac)
+        try box.encode(gimbalName, forKey: .gimbalName)
     }
 }
 
@@ -927,6 +1035,34 @@ struct StudioProfile: Codable, Equatable, Sendable {
             return enabled
         }
         return enabled.filter { preset.deviceIds.contains($0.id) }
+    }
+}
+
+/// 이름 붙인 현장 설정입니다. 보드·무대·PTZ·카메라·로닌 묶음을 통째로 담습니다.
+struct VenuePlace: Codable, Identifiable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var updatedAt: Date
+    var profile: StudioProfile
+}
+
+/// 장소에 붙인 설정 목록입니다. 지금 쓰는 프로필과 따로 저장합니다.
+struct VenueBook: Codable, Equatable, Sendable {
+    static let storageKey = "[로닌컨트롤]_venues"
+
+    var places: [VenuePlace]
+    var currentId: UUID?
+
+    static func empty() -> VenueBook {
+        VenueBook(places: [], currentId: nil)
+    }
+
+    var currentName: String {
+        guard let currentId,
+              let place = places.first(where: { $0.id == currentId }) else {
+            return "이름 없는 장소"
+        }
+        return place.name
     }
 }
 
