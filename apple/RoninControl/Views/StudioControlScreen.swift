@@ -51,6 +51,19 @@ struct StudioControlScreen: View {
     @State private var didLaunchBoards = false
     @State private var zoomHolding = false
     @State private var zoomSentAt = Date.distantPast
+    @State private var ptzTwoStep = true
+    @State private var ptzSelectedScene: [UUID: Int] = [:]
+    @State private var ptzFocus: [UUID: Double] = [:]
+    @State private var ptzIris: [UUID: Double] = [:]
+    @State private var ptzSequenceTask: Task<Void, Never>?
+    @State private var roninTwoStep = true
+    @State private var roninSelectedScene = 1
+    @State private var roninFocus = 0.5
+    @State private var roninIris = 0.5
+    @State private var roninZoomSlider = 0.0
+    /// 로닌용 앱 쪽 정지 프리셋(보드 장면과 별개).
+    @State private var roninScenes: [PtzScene] = (1...9).map { PtzScene.empty($0) }
+    @State private var roninMovePath = PtzMovePath(name: "로닌 경로", steps: [])
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -578,61 +591,101 @@ struct StudioControlScreen: View {
                     }
                     .buttonStyle(DeskButtonStyle(expand: true))
                 }
-                Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 그 방향의 한계로 가고, 제자리는 기본 시선으로 돌아옵니다.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("기본 시선 팬 \(Int(spot.homeYaw))°, 틸트 \(Int(spot.homePitch))°")
+                Text("기본 시선 팬 \(Int(spot.homeYaw))°, 틸트 \(Int(spot.homePitch))° · 팬 \(Int(wrapDegrees(spot.homeYaw + yaw)))° · 틸트 \(Int(spot.homePitch + pitch))°")
                     .font(.caption.weight(.semibold))
-                AimPad(
-                    nudge: { pan, tilt in steerRonin(pan: pan * stickSpeed, tilt: tilt * stickSpeed) },
-                    stop: {},
-                    home: {
+                Text("요 \(Int(rollYaw))° (롤·팬과 다름)")
+                Slider(value: Binding(get: { rollYaw }, set: { next in
+                    rollYaw = next
+                    Task { await studio.nudgeRoninYaw(roll: next, boardId: board.id, quiet: true) }
+                }), in: -30...30, step: 1)
+                PtzControlPad(
+                    title: "로닌",
+                    speed: $stickSpeed,
+                    zoom: $roninZoomSlider,
+                    focus: $roninFocus,
+                    iris: $roninIris,
+                    showFocus: false,
+                    showIris: false,
+                    showZoom: board.boardSlot == .oled,
+                    scenes: roninScenes,
+                    selectedScene: roninSelectedScene,
+                    twoStep: $roninTwoStep,
+                    onNudge: { pan, tilt in steerRonin(pan: pan * stickSpeed, tilt: tilt * stickSpeed) },
+                    onStop: {},
+                    onZoomChanged: { value in
+                        guard board.boardSlot == .oled else { return }
+                        let speed = Int(((value - 0.5) * 1600).rounded())
+                        Task { await studio.zoomRonin(speed: speed, boardId: board.id, quiet: true) }
+                    },
+                    onFocusHold: { _ in },
+                    onFocusStop: {},
+                    onIrisStep: { _ in },
+                    onIrisAuto: {},
+                    onSelectScene: { number in
+                        roninSelectedScene = number
+                    },
+                    onRecall: {
+                        let scene = roninScenes.first { $0.number == roninSelectedScene }
+                        guard let scene, scene.saved else {
+                            studio.note("로닌 장면 \(roninSelectedScene) 은 아직 저장되지 않았습니다.")
+                            return
+                        }
+                        yaw = scene.pan
+                        pitch = scene.tilt
+                        queueRonin(yaw: yaw, pitch: pitch)
+                    },
+                    onStopPreset: {
+                        ptzSequenceTask?.cancel()
                         yaw = 0
                         pitch = 0
                         queueRonin(yaw: 0, pitch: 0, home: true)
                     },
-                    panEnd: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
-                    tiltEnd: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) },
-                    panMin: -180,
-                    panMax: 180,
-                    tiltMin: -56,
-                    tiltMax: 90
-                )
-                Text("팬 \(Int(wrapDegrees(spot.homeYaw + yaw)))°")
-                Slider(value: Binding(get: { yaw }, set: { yaw = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -180...180, step: 1)
-                Text("틸트 \(Int(spot.homePitch + pitch))°")
-                Slider(value: Binding(get: { pitch }, set: { pitch = $0; steerRonin(pan: yaw, tilt: pitch, absolute: true) }), in: -56...90, step: 1)
-                Text("요 \(Int(rollYaw))° (롤·팬과 다름)")
-                Slider(value: Binding(get: { rollYaw }, set: {
-                    rollYaw = $0
-                    Task { await studio.nudgeRoninYaw(roll: $0, boardId: board.id, quiet: true) }
-                }), in: -30...30, step: 1)
-                Text("속도 \(Int(stickSpeed * 100))%")
-                Slider(value: $stickSpeed, in: 0.15...1)
-                if board.boardSlot == .oled {
-                    Text("RS2 줌(앞 다이얼). 누르는 동안 돌고, 손을 떼면 멈춥니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack(spacing: 10) {
-                        Button("줌 아웃") {}
-                            .buttonStyle(DeskButtonStyle(expand: true))
-                            .simultaneousGesture(holdZoom(speed: -800, boardId: board.id))
-                        Button("줌 인") {}
-                            .buttonStyle(DeskButtonStyle(expand: true))
-                            .simultaneousGesture(holdZoom(speed: 800, boardId: board.id))
+                    movePaths: roninMovePath.steps.isEmpty ? [] : [roninMovePath],
+                    onRecallPath: { path in
+                        ptzSequenceTask?.cancel()
+                        ptzSequenceTask = Task {
+                            for step in path.steps {
+                                if Task.isCancelled { break }
+                                if let scene = roninScenes.first(where: { $0.number == step.sceneNumber }), scene.saved {
+                                    yaw = scene.pan
+                                    pitch = scene.tilt
+                                    queueRonin(yaw: yaw, pitch: pitch)
+                                }
+                                try? await Task.sleep(nanoseconds: UInt64(max(0.3, step.dwellSeconds) * 1_000_000_000))
+                            }
+                        }
+                    },
+                    onAddPathStep: { number in
+                        if let idx = roninScenes.firstIndex(where: { $0.number == number }) {
+                            roninScenes[idx].pan = yaw
+                            roninScenes[idx].tilt = pitch
+                            roninScenes[idx].zoom = roninZoomSlider
+                            roninScenes[idx].saved = true
+                            roninScenes[idx].name = "로닌 \(number)"
+                        }
+                        roninMovePath.steps.append(PtzMoveStep(sceneNumber: number, dwellSeconds: 2))
+                        studio.note("로닌 경로에 장면 \(number) 을 넣었습니다.")
+                    },
+                    onClearPath: {
+                        roninMovePath.steps = []
+                        studio.note("로닌 이동 경로를 비웠습니다.")
                     }
-                } else if board.boardSlot == .rmsid {
+                )
+                Button("지금 각을 장면 \(roninSelectedScene) 에 저장") {
+                    if let idx = roninScenes.firstIndex(where: { $0.number == roninSelectedScene }) {
+                        roninScenes[idx].pan = yaw
+                        roninScenes[idx].tilt = pitch
+                        roninScenes[idx].zoom = roninZoomSlider
+                        roninScenes[idx].saved = true
+                        roninScenes[idx].name = "로닌 \(roninSelectedScene)"
+                        studio.note("로닌 장면 \(roninSelectedScene) 을 저장했습니다.")
+                    }
+                }
+                .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+                if board.boardSlot == .rmsid {
                     Text("SC 줌은 아직 없습니다. UI·프로토콜 자리만 두었고, 나중에 켭니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 10) {
-                        Button("줌 아웃 (나중에)") {}
-                            .buttonStyle(DeskButtonStyle(expand: true))
-                            .disabled(true)
-                        Button("줌 인 (나중에)") {}
-                            .buttonStyle(DeskButtonStyle(expand: true))
-                            .disabled(true)
-                    }
                 }
                 Button("기본 시선 고정") {
                     studio.setHomeAim(board.id, yaw: wrapDegrees(spot.homeYaw + yaw), pitch: spot.homePitch + pitch)
@@ -820,80 +873,85 @@ struct StudioControlScreen: View {
             Text(camera.endpoint.isEmpty ? "ONVIF 주소를 찾는 중입니다." : camera.endpoint)
                 .font(.caption)
                 .textSelection(.enabled)
-            Text("방향 버튼은 누르는 동안만 움직입니다. 끝은 한계 각도로 가고, 제자리는 기본 시선입니다. 무대 시선을 끌어도 그 절대 방향입니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             let spot = studio.stageSpot(for: camera.id)
-            Text("기본 시선 \(Int(spot.homeYaw))°")
+            Text("기본 시선 \(Int(spot.homeYaw))° · 팬 \(Int(wrapDegrees(spot.homeYaw + pose.yaw)))° · 틸트 \(Int(pose.pitch))°")
                 .font(.caption.weight(.semibold))
-            AimPad(
-                nudge: { pan, tilt in steer(camera, pan: pan * stickSpeed, tilt: tilt * stickSpeed, zoom: 0) },
-                stop: { halt(camera) },
-                home: {
-                    setPose(camera.id, yaw: 0, pitch: 0)
-                    sendAbsolute(camera)
-                },
-                panEnd: {
-                    setPose(camera.id, yaw: $0)
-                    sendAbsolute(camera)
-                },
-                tiltEnd: {
-                    setPose(camera.id, pitch: $0)
-                    sendAbsolute(camera)
-                },
-                panMin: -180,
-                panMax: 180,
-                tiltMin: -45,
-                tiltMax: 45
-            )
-            Text("팬 \(Int(wrapDegrees(spot.homeYaw + pose.yaw)))°")
-            Slider(value: Binding(get: { ptzPose[camera.id]?.yaw ?? 0 }, set: {
-                setPose(camera.id, yaw: $0)
-                sendAbsolute(camera)
-            }), in: -180...180, step: 1)
-            Text("틸트 \(Int(pose.pitch))°")
-            Slider(value: Binding(get: { ptzPose[camera.id]?.pitch ?? 0 }, set: {
-                setPose(camera.id, pitch: $0)
-                sendAbsolute(camera)
-            }), in: -45...45, step: 1)
-            Text("줌 \(Int((ptzPose[camera.id]?.zoom ?? 0) * 100))%")
-            Slider(value: Binding(get: { ptzPose[camera.id]?.zoom ?? 0 }, set: {
-                setPose(camera.id, zoom: $0)
-                sendAbsolute(camera)
-            }), in: 0...1)
-            Text("속도 \(Int(stickSpeed * 100))%")
-            Slider(value: $stickSpeed, in: 0.15...1)
-            Text("장면 1–10. 이름은 바꿔도 번호는 고정입니다. 저장은 지금 각도이고, 부르기는 그 각도로 갑니다.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ForEach(PtzScene.ten(camera.scenes)) { scene in
-                HStack(spacing: 6) {
-                    Text("\(scene.number)")
-                        .font(.caption.weight(.bold))
-                        .frame(width: 18)
-                    TextField("이름", text: Binding(
-                        get: { scene.name },
-                        set: { studio.renamePtzScene(camera.id, number: scene.number, name: $0) }
-                    ))
-                    .textFieldStyle(.roundedBorder)
-                    Button("저장") {
-                        let current = ptzPose[camera.id] ?? PtzPose()
-                        Task { await studio.savePtzScene(camera.id, number: scene.number, pan: current.yaw, tilt: current.pitch, zoom: current.zoom) }
+            PtzControlPad(
+                title: "PTZ",
+                speed: $stickSpeed,
+                zoom: Binding(
+                    get: { ptzPose[camera.id]?.zoom ?? 0 },
+                    set: {
+                        setPose(camera.id, zoom: $0)
+                        sendAbsolute(camera)
                     }
-                    .buttonStyle(DeskButtonStyle())
-                    Button("부르기") {
-                        let saved = PtzScene.ten(camera.scenes).first { $0.number == scene.number }
-                        guard let saved, saved.saved else {
-                            studio.note("\(scene.stableId) 은 아직 저장되지 않았습니다.")
-                            return
-                        }
-                        setPose(camera.id, yaw: saved.pan, pitch: saved.tilt, zoom: saved.zoom)
-                        Task { _ = await studio.recallPtzScene(camera.id, number: scene.number) }
+                ),
+                focus: Binding(
+                    get: { ptzFocus[camera.id] ?? 0.5 },
+                    set: { ptzFocus[camera.id] = $0 }
+                ),
+                iris: Binding(
+                    get: { ptzIris[camera.id] ?? 0.5 },
+                    set: { ptzIris[camera.id] = $0 }
+                ),
+                scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
+                selectedScene: ptzSelectedScene[camera.id],
+                twoStep: $ptzTwoStep,
+                onNudge: { pan, tilt in steer(camera, pan: pan * stickSpeed, tilt: tilt * stickSpeed, zoom: 0) },
+                onStop: { halt(camera) },
+                onZoomChanged: { value in
+                    setPose(camera.id, zoom: value)
+                    sendAbsolute(camera)
+                },
+                onFocusHold: { dir in
+                    Task { _ = await Visca.focus(host: camera.host, port: UInt16(camera.viscaPort), direction: dir) }
+                },
+                onFocusStop: {
+                    Task { _ = await Visca.focus(host: camera.host, port: UInt16(camera.viscaPort), direction: 0) }
+                },
+                onIrisStep: { dir in
+                    Task { _ = await Visca.iris(host: camera.host, port: UInt16(camera.viscaPort), direction: dir) }
+                },
+                onIrisAuto: {
+                    Task { _ = await Visca.iris(host: camera.host, port: UInt16(camera.viscaPort), direction: 0, auto: true) }
+                },
+                onSelectScene: { number in
+                    ptzSelectedScene[camera.id] = number
+                },
+                onRecall: {
+                    let number = ptzSelectedScene[camera.id] ?? 1
+                    let saved = PtzScene.ten(camera.scenes).first { $0.number == number }
+                    guard let saved, saved.saved else {
+                        studio.note("장면 \(number) 은 아직 저장되지 않았습니다.")
+                        return
                     }
-                    .buttonStyle(DeskButtonStyle(selected: scene.saved))
-                    .disabled(!scene.saved)
+                    setPose(camera.id, yaw: saved.pan, pitch: saved.tilt, zoom: saved.zoom)
+                    Task { _ = await studio.recallPtzScene(camera.id, number: number) }
+                },
+                onStopPreset: {
+                    ptzSequenceTask?.cancel()
+                    halt(camera)
+                },
+                movePaths: camera.movePaths,
+                onRecallPath: { path in
+                    ptzSequenceTask?.cancel()
+                    ptzSequenceTask = Task {
+                        await studio.recallPtzMovePath(camera.id, path: path)
+                    }
+                },
+                onAddPathStep: { number in
+                    studio.appendPtzMoveStep(camera.id, sceneNumber: number)
+                },
+                onClearPath: {
+                    studio.clearPtzMovePath(camera.id)
                 }
+            )
+            Button("지금 각을 장면 \(ptzSelectedScene[camera.id] ?? 1) 에 저장") {
+                let number = ptzSelectedScene[camera.id] ?? 1
+                let current = ptzPose[camera.id] ?? PtzPose()
+                Task { await studio.savePtzScene(camera.id, number: number, pan: current.yaw, tilt: current.pitch, zoom: current.zoom) }
             }
+            .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             Button("기본 시선 고정") {
                 let current = ptzPose[camera.id] ?? PtzPose()
                 studio.setHomeAim(camera.id, yaw: wrapDegrees(spot.homeYaw + current.yaw), pitch: spot.homePitch + current.pitch)
@@ -1032,12 +1090,12 @@ struct StudioControlScreen: View {
         "\(boardId.uuidString)-\(index)"
     }
 
-    /// 칸별 슬라이더: 디바운스 후 그 울란지 한 대만 S3로 보냅니다.
+    /// 칸별 슬라이더: 최신값만 남기고 바로 보냅니다(짧은 간격으로 펌웨어 덮어쓰기와 맞춤).
     private func queueLight(_ boardId: UUID, index: Int) {
         let key = lightKey(boardId, index)
         lightSendTask[key]?.cancel()
         lightSendTask[key] = Task {
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            try? await Task.sleep(nanoseconds: 20_000_000)
             guard !Task.isCancelled else { return }
             let brightness = Int(lightLevel[key] ?? 40)
             let kelvin = Int(lightKelvin[key] ?? 4500)

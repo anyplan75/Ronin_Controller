@@ -3,7 +3,7 @@ import Foundation
 /// C3·S3 보드 와이파이 OTA. USB는 비상만. 연결되면 `/version` 을 보고 다르면 `/update` 로 올립니다.
 enum BoardOta {
     /// 앱에 묶인 펌웨어 판본. 보드 `fw` 와 같으면 올리지 않습니다.
-    static let expectedFw = "1.0.61"
+    static let expectedFw = "1.0.62"
 
     enum Outcome: Equatable {
         case skipped(String)

@@ -2,29 +2,17 @@
 
 앱이 C3·S3 에 붙으면 `/version` 을 보고, `BoardOta.expectedFw` 와 다르면 여기 bin 을 `http://보드/update` 로 올립니다.
 
-| 파일 | 슬롯 | 빌드 | fw | 크기(≤1310720) |
+| 파일 | 슬롯 | 빌드 | fw | 크기 |
 | --- | --- | --- | --- | --- |
-| `firmware-c3-oled.bin` | oled | `c3-oled` (Arduino/-Os, U8g2 없음) | **1.0.61** | 1081856 |
-| `firmware-c3-rmsid.bin` | rmsid | `c3-rmsid` | **1.0.61** | 1078448 |
-| `firmware-s3-light.bin` | s3 | `s3-light` | (이전) | — |
+| `firmware-c3-oled.bin` | oled | `c3-oled` | **1.0.62** | ≤1.25MB |
+| `firmware-c3-rmsid.bin` | rmsid | `c3-rmsid` | **1.0.62** | ≤1.25MB |
+| `firmware-s3-light.bin` | s3 | `s3-light` | **1.0.62** | (울란지 이중연결·최신값) |
 
-맥미니 IDF 빌드가 칸을 넘으면, 위 bin 을 그대로 OTA 하세요(재빌드 불필요).
+올리멕스 허브는 앱 OTA 칸이 없습니다. `Firmware/firmware-olimex-hub-1.0.62.bin` 을 USB 또는 별도 업로드로 올립니다.
 
 ```bash
 # 예: curl raw (브랜치 tip)
-BASE=https://raw.githubusercontent.com/anyplan75/Ronin_Controller/cursor/c3-ronin-ble-6a5c/apple/RoninControl/Firmware
-curl -fsSL -o firmware-c3-oled.bin  "$BASE/firmware-c3-oled.bin"
-curl -fsSL -o firmware-c3-rmsid.bin "$BASE/firmware-c3-rmsid.bin"
-# 보드 OTA
-curl -fsS "http://192.168.10.152:80/update" -F "update=@firmware-c3-oled.bin"
-curl -fsS "http://192.168.10.154:80/update" -F "update=@firmware-c3-rmsid.bin"
-```
-
-갱신(맥북 Arduino PlatformIO):
-
-```bash
-(cd esp32-c3 && pio run -e c3-oled -e c3-rmsid -e s3-light)
-cp esp32-c3/.pio/build/c3-oled/firmware.bin apple/RoninControl/Firmware/firmware-c3-oled.bin
-cp esp32-c3/.pio/build/c3-rmsid/firmware.bin apple/RoninControl/Firmware/firmware-c3-rmsid.bin
-cp esp32-c3/.pio/build/s3-light/firmware.bin apple/RoninControl/Firmware/firmware-s3-light.bin
+BASE=https://raw.githubusercontent.com/anyplan75/Ronin_Controller/cursor/cam-light-latency-ptz-ui-c885/apple/RoninControl/Firmware
+curl -fsSL -o firmware-s3-light.bin "$BASE/firmware-s3-light.bin"
+curl -fsS "http://192.168.10.153:80/update" -F "update=@firmware-s3-light.bin"
 ```

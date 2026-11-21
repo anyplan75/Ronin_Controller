@@ -499,6 +499,42 @@ final class Studio: ObservableObject {
         return moved.0
     }
 
+    /// 이동형 경로에 정지 장면 한 칸을 붙입니다.
+    func appendPtzMoveStep(_ cameraId: UUID, sceneNumber: Int, dwellSeconds: Double = 2) {
+        guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return }
+        var paths = profile.ptzCameras[index].movePaths
+        if paths.isEmpty {
+            paths = [PtzMovePath(name: "경로 1", steps: [])]
+        }
+        paths[0].steps.append(PtzMoveStep(sceneNumber: sceneNumber, dwellSeconds: dwellSeconds))
+        profile.ptzCameras[index].movePaths = paths
+        note("\(profile.ptzCameras[index].name) 경로에 장면 \(sceneNumber) 을 넣었습니다.")
+    }
+
+    func clearPtzMovePath(_ cameraId: UUID) {
+        guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return }
+        profile.ptzCameras[index].movePaths = [PtzMovePath(name: "경로 1", steps: [])]
+        note("\(profile.ptzCameras[index].name) 이동 경로를 비웠습니다.")
+    }
+
+    /// 이동형 프리셋 Recall. Stop 은 호출 쪽에서 Task 를 취소합니다.
+    func recallPtzMovePath(_ cameraId: UUID, path: PtzMovePath) async {
+        guard !path.steps.isEmpty else {
+            note("이동 경로가 비어 있습니다.")
+            return
+        }
+        note("\(path.name) 시퀀스 \(path.steps.count)칸을 부릅니다.")
+        for step in path.steps {
+            if Task.isCancelled { break }
+            _ = await recallPtzScene(cameraId, number: step.sceneNumber)
+            let wait = max(0.3, step.dwellSeconds)
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+        }
+        if !Task.isCancelled {
+            note("\(path.name) 시퀀스를 끝냈습니다.")
+        }
+    }
+
     func handlePtzDoor(method: String, target: String, body: String) async -> String {
         let pieces = target.split(separator: "?", maxSplits: 1).map(String.init)
         let path = pieces.first ?? "/"
@@ -1198,19 +1234,24 @@ final class Studio: ObservableObject {
             if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
-        let result = await c3Socket.command([
+        let payload: [String: Any] = [
             "op": "light",
             "index": index,
             "brightness": brightness,
             "kelvin": kelvin,
             "on": on,
-        ], timeout: 4)
-        if quiet && result.ack { return }
+        ]
+        // 슬라이더(quiet)는 ack 대기 없이 바로 보냅니다. 펌웨어가 최신값만 남깁니다.
+        if quiet {
+            _ = await c3Socket.fire(payload)
+            return
+        }
+        let result = await c3Socket.command(payload, timeout: 4)
         if result.ack {
             note(result.reason.isEmpty
                  ? "\(board.listTitle) 칸\(index) 밝기 \(brightness), \(kelvin)K 를 받았다고 답했습니다."
                  : result.reason)
-        } else if !quiet {
+        } else {
             note(result.reason)
         }
     }
