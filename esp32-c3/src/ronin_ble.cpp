@@ -28,6 +28,17 @@ static uint16_t dumlSeq = 0x0100;
 static Preferences store;
 static RoninTarget targetFilter = RoninTarget::Any;
 
+// 최신 목표만 남김(큐 적체 방지). 루프가 40ms 간격으로 writeWithoutResponse 한 번.
+static constexpr uint32_t kMinSendGapMs = 40;
+static bool offerMovePending = false;
+static bool offerZoomPending = false;
+static float offerPan = 0;
+static float offerPitch = 0;
+static float offerRoll = 0;
+static bool offerHome = false;
+static int16_t offerZoomSpeed = 0;
+static uint32_t lastBleSendMs = 0;
+
 // FFF4 알림을 모아 응답 코드를 봅니다. write 성공만으로 움직였다고 치지 않습니다.
 static constexpr size_t kRxCap = 256;
 static uint8_t rxBuf[kRxCap];
@@ -170,6 +181,8 @@ static void clearLink(bool keepPrefs) {
   authed = false;
   followModeSet = false;
   dumlPathOk = false;
+  offerMovePending = false;
+  offerZoomPending = false;
   writeUuid[0] = 0;
   clearRx();
   if (client != nullptr) {
@@ -211,13 +224,109 @@ void roninBleBegin() {
 
 static uint32_t nextAutoPairMs = 0;
 
+static bool bleWrite(const uint8_t* frame, size_t len);  // 아래 정의
+
+static bool ensureFollowOnce() {
+  if (followModeSet) return true;
+  uint8_t mode[40];
+  size_t modeLen = dumlSetMode(mode, sizeof(mode), dumlSeq++, 1);
+  if (modeLen == 0 || !bleWrite(mode, modeLen)) return false;
+  followModeSet = true;
+  return true;
+}
+
+/// 스트림용: 최신 절대각 한 프레임만 writeWithoutResponse. 긴 notify 대기 없음.
+static bool streamAbsNow(float panDeg, float pitchDeg, float rollDeg, bool home) {
+  if (!roninBleLinked()) return false;
+  if (home) {
+    panDeg = 0;
+    pitchDeg = 0;
+    rollDeg = 0;
+  }
+#if defined(BOARD_SLOT_RMSID)
+  rollDeg = -rollDeg;
+#endif
+  if (!ensureFollowOnce()) return false;
+  uint8_t frame[48];
+  size_t len = dumlAbsAngle(frame, sizeof(frame), dumlSeq++, panDeg, pitchDeg, home ? 0.45f : 0.30f, rollDeg);
+  if (len == 0) return false;
+  clearRx();
+  bool ok = bleWrite(frame, len);
+  lastBleSendMs = millis();
+  if (ok) dumlPathOk = true;  // 스트림은 write 성패만. 눈확인 전 「된다」 아님.
+  return ok;
+}
+
+static bool streamZoomNow(int16_t speed) {
+  if (!roninBleLinked()) return false;
+#if defined(BOARD_SLOT_RMSID)
+  (void)speed;
+  return false;
+#else
+  {
+    char lower[40];
+    lowerCopy(lower, sizeof(lower), linkedName);
+    if (nameMatchesSc(lower) && !nameMatchesRs2(lower)) return false;
+  }
+  if (speed < -2048) speed = -2048;
+  if (speed > 2048) speed = 2048;
+  uint8_t frame[48];
+  size_t len = dumlDial(frame, sizeof(frame), dumlSeq++, speed, 0x0402, 0x40);
+  if (len == 0) return false;
+  clearRx();
+  bool ok = bleWrite(frame, len);
+  lastBleSendMs = millis();
+  return ok;
+#endif
+}
+
+static void drainLatestOffers() {
+  if (busy) return;
+  if (!offerMovePending && !offerZoomPending) return;
+  if (!roninBleLinked()) return;
+  uint32_t now = millis();
+  if (lastBleSendMs != 0 && (now - lastBleSendMs) < kMinSendGapMs) return;
+
+  // 줌·이동이 같이 오면 최신 줌을 먼저(한 번에 하나).
+  if (offerZoomPending) {
+    int16_t speed = offerZoomSpeed;
+    offerZoomPending = false;
+    streamZoomNow(speed);
+    return;
+  }
+  if (offerMovePending) {
+    float pan = offerPan;
+    float pitch = offerPitch;
+    float roll = offerRoll;
+    bool home = offerHome;
+    offerMovePending = false;
+    streamAbsNow(pan, pitch, roll, home);
+  }
+}
+
+void roninBleOfferMove(float panDeg, float pitchDeg, float rollDeg, bool home) {
+  offerPan = panDeg;
+  offerPitch = pitchDeg;
+  offerRoll = rollDeg;
+  offerHome = home;
+  offerMovePending = true;
+}
+
+void roninBleOfferZoom(int16_t speed) {
+  offerZoomSpeed = speed;
+  offerZoomPending = true;
+}
+
 void roninBleLoop() {
   if (client != nullptr && linked && !client->isConnected()) {
     Serial.println("로닌 블루투스가 끊겼습니다.");
     clearLink(true);
     nextAutoPairMs = millis() + 2000;
   }
+  // 붙어 있으면 추가 스캔 없음. 최신 목표만 40ms 간격으로 비움.
+  drainLatestOffers();
   // OTA·재부팅 뒤 저장 이름으로 다시 붙습니다. 실패 시 간격을 늘려 스캔 폭주를 막습니다.
+  // 연결 중에는 절대 스캔·재페어하지 않습니다(BLE 라디오 부하 분리).
   if (!busy && !roninBleLinked() && linkedName[0] && millis() >= nextAutoPairMs) {
     nextAutoPairMs = millis() + 45000;
     char reason[160];
@@ -519,6 +628,11 @@ bool roninBlePair(const char* name, const char* id, char* reason, size_t reasonC
   }
   client = next;
   linked = true;
+  // 연결 뒤에는 스캔을 멈춰 BLE 라디오를 제어에만 씁니다.
+  if (NimBLEDevice::getScan()->isScanning()) {
+    NimBLEDevice::getScan()->stop();
+  }
+  NimBLEDevice::getScan()->clearResults();
   strncpy(linkedName, connectName, sizeof(linkedName) - 1);
   strncpy(linkedId, connectId, sizeof(linkedId) - 1);
   store.begin("ronin-c3", false);
@@ -657,6 +771,7 @@ bool roninBleMove(float panDeg, float pitchDeg, bool home, char* reason, size_t 
   }
 
   if (moved) {
+    lastBleSendMs = millis();
     if (yawOnly) {
       snprintf(reason, reasonCap,
                "로닌 %s 요(롤) %.0f° · %s · 특성 %s · 프로토콜응답 있음. RS2·SC가 같은 쪽으로 기울는지 봐 주세요.",
@@ -779,4 +894,62 @@ bool roninBleZoom(int16_t speed, char* reason, size_t reasonCap) {
            (unsigned)seenSet, (unsigned)seenId);
   return false;
 #endif
+}
+
+bool roninBleProbePayload(int axisSlot, float deg, int rawByte, int rawValue, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (!roninBleLinked()) {
+    snprintf(reason, reasonCap, "붙은 로닌이 없습니다. 프로브 전에 페어하세요.");
+    return false;
+  }
+  ensureFollowOnce();
+
+  uint8_t payload[8] = {};
+  char label[48] = {};
+  if (rawByte >= 0 && rawByte <= 7) {
+    payload[(size_t)rawByte] = (uint8_t)(rawValue & 0xFF);
+    // axis 비트는 실험용으로 팬+틸트 기본.
+    payload[6] = 0x07;
+    payload[7] = 3;  // 0.3s
+    snprintf(label, sizeof(label), "rawByte[%d]=%d", rawByte, rawValue & 0xFF);
+  } else if (axisSlot >= 0 && axisSlot <= 2) {
+    int16_t v = (int16_t)lroundf(deg * 10.0f);
+#if defined(BOARD_SLOT_RMSID)
+    if (axisSlot == 1) v = (int16_t)(-v);  // SC 요(롤) 부호 맞춤
+#endif
+    size_t lo = (size_t)axisSlot * 2;
+    payload[lo] = (uint8_t)(v & 0xFF);
+    payload[lo + 1] = (uint8_t)(v >> 8);
+    payload[6] = (uint8_t)(axisSlot == 0 ? 0x04 : (axisSlot == 1 ? 0x02 : 0x01));
+    payload[7] = 3;
+    const char* axisName = axisSlot == 0 ? "pan" : (axisSlot == 1 ? "roll/yaw" : "pitch");
+    snprintf(label, sizeof(label), "axis %s=%.1f°", axisName, deg);
+  } else {
+    snprintf(reason, reasonCap, "probe 는 axis(0~2) 또는 rawByte(0~7) 가 필요합니다.");
+    return false;
+  }
+
+  uint8_t frame[48];
+  size_t len = dumlBuild(frame, sizeof(frame), 0x0402, dumlSeq++, 0x40, 0x04, 0x14, payload, sizeof(payload));
+  char txHex[40] = {};
+  hexShort(txHex, sizeof(txHex), frame, len);
+  clearRx();
+  if (len == 0 || !bleWrite(frame, len)) {
+    snprintf(reason, reasonCap, "프로브 write 실패(%s).", label);
+    return false;
+  }
+  lastBleSendMs = millis();
+  bool seen = waitAnyNotify(dumlPathOk ? 180 : 300);
+  if (seen && lastDumlSeen) {
+    dumlPathOk = true;
+    snprintf(reason, reasonCap,
+             "프로브 %s write+notify(특성 %s tx %s). 어느 축이 도는지 눈확인 해 주세요.",
+             label, writeUuid[0] ? writeUuid : "?", txHex[0] ? txHex : "-");
+    return true;
+  }
+  snprintf(reason, reasonCap,
+           "프로브 %s write 됐지만 응답 없음(특성 %s tx %s). 안 움직이면 이 바이트/축 아님.",
+           label, writeUuid[0] ? writeUuid : "?", txHex[0] ? txHex : "-");
+  return false;
 }

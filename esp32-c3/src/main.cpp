@@ -52,7 +52,11 @@ static void applySlot(BoardSlot next) {
   prefs.putString("job", job);
 }
 
-static void refreshOled() {
+// OLED/I2C 는 BLE 를 밀 수 있어, 내용이 바뀌거나 150~200ms 마다만 갱신.
+static uint32_t lastOledMs = 0;
+static char lastOledSig[72] = {};
+
+static void refreshOled(bool force = false) {
   if (slot != BoardSlot::OledRs2) return;
   char l1[24];
   char l2[24];
@@ -66,6 +70,14 @@ static void refreshOled() {
   }
   if (roninBleLinked()) snprintf(l3, sizeof(l3), "%s", roninBleName());
   else snprintf(l3, sizeof(l3), "no pair");
+  char sig[72];
+  snprintf(sig, sizeof(sig), "%s|%s|%s", l1, l2, l3);
+  uint32_t now = millis();
+  bool changed = strcmp(sig, lastOledSig) != 0;
+  if (!force && !changed && (now - lastOledMs) < 180) return;
+  if (!force && changed && (now - lastOledMs) < 120) return;  // 제어 중 과다 I2C 억제
+  strncpy(lastOledSig, sig, sizeof(lastOledSig) - 1);
+  lastOledMs = now;
   boardOledShow(l1, l2, l3);
 }
 
@@ -519,8 +531,30 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       if (strcmp(action, "zoomIn") == 0 && speed == 0) speed = 800;
       if (strcmp(action, "zoomOut") == 0 && speed == 0) speed = -800;
       if (strcmp(action, "zoomStop") == 0) speed = 0;
-      char reason[200];
-      bool ok = roninBleZoom((int16_t)speed, reason, sizeof(reason));
+#if defined(BOARD_SLOT_RMSID)
+      reply(num, false, "SC 줌은 아직 없습니다. UI·프로토콜 자리만 두었고, 지금은 RS2 줌만 씁니다.");
+      return;
+#else
+      // 최신 속도만 남기고 40ms 간격 송신. 가짜 dial ack 없음.
+      roninBleOfferZoom((int16_t)speed);
+      roninBleLoop();
+      refreshOled(false);
+      char reason[160];
+      snprintf(reason, sizeof(reason),
+               "줌 최신값 %d 을 덮어썼습니다. 렌즈/다이얼이 도는지 봐 주세요.", speed);
+      reply(num, true, reason);
+      return;
+#endif
+    }
+    if (strcmp(action, "probe") == 0 || strcmp(action, "probeByte") == 0) {
+      // Yaw/Zoom·축 바이트 분리 시험. 눈확인 전 「된다」 금지.
+      int axis = doc["axis"] | -1;
+      float deg = doc["deg"] | (doc["value"] | 0.0f);
+      int rawByte = doc["byte"] | (doc["rawByte"] | -1);
+      int rawValue = doc["raw"] | (doc["rawValue"] | 0);
+      char reason[220];
+      bool ok = roninBleProbePayload(axis, deg, rawByte, rawValue, reason, sizeof(reason));
+      refreshOled(true);
       reply(num, ok, reason);
       return;
     }
@@ -537,9 +571,29 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       pitch = 0;
       home = false;
     }
-    char reason[200];
-    bool ok = roninBleMove(pan, pitch, home, reason, sizeof(reason), roll);
-    reply(num, ok, reason);
+    // 제자리만 동기(notify 확인). 연속 팬·틸트·요는 최신값 덮어쓰기+40ms 송신.
+    if (home) {
+      char reason[200];
+      bool ok = roninBleMove(pan, pitch, true, reason, sizeof(reason), roll);
+      refreshOled(true);
+      reply(num, ok, reason);
+      return;
+    }
+    roninBleOfferMove(pan, pitch, roll, false);
+    roninBleLoop();  // 간격 되면 즉시 1회 송신
+    refreshOled(false);
+    {
+      char reason[180];
+      if (strcmp(action, "yaw") == 0) {
+        snprintf(reason, sizeof(reason),
+                 "요(롤) 최신값 %.0f° 를 덮어썼습니다. 같은 쪽으로 기울는지 봐 주세요.", roll);
+      } else {
+        snprintf(reason, sizeof(reason),
+                 "팬 %.0f° 틸트 %.0f° 요 %.0f° 최신값을 덮어썼습니다. 따라오는지 봐 주세요.",
+                 pan, pitch, roll);
+      }
+      reply(num, true, reason);
+    }
     return;
   }
   if (strcmp(op, "light") == 0) {
@@ -673,7 +727,7 @@ void loop() {
     // 로닌 자동 재페어는 roninBleLoop 한곳만. 여기서 또 스캔하면 WS 가 깜빡입니다.
     roninBleLoop();
   }
-  if (millis() % 3000 < 30) refreshOled();
+  refreshOled(false);
   boardNetPump();
   (void)clientUp;
 }
