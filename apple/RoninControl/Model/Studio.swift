@@ -111,6 +111,8 @@ final class Studio: ObservableObject {
     @Published var ptzLive: [UUID: PtzScene.Aim] = [:]
     /// 장면 부르기가 화면 슬라이더를 따라가게 하는 번호입니다.
     @Published var ptzRecallTick = 0
+    /// 시작·재확인 때 슬롯별 WS hello 응답. key=oled/rmsid/s3, false=망 무응답.
+    @Published var boardLanAlive: [String: Bool] = [:]
     private let sceneDoor = PtzSceneDoor()
     let radio = OsmoRadio()
     private let c3 = C3Link()
@@ -228,18 +230,37 @@ final class Studio: ObservableObject {
     /// 앱을 열면 알려진 세 자리를 목록에 두고, 살아 있는 호스트는 WS hello 로 맞춥니다.
     func ensureBoardRolesOnLaunch() async {
         syncBoardRoles(quiet: true)
+        await refreshBoardLanAlive()
+    }
+
+    /// OLED=.152 / S3=.153 / RMSID=.154 WS hello 를 다시 찍어 망 응답을 표시합니다.
+    func refreshBoardLanAlive() async {
         var live: [String] = []
+        var dead: [String] = []
+        var next: [String: Bool] = [:]
         for slot in C3Slot.allCases {
             if let hello = await BoardHello.probe(host: slot.defaultHost) {
-                applyBoardHello(boardId: nil, slot: hello.slot, wifi: hello.wifiMac, host: hello.host.isEmpty ? slot.defaultHost : hello.host)
+                applyBoardHello(
+                    boardId: nil,
+                    slot: hello.slot.isEmpty ? slot.rawValue : hello.slot,
+                    wifi: hello.wifiMac,
+                    host: hello.host.isEmpty ? slot.defaultHost : hello.host
+                )
+                next[slot.rawValue] = true
                 live.append("\(slot.boardTitle) \(hello.host.isEmpty ? slot.defaultHost : hello.host)")
+            } else {
+                next[slot.rawValue] = false
+                dead.append("\(slot.boardTitle) \(slot.defaultHost):82")
             }
         }
+        boardLanAlive = next
         sortBoardRoles()
         if live.isEmpty {
-            note("보드 자리 3대를 목록에 두었습니다. 망에서 응답한 보드는 아직 없습니다.")
-        } else {
+            note("보드 자리 3대를 목록에 두었습니다. 망에서 응답한 보드는 아직 없습니다. (\(dead.joined(separator: ", ")))")
+        } else if dead.isEmpty {
             note("망에서 응답: \(live.joined(separator: ", ")). 목록에 OLED·RMSID·S3 자리를 맞췄습니다.")
+        } else {
+            note("망 응답 \(live.joined(separator: ", ")). 무응답 \(dead.joined(separator: ", ")). 로닌은 OLED/RMSID 가 살아 있어야 붙습니다.")
         }
     }
 
@@ -1145,7 +1166,7 @@ final class Studio: ObservableObject {
             "tally": start,
         ])
         if ok {
-            note("\(label) \(start ? "녹화" : "정지") \(ids.count)대를 기판 소켓으로 보냈습니다.")
+            note("\(label) \(start ? "녹화" : "정지") \(ids.count)대를 큐에 넣었습니다. 대별 빨간 테두리는 기판 BLE 답(tally.note)이 온 뒤에만 바뀝니다.")
         } else {
             noteOffline("기판이 오프라인입니다. \(label) \(start ? "녹화" : "정지")를 보내지 않았습니다.")
         }
@@ -1166,27 +1187,40 @@ final class Studio: ObservableObject {
         profile.cameraGroups[name]?.contains(cameraId) == true
     }
 
-    /// 액션 카메라 한 대의 녹화입니다. 올리멕스 웹소켓으로만 보냅니다. 성공이면 true.
+    /// 액션 카메라 한 대 녹화입니다. 소켓 쓰기가 아니라 기판 tally.note(BLE) 성공일 때만 true.
     @discardableResult
     func olimexCamera(_ camera: BoardCamera, start: Bool) async -> Bool {
         guard profile.olimexRegistered else {
             note("액션 카메라는 올리멕스 기판에 있습니다. 먼저 등록하세요.")
             return false
         }
-        let ok = await boardSocket.send([
+        guard boardSocket.state == .online else {
+            noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
+            return false
+        }
+        let result = await boardSocket.sendAwaitingTally([
             "op": "record-one",
             "id": camera.id,
             "name": camera.name,
             "kind": camera.kind,
-            "ble": camera.ble,
+            "ble": camera.ble.isEmpty ? BoardSocket.ble(for: camera.kind) : camera.ble,
             "start": start,
-        ])
-        if ok {
-            note("\(camera.name) \(start ? "녹화" : "정지")를 올리멕스 소켓으로 보냈습니다.")
-        } else {
+            "tally": start,
+        ], matching: camera.name, timeout: 18)
+        if !result.sent {
             noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
+            return false
         }
-        return ok
+        if result.ok {
+            note(result.note.isEmpty
+                 ? "\(camera.name) \(start ? "녹화" : "정지") · 기판이 BLE 상태 0으로 받았습니다."
+                 : result.note)
+            return true
+        }
+        note(result.note.isEmpty
+             ? "\(camera.name) \(start ? "녹화" : "정지") · 기판 BLE 답이 없어 녹화로 두지 않습니다."
+             : result.note)
+        return false
     }
 
     /// 조명 C3 가 주변 울란지 이름을 읽습니다.
@@ -1344,7 +1378,18 @@ final class Studio: ObservableObject {
         let board = profile.c3Boards.first { $0.id == id } ?? profile.c3Boards.first { $0.duty == .ronin && $0.link.shoots } ?? profile.c3Boards.first { $0.link.shoots }
         guard let board else { return }
         guard board.link.shoots else { return }
+        let host = board.socketHost
+        if let slot = board.boardSlot, boardLanAlive[slot.rawValue] == false, board.link == .lan {
+            note("\(board.listTitle) \(host):82 가 망에서 무응답이었습니다. 연결을 다시 시도합니다. 전원·와이파이·펌(맥미니)을 확인하세요.")
+        } else {
+            note("\(board.listTitle) \(host):82 에 붙습니다.")
+        }
         c3Socket.connect(board)
+    }
+
+    /// 로닌·조명 탭에서 망 무응답일 때 다시 찍습니다.
+    func recheckC3Lan() {
+        Task { await refreshBoardLanAlive() }
     }
 
     func chooseC3Mode(_ id: UUID, _ lane: BoardLane) {
