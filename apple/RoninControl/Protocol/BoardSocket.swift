@@ -634,6 +634,23 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         }
     }
 
+    /// 슬라이더용: ack 를 기다리지 않고 바로 보냅니다(최신값 덮어쓰기·즉시 반응).
+    func fire(_ payload: [String: Any]) async -> Bool {
+        guard state == .online, let task else { return false }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        do {
+            try await task.send(.string(text))
+            return true
+        } catch {
+            softDrop("명령을 보내지 못했습니다.")
+            return false
+        }
+    }
+
     func urlSession(
         _ session: URLSession,
         webSocketTask: URLSessionWebSocketTask,

@@ -11,6 +11,11 @@
 
 #include "dji_ble.h"
 #include "gopro_ble_frame.h"
+#include "hub_ota.h"
+
+#ifndef HUB_FW_VERSION
+#define HUB_FW_VERSION "1.0.62"
+#endif
 
 #if __has_include("wifi_local.h")
 #include "wifi_local.h"
@@ -94,6 +99,7 @@ static void publish() {
     if (WiFi.status() != WL_CONNECTED) doc["host"] = ETH.localIP().toString();
   }
   doc["port"] = 81;
+  doc["fw"] = String(HUB_FW_VERSION) + "-hub";
   doc["wifiMac"] = WiFi.macAddress();
   doc["ethMac"] = ethMacText;
   doc["apMac"] = WiFi.softAPmacAddress();
@@ -147,8 +153,25 @@ static uint8_t macType(const char* id) {
   return (value & 0xC0) == 0xC0 ? BLE_ADDR_RANDOM : BLE_ADDR_PUBLIC;
 }
 
+// 같은 카메라·같은 종류 명령은 최신값만 남깁니다(큐 적체 지연 방지).
 static void enqueueCam(const char* id, const char* name, const char* ble, uint8_t addrType, uint8_t kind, bool start, bool led, uint8_t setting, uint8_t option) {
-  if (jobCount >= 8 || id == nullptr || id[0] == 0) return;
+  if (id == nullptr || id[0] == 0) return;
+  for (int i = 0; i < jobCount; i++) {
+    if (!jobs[i].used || jobs[i].kind != kind || strcmp(jobs[i].id, id) != 0) continue;
+    copyField(jobs[i].name, sizeof(jobs[i].name), name == nullptr ? "" : name);
+    copyField(jobs[i].ble, sizeof(jobs[i].ble), ble == nullptr || ble[0] == 0 ? "FEA6" : ble);
+    jobs[i].addrType = addrType;
+    jobs[i].start = start;
+    jobs[i].led = led;
+    jobs[i].setting = setting;
+    jobs[i].option = option;
+    return;
+  }
+  if (jobCount >= 8) {
+    // 가득 차면 맨 앞(가장 오래된)을 버리고 뒤에 넣습니다.
+    for (int i = 1; i < jobCount; i++) jobs[i - 1] = jobs[i];
+    jobCount--;
+  }
   HubJob job = {};
   copyField(job.id, sizeof(job.id), id);
   copyField(job.name, sizeof(job.name), name == nullptr ? "" : name);
@@ -237,7 +260,8 @@ static bool takeCamera(NimBLEAdvertisedDevice& device, LiveCam* out) {
 static uint32_t nextScanAt = 0;
 
 static void scanCameras() {
-  if (busy || linkHeld || NimBLEDevice::getScan()->isScanning()) return;
+  // 대기 명령이 있으면 3초 스캔으로 누르기 반응을 막지 않습니다.
+  if (busy || linkHeld || jobCount > 0 || NimBLEDevice::getScan()->isScanning()) return;
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->setActiveScan(true);
   scan->setInterval(100);
@@ -246,8 +270,10 @@ static void scanCameras() {
   NimBLEDevice::getAdvertising()->stop();
   Serial.println("블루투스 스캔 시작");
   const uint32_t began = millis();
-  NimBLEScanResults results = scan->start(3, false);
-  if (millis() - began < 500) {
+  // 소켓 클라이언트가 있으면 짧게(1초), 없으면 3초.
+  const uint32_t scanSec = socket.count() > 0 ? 1 : 3;
+  NimBLEScanResults results = scan->start(scanSec, false);
+  if (millis() - began < 200) {
     Serial.println("블루투스 스캔을 시작하지 못했습니다.");
     NimBLEDevice::getAdvertising()->start();
     nextScanAt = millis() + 8000;
@@ -349,7 +375,8 @@ static bool waitNote(uint32_t ms) {
   const uint32_t start = millis();
   while ((uint32_t)(millis() - start) < ms) {
     if (noteReady) return true;
-    delay(15);
+    delay(5);
+    yield();
   }
   return noteReady;
 }
@@ -395,19 +422,22 @@ static bool openSession(const HubJob& job) {
   NimBLEDevice::getAdvertising()->stop();
   const bool osmo = strcmp(job.ble, "FFF0") == 0;
   for (int attempt = 0; attempt < 3; attempt++) {
+    // 붙이는 동안 새 녹화 명령이 오면 스캔이 다시 끼어들지 않게 합니다.
+    if (jobCount > 0 && attempt > 0) { /* keep trying current */ }
     NimBLEAddress address(std::string(job.id), job.addrType);
     if (!looksLikeMac(job.id)) {
       address = findAddress(job.name, osmo ? "FFF0" : "FEA6");
     }
     NimBLEClient* client = NimBLEDevice::createClient();
     if (client == nullptr) continue;
-    client->setConnectTimeout(8);
+    // 알려진 MAC 은 빠르게 실패·재시도합니다(8초 대기는 체감 지연).
+    client->setConnectTimeout(looksLikeMac(job.id) ? 3 : 5);
     if (!client->connect(address)) {
       NimBLEDevice::deleteClient(client);
-      delay(250);
+      delay(80);
       continue;
     }
-    client->updateConnParams(12, 24, 0, 200);
+    client->updateConnParams(6, 12, 0, 200);
     NimBLERemoteService* service = client->getService(osmo ? NimBLEUUID((uint16_t)0xFFF0) : NimBLEUUID((uint16_t)0xFEA6));
     if (service == nullptr) {
       client->disconnect();
@@ -426,7 +456,7 @@ static bool openSession(const HubJob& job) {
     if (!listening) {
       client->disconnect();
       NimBLEDevice::deleteClient(client);
-      delay(250);
+      delay(80);
       continue;
     }
     session.client = client;
@@ -453,8 +483,10 @@ static bool writeGoPro(const uint8_t* body, uint8_t bodyLen, bool setting) {
   if (write == nullptr) return false;
   noteReady = false;
   noteLen = 0;
-  if (!write->writeValue(frame.data, frame.length, true)) return false;
-  if (!waitNote(1200)) return false;
+  // 셔터는 무응답 쓰기로 먼저 보내고, 짧게 notify 를 확인합니다.
+  const bool wantResponse = setting;
+  if (!write->writeValue(frame.data, frame.length, wantResponse)) return false;
+  if (!waitNote(setting ? 700 : 450)) return false;
   return goproAccepted();
 }
 
@@ -469,8 +501,10 @@ static bool writeOsmo(uint8_t cmd, const uint8_t* payload, size_t payloadLen) {
   if (len == 0) return false;
   noteReady = false;
   noteLen = 0;
-  if (!write->writeValue(frame, len, true)) return false;
-  if (!waitNote(1200)) return false;
+  // 녹화(0x03)는 무응답 쓰기 + 짧은 대기. 설정만 응답 대기.
+  const bool wantResponse = cmd != 0x03;
+  if (!write->writeValue(frame, len, wantResponse)) return false;
+  if (!waitNote(wantResponse ? 700 : 450)) return false;
   return osmoAccepted(cmd);
 }
 
@@ -589,7 +623,8 @@ static void runJob(const HubJob& job) {
   char note[180] = "명령을 끝내지 못했습니다.";
   bool ok = false;
   for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-    if (attempt > 0) dropSession();
+    // 이미 같은 카메라에 붙어 있으면 끊지 않고 한 번 더 보냅니다.
+    if (attempt > 0 && !(sessionHeld() && strcmp(session.id, job.id) == 0)) dropSession();
     ok = runOnce(job, note, sizeof(note));
     if (strcmp(job.ble, "CE80") == 0 || (strcmp(job.ble, "FFF0") == 0 && job.kind == kJobTally)) break;
   }
@@ -597,11 +632,22 @@ static void runJob(const HubJob& job) {
   tallyNote(note);
 }
 
+static int pickJobIndex() {
+  if (jobCount <= 0) return -1;
+  if (sessionHeld()) {
+    for (int i = 0; i < jobCount; i++) {
+      if (strcmp(jobs[i].id, session.id) == 0) return i;
+    }
+  }
+  return 0;
+}
+
 static void pump() {
   if (busy || jobCount == 0) return;
   busy = true;
-  HubJob job = jobs[0];
-  for (int i = 1; i < jobCount; i++) jobs[i - 1] = jobs[i];
+  const int pick = pickJobIndex();
+  HubJob job = jobs[pick];
+  for (int i = pick + 1; i < jobCount; i++) jobs[i - 1] = jobs[i];
   jobCount--;
   runJob(job);
   busy = false;
@@ -910,7 +956,9 @@ static void finishJoin() {
 static void banner() {
   Serial.println();
   Serial.println("올리멕스 액션캠 허브");
-  Serial.println("PoE 192.168.10.150 웹소켓 81");
+  Serial.print("fw ");
+  Serial.println(HUB_FW_VERSION);
+  Serial.println("PoE 192.168.10.150 웹소켓 81 · OTA http://ip/update");
   Serial.println("핫스팟 Ronin-Olimex 192.168.4.1 웹소켓 81");
   Serial.println("같은 와이파이 기본 192.168.10.151 웹소켓 81. 블루투스 설정이 있으면 그 주소를 씁니다.");
   Serial.println("주변 고프로 FEA6, 오즈모 FFF0, 인스타360 이름을 스캔해 웹소켓으로 보냅니다.");
@@ -959,14 +1007,17 @@ void setup() {
   server.addHandler(&socket);
   server.begin();
   Serial.println("웹소켓 81번을 열었습니다.");
+  hubOtaBegin();
 }
 
 void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
+  hubOtaLoop();
   pump();
   if (!busy) keepSession();
-  if (!busy && !linkHeld && (int32_t)(millis() - nextScanAt) >= 0) scanCameras();
+  if (!busy && !linkHeld && jobCount == 0 && (int32_t)(millis() - nextScanAt) >= 0) scanCameras();
   socket.cleanupClients();
-  delay(20);
+  // 대기 명령이 있으면 20ms 쉼을 줄여 바로 다음 카메라로 갑니다.
+  delay(jobCount > 0 ? 2 : 12);
 }
