@@ -15,6 +15,8 @@ struct PtzControlPad: View {
     var twoStep: Binding<Bool>
     var onNudge: (_ pan: Double, _ tilt: Double) -> Void
     var onStop: () -> Void
+    /// 가운데 버튼: 제자리(홈). nil 이면 onStop 만 호출합니다.
+    var onHome: (() -> Void)? = nil
     var onZoomChanged: (Double) -> Void
     var onFocusHold: (Int) -> Void
     var onFocusStop: () -> Void
@@ -39,7 +41,7 @@ struct PtzControlPad: View {
                 .foregroundStyle(ink)
             HStack(alignment: .center, spacing: 16) {
                 eightWayPad
-                    .frame(width: 168, height: 168)
+                    .frame(width: 152, height: 152)
                 HStack(alignment: .bottom, spacing: 14) {
                     verticalSlider(
                         top: "Fast",
@@ -93,27 +95,37 @@ struct PtzControlPad: View {
             ForEach(PadDir.allCases) { dir in
                 padWedge(dir)
             }
-            Circle()
-                .fill(Color(red: 0.28, green: 0.29, blue: 0.32))
-                .frame(width: 44, height: 44)
-                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 1))
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onEnded { _ in onStop() }
-                )
-                .accessibilityLabel("정지")
+            VStack(spacing: 0) {
+                Text("홈")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(ink)
+            }
+            .frame(width: 48, height: 48)
+            .background(Color(red: 0.28, green: 0.29, blue: 0.32), in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.45), lineWidth: 1.5))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onEnded { _ in
+                        if let onHome {
+                            onHome()
+                        } else {
+                            onStop()
+                        }
+                    }
+            )
+            .accessibilityLabel("제자리")
         }
     }
 
+    /// 화살표 글자를 돌리지 않고 자리만 옮깁니다. (돌리면 ▲ 가 옆으로 누워 방향이 틀어집니다.)
     private func padWedge(_ dir: PadDir) -> some View {
-        let angle = dir.degrees
+        let rad = dir.degrees * .pi / 180
         return Text(dir.symbol)
-            .font(.system(size: 13, weight: .bold))
+            .font(.system(size: 18, weight: .bold))
             .foregroundStyle(ink)
             .frame(width: 40, height: 40)
             .background(Color.white.opacity(0.08), in: Circle())
-            .offset(y: -58)
-            .rotationEffect(.degrees(angle))
+            .offset(x: CGFloat(sin(rad) * 52), y: CGFloat(-cos(rad) * 52))
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in onNudge(dir.pan, dir.tilt) }

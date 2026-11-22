@@ -1592,9 +1592,14 @@ final class Studio: ObservableObject {
                 reconnectOlimex(quiet: true)
             }
             // connecting(다시 붙는 중)이면 건드리지 않습니다. 깜빡임·재연결 루프를 막습니다.
+            // 마지막으로 붙였던 보드(boardId)를 우선합니다. 없으면 로닌→조명 순.
             if c3Socket.state == .offline {
                 if let id = c3Socket.boardId {
                     reconnectC3(id)
+                } else if let ronin = profile.c3Boards.first(where: { $0.duty == .ronin && $0.link.shoots }) {
+                    reconnectC3(ronin.id)
+                } else if let light = profile.c3Boards.first(where: { $0.duty == .light && $0.link.shoots }) {
+                    reconnectC3(light.id)
                 } else {
                     reconnectC3()
                 }

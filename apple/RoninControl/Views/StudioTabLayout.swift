@@ -1,10 +1,11 @@
 import SwiftUI
 
-/// 왼쪽 메뉴 세 칸입니다. PTZ · 고정캠 · 로닌.
+/// 왼쪽 메뉴 네 칸입니다. PTZ · 고정캠 · 로닌 · 조명.
 enum StudioSideTab: String, CaseIterable, Identifiable {
     case ptz
     case fixedCam
     case ronin
+    case light
 
     var id: String { rawValue }
 
@@ -13,6 +14,7 @@ enum StudioSideTab: String, CaseIterable, Identifiable {
         case .ptz: return "PTZ"
         case .fixedCam: return "고정캠"
         case .ronin: return "로닌"
+        case .light: return "조명"
         }
     }
 }
@@ -73,14 +75,15 @@ struct DeviceThumbCard: View {
     }
 }
 
-/// 왼쪽 탭 버튼 줄입니다.
+/// 왼쪽 탭 버튼 줄입니다. 네 칸이 한 줄에 들어갑니다.
 struct StudioTabBar: View {
     @Binding var tab: StudioSideTab
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
             ForEach(StudioSideTab.allCases) { item in
                 Button(item.title) { tab = item }
+                    .font(.caption2.weight(.semibold))
                     .buttonStyle(DeskButtonStyle(selected: tab == item, expand: true))
             }
         }
