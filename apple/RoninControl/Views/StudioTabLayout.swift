@@ -19,7 +19,7 @@ enum StudioSideTab: String, CaseIterable, Identifiable {
     }
 }
 
-/// 기기 줄: 썸네일 이미지 + 이름 + 세부 상태 + 온라인/오프라인.
+/// 기기 줄: 썸네일 이미지 + 이름 + 세부 상태 + 온라인/오프라인. 녹화 중이면 빨간 테두리.
 struct DeviceThumbCard: View {
     var title: String
     var subtitle: String
@@ -28,7 +28,10 @@ struct DeviceThumbCard: View {
     /// nil 이면 온라인 줄을 숨깁니다(등록 전 안내 등).
     var online: Bool?
     var selected: Bool
+    var recording: Bool = false
     var action: () -> Void
+
+    private let recordRed = Color(red: 0.86, green: 0.28, blue: 0.28)
 
     var body: some View {
         Button(action: action) {
@@ -43,7 +46,7 @@ struct DeviceThumbCard: View {
                 }
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                        .stroke(recording ? recordRed : Color.white.opacity(0.22), lineWidth: recording ? 2.5 : 1)
                 )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
@@ -65,11 +68,20 @@ struct DeviceThumbCard: View {
                                              ? Color(red: 0.55, green: 0.85, blue: 0.55)
                                              : Color.white.opacity(0.5))
                     }
+                    if recording {
+                        Text("녹화 중")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(recordRed)
+                    }
                 }
                 Spacer(minLength: 0)
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(recording ? recordRed : Color.clear, lineWidth: 2)
+            )
         }
         .buttonStyle(DeskButtonStyle(selected: selected, expand: true))
     }

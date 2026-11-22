@@ -35,54 +35,58 @@ struct PtzControlPad: View {
     private let ink = Color.white.opacity(0.92)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        // 조작부·프리셋을 옆으로 두고 한 화면에 맞춤(세로 스크롤 없음).
+        VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(ink)
-            HStack(alignment: .center, spacing: 16) {
-                eightWayPad
-                    .frame(width: 152, height: 152)
-                HStack(alignment: .bottom, spacing: 14) {
-                    verticalSlider(
-                        top: "Fast",
-                        bottom: "Slow",
-                        label: "Speed",
-                        value: $speed,
-                        range: 0.15...1
-                    )
-                    if showZoom {
+            HStack(alignment: .top, spacing: 10) {
+                HStack(alignment: .center, spacing: 10) {
+                    eightWayPad
+                        .frame(width: 118, height: 118)
+                    HStack(alignment: .bottom, spacing: 8) {
                         verticalSlider(
-                            top: "Tele",
-                            bottom: "Wide",
-                            label: "Zoom",
-                            value: Binding(
-                                get: { zoom },
-                                set: { zoom = $0; onZoomChanged($0) }
-                            ),
-                            range: 0...1
+                            top: "Fast",
+                            bottom: "Slow",
+                            label: "Speed",
+                            value: $speed,
+                            range: 0.15...1
                         )
-                    }
-                    if showFocus {
-                        focusHoldColumn
+                        if showZoom {
+                            verticalSlider(
+                                top: "Tele",
+                                bottom: "Wide",
+                                label: "Zoom",
+                                value: Binding(
+                                    get: { zoom },
+                                    set: { zoom = $0; onZoomChanged($0) }
+                                ),
+                                range: 0...1
+                            )
+                        }
+                        if showFocus {
+                            focusHoldColumn
+                        }
                     }
                 }
-            }
-            .padding(12)
-            .background(pad, in: RoundedRectangle(cornerRadius: 12))
+                .padding(8)
+                .background(pad, in: RoundedRectangle(cornerRadius: 10))
 
-            HStack(alignment: .top, spacing: 12) {
-                if showIris {
-                    irisColumn
+                HStack(alignment: .top, spacing: 8) {
+                    if showIris {
+                        irisColumn
+                    }
+                    presetBlock
                 }
-                presetBlock
+                .padding(8)
+                .background(pad, in: RoundedRectangle(cornerRadius: 10))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(12)
-            .background(pad, in: RoundedRectangle(cornerRadius: 12))
 
             if !movePaths.isEmpty || onAddPathStep != nil {
                 movePathBlock
-                    .padding(12)
-                    .background(pad, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(8)
+                    .background(pad, in: RoundedRectangle(cornerRadius: 10))
             }
         }
     }
@@ -125,7 +129,7 @@ struct PtzControlPad: View {
             .foregroundStyle(ink)
             .frame(width: 40, height: 40)
             .background(Color.white.opacity(0.08), in: Circle())
-            .offset(x: CGFloat(sin(rad) * 52), y: CGFloat(-cos(rad) * 52))
+            .offset(x: CGFloat(sin(rad) * 40), y: CGFloat(-cos(rad) * 40))
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in onNudge(dir.pan, dir.tilt) }
@@ -135,26 +139,26 @@ struct PtzControlPad: View {
     }
 
     private func verticalSlider(top: String, bottom: String, label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             Text(top).font(.caption2).foregroundStyle(.secondary)
             Slider(value: value, in: range)
                 .rotationEffect(.degrees(-90))
-                .frame(width: 110, height: 28)
-                .frame(width: 36, height: 110)
+                .frame(width: 84, height: 24)
+                .frame(width: 28, height: 84)
                 .tint(accent)
             Text(bottom).font(.caption2).foregroundStyle(.secondary)
-            Text(label).font(.caption.weight(.semibold)).foregroundStyle(ink)
+            Text(label).font(.caption2.weight(.semibold)).foregroundStyle(ink)
         }
-        .frame(width: 52)
+        .frame(width: 40)
     }
 
     private var focusHoldColumn: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             Text("Far").font(.caption2).foregroundStyle(.secondary)
             Text("▲")
-                .font(.caption.weight(.bold))
-                .frame(width: 36, height: 44)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .font(.caption2.weight(.bold))
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { _ in onFocusHold(1) }
@@ -162,58 +166,57 @@ struct PtzControlPad: View {
                 )
             Slider(value: $focus, in: 0...1)
                 .rotationEffect(.degrees(-90))
-                .frame(width: 90, height: 24)
-                .frame(width: 32, height: 90)
+                .frame(width: 70, height: 20)
+                .frame(width: 26, height: 70)
                 .tint(accent)
             Text("▼")
-                .font(.caption.weight(.bold))
-                .frame(width: 36, height: 44)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                .font(.caption2.weight(.bold))
+                .frame(width: 28, height: 28)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { _ in onFocusHold(-1) }
                         .onEnded { _ in onFocusStop() }
                 )
-            Text("Near").font(.caption2).foregroundStyle(.secondary)
-            Text("Focus").font(.caption.weight(.semibold)).foregroundStyle(ink)
+            Text("Focus").font(.caption2.weight(.semibold)).foregroundStyle(ink)
         }
-        .frame(width: 52)
+        .frame(width: 40)
     }
 
     private var irisColumn: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             Button("+") { onIrisStep(1) }
                 .buttonStyle(DeskButtonStyle())
-                .frame(width: 44)
+                .frame(width: 36)
             Slider(value: $iris, in: 0...1)
                 .rotationEffect(.degrees(-90))
-                .frame(width: 90, height: 24)
-                .frame(width: 32, height: 90)
+                .frame(width: 70, height: 20)
+                .frame(width: 26, height: 70)
                 .tint(accent)
             Button("−") { onIrisStep(-1) }
                 .buttonStyle(DeskButtonStyle())
-                .frame(width: 44)
+                .frame(width: 36)
             Button("Auto") { onIrisAuto() }
                 .buttonStyle(DeskButtonStyle(selected: true))
-                .frame(width: 52)
-            Text("Iris").font(.caption.weight(.semibold)).foregroundStyle(ink)
+                .frame(width: 44)
+            Text("Iris").font(.caption2.weight(.semibold)).foregroundStyle(ink)
         }
-        .frame(width: 56)
+        .frame(width: 48)
     }
 
     private var presetBlock: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Toggle("2 Step Operation", isOn: twoStep)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Toggle("2 Step", isOn: twoStep)
                     .toggleStyle(.checkbox)
-                    .font(.caption)
+                    .font(.caption2)
                 Spacer(minLength: 0)
                 Button("Recall") { onRecall() }
                     .buttonStyle(DeskButtonStyle(selected: true))
                 Button("Stop") { onStopPreset() }
                     .buttonStyle(DeskButtonStyle())
             }
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 3), spacing: 6) {
                 ForEach(Array(scenes.prefix(9))) { scene in
                     Button {
                         onSelectScene(scene.number)
@@ -221,29 +224,29 @@ struct PtzControlPad: View {
                             onRecall()
                         }
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 2) {
                             Text("\(scene.number)")
-                                .font(.caption.weight(.bold))
+                                .font(.caption2.weight(.bold))
                             Text(scene.name)
                                 .font(.caption2)
                                 .lineLimit(1)
-                            RoundedRectangle(cornerRadius: 4)
+                            RoundedRectangle(cornerRadius: 3)
                                 .fill(Color.black.opacity(0.55))
-                                .frame(height: 36)
+                                .frame(height: 22)
                                 .overlay(
-                                    Text(scene.saved ? "저장됨" : "비어 있음")
+                                    Text(scene.saved ? "저장" : "빈칸")
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 )
                         }
-                        .padding(8)
+                        .padding(6)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: 6)
                                 .fill(selectedScene == scene.number ? accent.opacity(0.25) : Color.white.opacity(0.06))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
+                            RoundedRectangle(cornerRadius: 6)
                                 .stroke(selectedScene == scene.number ? accent : Color.white.opacity(0.2), lineWidth: 1)
                         )
                     }
