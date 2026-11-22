@@ -416,12 +416,18 @@ struct StudioControlScreen: View {
                 Button("PTZ 등록") { showPtz = true }
                     .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             case .fixedCam:
-                Button("올리멕스 등록") {
-                    studio.registerOlimex()
-                    pick = .olimex
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("올리멕스 등록") {
+                        studio.registerOlimex()
+                        pick = .olimex
+                    }
+                    .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+                    .disabled(studio.profile.olimexRegistered)
+                    Text("고프로(5 블랙 포함)·액션5는 카메라 자체 와이파이가 아니라 올리멕스 블루투스로 붙습니다.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(DeskButtonStyle(selected: true, expand: true))
-                .disabled(studio.profile.olimexRegistered)
             case .ronin:
                 Button("로닌 보드 등록") { askC3Job = true }
                     .buttonStyle(DeskButtonStyle(selected: true, expand: true))
@@ -470,10 +476,14 @@ struct StudioControlScreen: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.vertical, 4)
+            Text("고프로 5 블랙 등도 카메라 와이파이에 붙이지 않습니다. 올리멕스 BLE로만 붙습니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
         } else {
             DeviceThumbCard(
                 title: studio.olimexTitle,
-                subtitle: "보드 · 고프로·액션5",
+                subtitle: "보드 · 고프로·액션5 · BLE",
                 detail: "\(link.lane.title) · \(shownOlimexAddress) · 녹화 \(link.reportedRecording == nil ? "모름" : "기판 보고")",
                 symbol: "server.rack",
                 online: link.state == .online,
@@ -481,12 +491,15 @@ struct StudioControlScreen: View {
             ) {
                 pick = .olimex
             }
+            Text("카메라 자체 와이파이 X · 올리멕스 블루투스(고프로 FEA6 / 액션5 FFF0)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             if link.state != .online {
                 Text("보드가 오프라인이면 카메라 이름이 비습니다.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else if link.cameras.isEmpty {
-                Text("붙어 있는 고프로·액션5가 아직 없습니다.")
+                Text("붙어 있는 고프로·액션5가 아직 없습니다. 카메라 와이파이가 아니라 올리멕스 BLE를 확인하세요.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
@@ -1040,6 +1053,9 @@ struct StudioControlScreen: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("고프로·액션5만 이 기판입니다. 로닌은 OLED/RMSID C3, 울란지 조명은 S3 입니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("고프로 5 블랙 포함: 카메라 자체 와이파이에 붙이지 않습니다. 올리멕스 블루투스로만 붙습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
