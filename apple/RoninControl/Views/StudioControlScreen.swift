@@ -1,12 +1,13 @@
 import AVKit
 import SwiftUI
 
-/// 맥, 아이패드, 아이폰이 같이 여는 스튜디오 화면입니다. 위 운송, 왼쪽 목록, 가운데 평면도, 아래 그림, 오른쪽 검사입니다.
+/// 맥, 아이패드, 아이폰이 같이 여는 스튜디오 화면입니다. 위 운송, 왼쪽 탭(PTZ·고정캠·로닌), 가운데 평면도, 오른쪽 설정·프리셋, 아래는 탭별 미리보기 또는 조종판입니다.
 struct StudioControlScreen: View {
     @EnvironmentObject private var studio: Studio
     @EnvironmentObject private var link: BoardSocket
     @EnvironmentObject private var c3Link: C3JobSocket
     @State private var pick: DeskPick = .olimex
+    @State private var sideTab: StudioSideTab = .ptz
     @State private var askC3Job = false
     @State private var fov = "와이드"
     @State private var yaw = 0.0
@@ -64,6 +65,8 @@ struct StudioControlScreen: View {
     /// 로닌용 앱 쪽 정지 프리셋(보드 장면과 별개).
     @State private var roninScenes: [PtzScene] = (1...9).map { PtzScene.empty($0) }
     @State private var roninMovePath = PtzMovePath(name: "로닌 경로", steps: [])
+    /// 고정캠 녹화 중 표시(앱이 보낸 뒤 성공한 카메라 id). 기판이 대별 상태를 안 주면 이 표시를 씁니다.
+    @State private var camRecording: Set<String> = []
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -75,21 +78,28 @@ struct StudioControlScreen: View {
         VStack(spacing: 0) {
             transport
             GeometryReader { geo in
+                // 좌·우 패널은 위→아래 전체 높이. 중간만 평면도+하단 조종(하단 스크롤 없음).
                 if geo.size.width < 760 {
-                    ScrollView {
+                    HStack(spacing: 0) {
+                        tabRail.frame(width: min(160, geo.size.width * 0.34))
                         VStack(spacing: 0) {
-                            deviceList.frame(minHeight: 240)
-                            floor.frame(height: 300)
-                            liveStrip
-                            inspector.frame(minHeight: 260)
+                            floor
+                                .frame(maxHeight: .infinity)
+                                .clipped()
+                            bottomStage
+                                .frame(height: bottomStageHeight(geo.size.height))
                         }
+                        inspector.frame(width: min(180, geo.size.width * 0.34))
                     }
                 } else {
                     HStack(spacing: 0) {
-                        deviceList.frame(width: min(280, geo.size.width * 0.24))
+                        tabRail.frame(width: min(300, geo.size.width * 0.26))
                         VStack(spacing: 0) {
                             floor
-                            liveStrip
+                                .frame(maxHeight: .infinity)
+                                .clipped()
+                            bottomStage
+                                .frame(height: bottomStageHeight(geo.size.height))
                         }
                         inspector.frame(width: min(320, geo.size.width * 0.26))
                     }
@@ -100,13 +110,31 @@ struct StudioControlScreen: View {
         .foregroundStyle(ink)
         .preferredColorScheme(.dark)
         .confirmationDialog("보드 자리", isPresented: $askC3Job, titleVisibility: .visible) {
-            Button("OLED C3 · 로닌 RS2") { studio.registerBoardSlot(.oled) }
-            Button("RMSID C3 · 로닌 SC") { studio.registerBoardSlot(.rmsid) }
-            Button("S3 · 울란지 조명") { studio.registerBoardSlot(.s3) }
+            Button("OLED C3 · 로닌 RS2") {
+                studio.registerBoardSlot(.oled)
+                sideTab = .ronin
+                if let board = studio.profile.c3Boards.first(where: { $0.boardSlot == .oled }) {
+                    pick = .c3(board.id)
+                }
+            }
+            Button("RMSID C3 · 로닌 SC") {
+                studio.registerBoardSlot(.rmsid)
+                sideTab = .ronin
+                if let board = studio.profile.c3Boards.first(where: { $0.boardSlot == .rmsid }) {
+                    pick = .c3(board.id)
+                }
+            }
+            Button("S3 · 울란지 조명") {
+                studio.registerBoardSlot(.s3)
+                sideTab = .light
+                if let board = studio.profile.c3Boards.first(where: { $0.boardSlot == .s3 }) {
+                    pick = .c3(board.id)
+                }
+            }
             Button("자리 맞추기 (3대·중복 제거)") { studio.syncBoardRoles() }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("슬롯·MAC·주소로 구분합니다. 고프로·액션5는 올리멕스입니다.")
+            Text("슬롯·MAC·주소로 구분합니다. 고프로·액션5=올리멕스, 로닌=OLED/RMSID, 조명=S3.")
         }
         .sheet(isPresented: $showJoin) {
             FirstJoinSheet { kind, host, port, radios, name in
@@ -131,15 +159,98 @@ struct StudioControlScreen: View {
             guard !didLaunchBoards else { return }
             didLaunchBoards = true
             await studio.ensureBoardRolesOnLaunch()
+            syncPickToTab(sideTab)
         }
         .onChange(of: pick) { _, next in
             if case .c3(let id) = next {
+                // 이미 같은 보드 온라인이면 connect 가 바로 return — 불필요 재연결 없음.
                 studio.reconnectC3(id)
             }
+        }
+        .onChange(of: sideTab) { _, tab in
+            syncPickToTab(tab)
+            ensureC3ForTab(tab)
         }
         .sheet(isPresented: $showPtz) {
             ptzSheet
         }
+    }
+
+    private func bottomStageHeight(_ total: CGFloat) -> CGFloat {
+        switch sideTab {
+        case .fixedCam:
+            return liveReady.isEmpty ? 64 : min(220, max(140, total * 0.24))
+        case .ptz, .ronin:
+            // 옆배치 축소판 — 한 화면에 맞춤
+            return min(240, max(180, total * 0.28))
+        case .light:
+            return min(220, max(160, total * 0.26))
+        }
+    }
+
+    private func syncPickToTab(_ tab: StudioSideTab) {
+        switch tab {
+        case .ptz:
+            if case .ptz = pick { return }
+            if let first = studio.profile.ptzCameras.first {
+                pick = .ptz(first.id)
+            }
+        case .fixedCam:
+            switch pick {
+            case .olimex, .camera: return
+            default:
+                pick = .olimex
+            }
+        case .ronin:
+            if case .c3(let id) = pick,
+               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .ronin }) {
+                return
+            }
+            if let first = studio.profile.c3Boards.first(where: { $0.duty == .ronin }) {
+                pick = .c3(first.id)
+            }
+        case .light:
+            if case .c3(let id) = pick,
+               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
+                return
+            }
+            if let first = studio.profile.c3Boards.first(where: { $0.duty == .light }) {
+                pick = .c3(first.id)
+            }
+        }
+    }
+
+    /// 로닌·조명 탭으로 오면 해당 보드 소켓을 붙입니다. (한 소켓이라 탭마다 바꿔 붙음)
+    private func ensureC3ForTab(_ tab: StudioSideTab) {
+        switch tab {
+        case .ronin:
+            if case .c3(let id) = pick,
+               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .ronin }) {
+                studio.reconnectC3(id)
+            } else if let first = studio.profile.c3Boards.first(where: { $0.duty == .ronin }) {
+                studio.reconnectC3(first.id)
+            }
+        case .light:
+            if case .c3(let id) = pick,
+               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
+                studio.reconnectC3(id)
+            } else if let first = studio.profile.c3Boards.first(where: { $0.duty == .light }) {
+                studio.reconnectC3(first.id)
+            }
+        default:
+            break
+        }
+    }
+
+    private func c3OnlineText(for board: C3BoardRecord) -> (label: String, online: Bool?) {
+        if c3Link.boardId == board.id {
+            switch c3Link.state {
+            case .online: return ("온라인", true)
+            case .connecting: return ("연결 중", nil)
+            case .offline: return ("오프라인", false)
+            }
+        }
+        return ("대기(다른 보드 연결)", nil)
     }
 
     private var transport: some View {
@@ -148,7 +259,7 @@ struct StudioControlScreen: View {
                 Text(recordCount)
                     .font(.headline)
                     .foregroundStyle(link.state == .online ? record : ink)
-                Text(link.state == .online ? link.detail : "오프라인")
+                Text(link.state == .online ? link.detail : "올리멕스 \(link.lane.title) 미연결")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 8)
@@ -222,9 +333,16 @@ struct StudioControlScreen: View {
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.45), lineWidth: 1))
                 }
                 Menu {
-                    Button("올리멕스 · 고프로·액션5") { studio.registerOlimex() }
+                    Button("올리멕스 · 고프로·액션5") {
+                        studio.registerOlimex()
+                        sideTab = .fixedCam
+                        pick = .olimex
+                    }
                     Button("보드 (C3·S3)") { askC3Job = true }
-                    Button("PTZ 카메라") { showPtz = true }
+                    Button("PTZ 카메라") {
+                        sideTab = .ptz
+                        showPtz = true
+                    }
                 } label: {
                     Text("기판 등록")
                         .font(.caption.weight(.semibold))
@@ -261,111 +379,554 @@ struct StudioControlScreen: View {
         }
     }
 
+    /// 올리멕스 녹화 수만. 오프라인이면 배지처럼 「오프라인」을 쓰지 않습니다(무엇이 오프라인인지 불명).
     private var recordCount: String {
-        guard link.state == .online, let count = link.reportedRecording else { return "오프라인" }
-        return "녹화 \(count)"
+        guard link.state == .online else { return "올리멕스 대기" }
+        if let count = link.reportedRecording { return "녹화 \(count)" }
+        return "올리멕스 온라인"
     }
 
-    private var deviceList: some View {
-        List {
-            Section("올리멕스 · 고프로·액션5") {
-                Button {
-                    pick = .olimex
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label(studio.profile.olimexRegistered ? studio.olimexTitle : "아직 등록하지 않음", systemImage: "server.rack")
-                        Text("역할 고프로·액션5")
-                            .font(.caption.weight(.semibold))
-                        Text(studio.profile.olimexRegistered ? "\(link.lane.title) · \(link.state == .online ? "온라인 \(link.endpoint)" : "오프라인")" : "연결을 고르세요")
-                        Text("녹화 \(link.reportedRecording == nil ? "모름" : "기판 보고") · HDMI/USB 모름")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+    /// 왼쪽: 탭 3개 + 탭별 기기 등록·목록. 보드는 등록된 것만 보이고, 이후엔 온라인/오프라인만 갱신합니다.
+    private var tabRail: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            StudioTabBar(tab: $sideTab)
+            tabRegisterRow
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    switch sideTab {
+                    case .ptz:
+                        ptzTabDevices
+                    case .fixedCam:
+                        fixedCamTabDevices
+                    case .ronin:
+                        roninTabDevices
+                    case .light:
+                        lightTabDevices
                     }
                 }
-                .buttonStyle(DeskButtonStyle(selected: pick == .olimex, expand: true))
-                .listRowBackground(pick == .olimex ? Color.white.opacity(0.08) : Color.clear)
-                if studio.profile.olimexRegistered {
-                    if link.state != .online {
-                        Text("기판이 오프라인이면 카메라 이름이 비습니다.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else if link.cameras.isEmpty {
-                        Text("고프로·액션 5만 여기에 나옵니다. 로닌 짐벌은 C3 로닌 제어에서 스캔·붙입니다.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(link.cameras) { camera in
-                            HStack(spacing: 4) {
-                                Button {
-                                    pick = .camera(camera.id)
-                                } label: {
-                                    Label(camera.name, systemImage: cameraSymbol(camera))
-                                        .font(.caption)
-                                }
-                                .buttonStyle(DeskButtonStyle(selected: pick == .camera(camera.id), expand: true))
-                                ForEach(["A", "B", "C"], id: \.self) { name in
-                                    Button(name) { studio.toggleCameraGroup(name, camera.id) }
-                                        .buttonStyle(DeskButtonStyle(selected: studio.cameraInGroup(name, camera.id)))
-                                }
-                            }
-                            .listRowBackground(pick == .camera(camera.id) ? Color.white.opacity(0.08) : Color.clear)
-                        }
-                    }
-                }
+                .padding(.bottom, 8)
             }
-            Section("보드 · OLED/RMSID/S3") {
-                if studio.profile.c3Boards.isEmpty {
-                    Text("OLED→RS2, RMSID→SC, S3→울란지. 「보드 자리 맞추기」로 등록하세요.")
-                        .font(.caption)
+        }
+        .padding(10)
+        .background(panel)
+        .overlay(alignment: .trailing) { Rectangle().fill(line).frame(width: 1) }
+    }
+
+    private var tabRegisterRow: some View {
+        HStack(spacing: 8) {
+            switch sideTab {
+            case .ptz:
+                Button("PTZ 등록") { showPtz = true }
+                    .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            case .fixedCam:
+                VStack(alignment: .leading, spacing: 6) {
+                    Button("올리멕스 등록") {
+                        studio.registerOlimex()
+                        pick = .olimex
+                    }
+                    .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+                    .disabled(studio.profile.olimexRegistered)
+                    Text("고프로(5 블랙 포함)·액션5는 카메라 자체 와이파이가 아니라 올리멕스 블루투스로 붙습니다.")
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                ForEach(studio.profile.c3Boards) { board in
-                    Button {
+            case .ronin:
+                Button("로닌 보드 등록") { askC3Job = true }
+                    .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            case .light:
+                Button("조명 보드 등록") {
+                    studio.registerBoardSlot(.s3)
+                    if let board = studio.profile.c3Boards.first(where: { $0.boardSlot == .s3 }) {
                         pick = .c3(board.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Label(board.listTitle, systemImage: board.duty == .light ? "lightbulb.fill" : "rotate.3d")
-                            Text("역할 \(board.roleTitle)")
-                                .font(.caption.weight(.semibold))
-                            Text("\(board.socketHost) · \(board.wifiMac.isEmpty ? "MAC 없음" : board.wifiMac) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인" : "오프라인")")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                     }
-                    .buttonStyle(DeskButtonStyle(selected: pick == .c3(board.id), expand: true))
-                    .listRowBackground(pick == .c3(board.id) ? Color.white.opacity(0.08) : Color.clear)
-                    .swipeActions {
-                        Button("삭제", role: .destructive) { studio.deleteC3(board.id) }
-                    }
+                }
+                .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var ptzTabDevices: some View {
+        if studio.profile.ptzCameras.isEmpty {
+            Text("등록한 PTZ만 목록에 나옵니다. 기본 IP는 192.168.10.203 입니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+        } else {
+            ForEach(studio.profile.ptzCameras) { camera in
+                DeviceThumbCard(
+                    title: camera.name,
+                    subtitle: camera.host,
+                    detail: "ONVIF \(camera.onvifPort) · Visca \(camera.viscaPort) · HDMI 모름",
+                    symbol: "arrow.up.and.down.and.arrow.left.and.right",
+                    online: ptzOnline.contains(camera.id),
+                    selected: pick == .ptz(camera.id)
+                ) {
+                    pick = .ptz(camera.id)
+                }
+                .contextMenu {
+                    Button("삭제", role: .destructive) { studio.deletePtz(camera.id) }
                 }
             }
-            Section("PTZ") {
-                if studio.profile.ptzCameras.isEmpty {
-                    Text("192.168.10.203 또는 같은 망 검색으로 넣습니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(studio.profile.ptzCameras) { camera in
-                    Button {
-                        pick = .ptz(camera.id)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Label(camera.name, systemImage: "arrow.up.and.down.and.arrow.left.and.right")
-                            Text("\(camera.host) · \(ptzOnline.contains(camera.id) ? "온라인" : "오프라인") · 대기 · HDMI 모름")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var fixedCamTabDevices: some View {
+        if !studio.profile.olimexRegistered {
+            Text("올리멕스를 등록하면 보드가 나타나고, 이후엔 온라인/오프라인만 표시합니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+            Text("고프로 5 블랙 등도 카메라 와이파이에 붙이지 않습니다. 올리멕스 BLE로만 붙습니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 4)
+        } else {
+            DeviceThumbCard(
+                title: studio.olimexTitle,
+                subtitle: "보드 · 고프로·액션5 · BLE",
+                detail: "\(link.lane.title) · \(shownOlimexAddress) · 녹화 \(link.reportedRecording == nil ? "모름" : "\(link.reportedRecording!)대")",
+                symbol: "server.rack",
+                online: link.state == .online,
+                selected: pick == .olimex,
+                recording: (link.reportedRecording ?? 0) > 0
+            ) {
+                pick = .olimex
+            }
+            Text("카메라 자체 와이파이 X · 올리멕스 블루투스(고프로 FEA6 / 액션5 FFF0)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            if link.state != .online {
+                Text("보드가 오프라인이면 카메라 이름이 비습니다.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if link.cameras.isEmpty {
+                Text("붙어 있는 고프로·액션5가 아직 없습니다. 카메라 와이파이가 아니라 올리멕스 BLE를 확인하세요.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(link.cameras) { camera in
+                    HStack(alignment: .top, spacing: 6) {
+                        DeviceThumbCard(
+                            title: camera.name,
+                            subtitle: camera.kind.isEmpty ? "고정캠" : camera.kind,
+                            detail: camRecording.contains(camera.id) ? "녹화 중" : "대기",
+                            symbol: cameraSymbol(camera),
+                            online: true,
+                            selected: pick == .camera(camera.id),
+                            recording: camRecording.contains(camera.id)
+                        ) {
+                            pick = .camera(camera.id)
                         }
-                    }
-                    .buttonStyle(DeskButtonStyle(selected: pick == .ptz(camera.id), expand: true))
-                    .listRowBackground(pick == .ptz(camera.id) ? Color.white.opacity(0.08) : Color.clear)
-                    .swipeActions {
-                        Button("삭제", role: .destructive) { studio.deletePtz(camera.id) }
+                        VStack(spacing: 4) {
+                            Button("녹화") {
+                                Task { await setCamRecording(camera, start: true) }
+                            }
+                            .buttonStyle(DeskButtonStyle(tone: .record))
+                            Button("정지") {
+                                Task { await setCamRecording(camera, start: false) }
+                            }
+                            .buttonStyle(DeskButtonStyle(tone: .stop))
+                            ForEach(["A", "B", "C"], id: \.self) { name in
+                                Button(name) { studio.toggleCameraGroup(name, camera.id) }
+                                    .buttonStyle(DeskButtonStyle(selected: studio.cameraInGroup(name, camera.id)))
+                            }
+                        }
                     }
                 }
             }
         }
-        .scrollContentBackground(.hidden)
-        .background(panel)
+    }
+
+    private func setCamRecording(_ camera: BoardCamera, start: Bool) async {
+        let ok = await studio.olimexCamera(camera, start: start)
+        if ok {
+            if start {
+                camRecording.insert(camera.id)
+            } else {
+                camRecording.remove(camera.id)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var roninTabDevices: some View {
+        let boards = studio.profile.c3Boards.filter { $0.duty == .ronin }
+        if boards.isEmpty {
+            Text("OLED(RS2)·RMSID(SC)를 등록하면 보드가 나타납니다. 등록 후엔 온라인/오프라인만 봅니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+        } else {
+            ForEach(boards) { board in
+                let status = c3OnlineText(for: board)
+                DeviceThumbCard(
+                    title: board.listTitle,
+                    subtitle: "\(board.roleTitle) · \(status.label)",
+                    detail: "\(board.socketHost) · \(board.wifiMac.isEmpty ? "MAC 없음" : board.wifiMac)\(board.gimbalName.isEmpty ? "" : " · \(board.gimbalName)")",
+                    symbol: "rotate.3d",
+                    online: status.online,
+                    selected: pick == .c3(board.id)
+                ) {
+                    pick = .c3(board.id)
+                }
+                .contextMenu {
+                    Button("삭제", role: .destructive) { studio.deleteC3(board.id) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var lightTabDevices: some View {
+        let boards = studio.profile.c3Boards.filter { $0.duty == .light }
+        if boards.isEmpty {
+            Text("S3(울란지)를 등록하면 보드가 나타납니다. 등록 후엔 온라인/오프라인만 봅니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+        } else {
+            ForEach(boards) { board in
+                let status = c3OnlineText(for: board)
+                DeviceThumbCard(
+                    title: board.listTitle,
+                    subtitle: "\(board.roleTitle) · \(status.label)",
+                    detail: "\(board.socketHost) · \(board.wifiMac.isEmpty ? "MAC 없음" : board.wifiMac)",
+                    symbol: "lightbulb.fill",
+                    online: status.online,
+                    selected: pick == .c3(board.id)
+                ) {
+                    pick = .c3(board.id)
+                }
+                .contextMenu {
+                    Button("삭제", role: .destructive) { studio.deleteC3(board.id) }
+                }
+            }
+        }
+    }
+
+    /// 하단: 고정캠=미리보기, PTZ·로닌=조종판, 조명=울란지 제어. 스크롤 없음.
+    private var bottomStage: some View {
+        Group {
+            switch sideTab {
+            case .fixedCam:
+                liveStrip
+            case .ptz:
+                VStack(alignment: .leading, spacing: 8) {
+                    if case .ptz(let id) = pick,
+                       let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
+                        ptzControlStage(camera)
+                    } else {
+                        Text("왼쪽에서 PTZ를 고르면 아래에 조종판이 열립니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(panel)
+                .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+                .clipped()
+            case .ronin:
+                VStack(alignment: .leading, spacing: 8) {
+                    if case .c3(let id) = pick,
+                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+                        roninControlStage(board)
+                    } else {
+                        Text("왼쪽에서 로닌 보드를 고르면 아래에 조종판이 열립니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(panel)
+                .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+                .clipped()
+            case .light:
+                VStack(alignment: .leading, spacing: 8) {
+                    if case .c3(let id) = pick,
+                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) {
+                        lightControlStage(board)
+                    } else {
+                        Text("왼쪽에서 조명 보드를 고르면 아래에 울란지 제어가 열립니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(12)
+                    }
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(panel)
+                .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
+                .clipped()
+            }
+        }
+    }
+
+    private func ptzControlStage(_ camera: PtzRecord) -> some View {
+        let pose = ptzPose[camera.id] ?? PtzPose()
+        return PtzControlPad(
+            title: "PTZ · \(camera.name)",
+            speed: $stickSpeed,
+            zoom: Binding(
+                get: { ptzPose[camera.id]?.zoom ?? 0 },
+                set: {
+                    setPose(camera.id, zoom: $0)
+                    sendAbsolute(camera)
+                }
+            ),
+            focus: Binding(
+                get: { ptzFocus[camera.id] ?? 0.5 },
+                set: { ptzFocus[camera.id] = $0 }
+            ),
+            iris: Binding(
+                get: { ptzIris[camera.id] ?? 0.5 },
+                set: { ptzIris[camera.id] = $0 }
+            ),
+            scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
+            selectedScene: ptzSelectedScene[camera.id],
+            twoStep: $ptzTwoStep,
+            onNudge: { pan, tilt in steer(camera, pan: pan * stickSpeed, tilt: tilt * stickSpeed, zoom: 0) },
+            onStop: { halt(camera) },
+            onHome: {
+                setPose(camera.id, yaw: 0, pitch: 0)
+                sendAbsolute(camera)
+            },
+            onZoomChanged: { value in
+                setPose(camera.id, zoom: value)
+                sendAbsolute(camera)
+            },
+            onFocusHold: { dir in
+                Task { _ = await Visca.focus(host: camera.host, port: UInt16(camera.viscaPort), direction: dir) }
+            },
+            onFocusStop: {
+                Task { _ = await Visca.focus(host: camera.host, port: UInt16(camera.viscaPort), direction: 0) }
+            },
+            onIrisStep: { dir in
+                Task { _ = await Visca.iris(host: camera.host, port: UInt16(camera.viscaPort), direction: dir) }
+            },
+            onIrisAuto: {
+                Task { _ = await Visca.iris(host: camera.host, port: UInt16(camera.viscaPort), direction: 0, auto: true) }
+            },
+            onSelectScene: { number in
+                ptzSelectedScene[camera.id] = number
+            },
+            onRecall: {
+                let number = ptzSelectedScene[camera.id] ?? 1
+                let saved = PtzScene.ten(camera.scenes).first { $0.number == number }
+                guard let saved, saved.saved else {
+                    studio.note("장면 \(number) 은 아직 저장되지 않았습니다.")
+                    return
+                }
+                setPose(camera.id, yaw: saved.pan, pitch: saved.tilt, zoom: saved.zoom)
+                Task { _ = await studio.recallPtzScene(camera.id, number: number) }
+            },
+            onStopPreset: {
+                ptzSequenceTask?.cancel()
+                halt(camera)
+            },
+            movePaths: camera.movePaths,
+            onRecallPath: { path in
+                ptzSequenceTask?.cancel()
+                ptzSequenceTask = Task {
+                    await studio.recallPtzMovePath(camera.id, path: path)
+                }
+            },
+            onAddPathStep: { number in
+                studio.appendPtzMoveStep(camera.id, sceneNumber: number)
+            },
+            onClearPath: {
+                studio.clearPtzMovePath(camera.id)
+            }
+        )
+        .onChange(of: studio.ptzRecallTick) { _, _ in
+            guard let aim = studio.ptzLive[camera.id] else { return }
+            setPose(camera.id, yaw: aim.pan, pitch: aim.tilt, zoom: aim.zoom)
+        }
+        .task(id: camera.id) { await refreshPtz(camera) }
+        .accessibilityLabel("PTZ 조종 \(camera.name) 팬 \(Int(pose.yaw)) 틸트 \(Int(pose.pitch))")
+    }
+
+    private func roninControlStage(_ board: C3BoardRecord) -> some View {
+        PtzControlPad(
+            title: "로닌 · \(board.listTitle)",
+            speed: $stickSpeed,
+            zoom: $roninZoomSlider,
+            focus: $roninFocus,
+            iris: $roninIris,
+            showFocus: false,
+            showIris: false,
+            showZoom: board.boardSlot == .oled,
+            scenes: roninScenes,
+            selectedScene: roninSelectedScene,
+            twoStep: $roninTwoStep,
+            onNudge: { pan, tilt in steerRonin(pan: pan * stickSpeed, tilt: tilt * stickSpeed) },
+            onStop: {},
+            onHome: {
+                yaw = 0
+                pitch = 0
+                queueRonin(yaw: 0, pitch: 0, home: true)
+            },
+            onZoomChanged: { value in
+                guard board.boardSlot == .oled else { return }
+                let speed = Int(((value - 0.5) * 1600).rounded())
+                Task { await studio.zoomRonin(speed: speed, boardId: board.id, quiet: true) }
+            },
+            onFocusHold: { _ in },
+            onFocusStop: {},
+            onIrisStep: { _ in },
+            onIrisAuto: {},
+            onSelectScene: { number in
+                roninSelectedScene = number
+            },
+            onRecall: {
+                let scene = roninScenes.first { $0.number == roninSelectedScene }
+                guard let scene, scene.saved else {
+                    studio.note("로닌 장면 \(roninSelectedScene) 은 아직 저장되지 않았습니다.")
+                    return
+                }
+                yaw = scene.pan
+                pitch = scene.tilt
+                queueRonin(yaw: yaw, pitch: pitch)
+            },
+            onStopPreset: {
+                ptzSequenceTask?.cancel()
+                yaw = 0
+                pitch = 0
+                queueRonin(yaw: 0, pitch: 0, home: true)
+            },
+            movePaths: roninMovePath.steps.isEmpty ? [] : [roninMovePath],
+            onRecallPath: { path in
+                ptzSequenceTask?.cancel()
+                ptzSequenceTask = Task {
+                    for step in path.steps {
+                        if Task.isCancelled { break }
+                        if let scene = roninScenes.first(where: { $0.number == step.sceneNumber }), scene.saved {
+                            yaw = scene.pan
+                            pitch = scene.tilt
+                            queueRonin(yaw: yaw, pitch: pitch)
+                        }
+                        try? await Task.sleep(nanoseconds: UInt64(max(0.3, step.dwellSeconds) * 1_000_000_000))
+                    }
+                }
+            },
+            onAddPathStep: { number in
+                if let idx = roninScenes.firstIndex(where: { $0.number == number }) {
+                    roninScenes[idx].pan = yaw
+                    roninScenes[idx].tilt = pitch
+                    roninScenes[idx].zoom = roninZoomSlider
+                    roninScenes[idx].saved = true
+                    roninScenes[idx].name = "로닌 \(number)"
+                }
+                roninMovePath.steps.append(PtzMoveStep(sceneNumber: number, dwellSeconds: 2))
+                studio.note("로닌 경로에 장면 \(number) 을 넣었습니다.")
+            },
+            onClearPath: {
+                roninMovePath.steps = []
+                studio.note("로닌 이동 경로를 비웠습니다.")
+            }
+        )
+    }
+
+    /// 하단 조명 조종: 울란지 2대면 옆으로 나란히.
+    private func lightControlStage(_ board: C3BoardRecord) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("울란지 · \(board.listTitle)")
+                    .font(.subheadline.weight(.semibold))
+                Text(c3OnlineText(for: board).label)
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                Button("스캔") {
+                    Task { await studio.scanUlanziLights(board.id) }
+                }
+                .buttonStyle(DeskButtonStyle())
+                if c3Link.savedLights.count > 1 {
+                    Button("묶음") {
+                        let first = c3Link.savedLights[0]
+                        let key = lightKey(board.id, first.index)
+                        Task {
+                            await studio.setAllLights(
+                                board.id,
+                                brightness: Int(lightLevel[key] ?? 40),
+                                kelvin: Int(lightKelvin[key] ?? 4500),
+                                on: lightOnByKey[key] ?? true
+                            )
+                        }
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                }
+            }
+            if !c3Link.gimbals.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(c3Link.gimbals) { light in
+                        Button("붙이기 · \(light.name)") {
+                            Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: c3Link.savedLights.contains(where: { $0.name == light.name })))
+                    }
+                }
+            }
+            if c3Link.savedLights.isEmpty {
+                Text("저장된 울란지가 없습니다. 스캔 후 붙이거나 보드가 예전에 저장한 2대를 기다리세요.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(c3Link.savedLights) { light in
+                        lightUnitPane(board.id, light)
+                    }
+                }
+            }
+        }
+    }
+
+    private func lightUnitPane(_ boardId: UUID, _ light: SavedLight) -> some View {
+        let key = lightKey(boardId, light.index)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text("칸 \(light.index) · \(light.name)")
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+            Text("밝기 \(Int(lightLevel[key] ?? 40))")
+                .font(.caption2)
+            Slider(value: Binding(
+                get: { lightLevel[key] ?? 40 },
+                set: { lightLevel[key] = $0; queueLight(boardId, index: light.index) }
+            ), in: 0...100, step: 1)
+            Text("색온도 \(Int(lightKelvin[key] ?? 4500))K")
+                .font(.caption2)
+            Slider(value: Binding(
+                get: { lightKelvin[key] ?? 4500 },
+                set: { lightKelvin[key] = $0; queueLight(boardId, index: light.index) }
+            ), in: 2700...6500, step: 100)
+            Toggle(isOn: Binding(
+                get: { lightOnByKey[key] ?? true },
+                set: { next in
+                    lightOnByKey[key] = next
+                    Task {
+                        await studio.setLight(
+                            boardId,
+                            index: light.index,
+                            brightness: Int(lightLevel[key] ?? 40),
+                            kelvin: Int(lightKelvin[key] ?? 4500),
+                            on: next
+                        )
+                    }
+                }
+            )) {
+                Text(lightOnByKey[key] ?? true ? "켜짐" : "꺼짐")
+                    .font(.caption2)
+            }
+            .toggleStyle(.switch)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var selectedMark: String? {
@@ -375,6 +936,27 @@ struct StudioControlScreen: View {
         case .camera(let id): return id
         case .ptz(let id): return id.uuidString
         }
+    }
+
+    /// 무대에 그릴 울란지 대(저장 2대면 2개). 보드 자리 기준으로 옆으로 벌립니다.
+    private var stageLightUnits: [(id: String, name: String, boardId: UUID, index: Int)] {
+        var rows: [(id: String, name: String, boardId: UUID, index: Int)] = []
+        for board in studio.profile.c3Boards where board.duty == .light {
+            let lights: [SavedLight]
+            if c3Link.boardId == board.id, !c3Link.savedLights.isEmpty {
+                lights = c3Link.savedLights
+            } else {
+                lights = []
+            }
+            if lights.isEmpty {
+                rows.append((id: board.id.uuidString, name: board.name, boardId: board.id, index: 0))
+            } else {
+                for light in lights {
+                    rows.append((id: "\(board.id.uuidString)-\(light.index)", name: light.name, boardId: board.id, index: light.index))
+                }
+            }
+        }
+        return rows
     }
 
     private var floor: some View {
@@ -396,7 +978,9 @@ struct StudioControlScreen: View {
             ptzPose: ptzPose,
             ptzOnline: ptzOnline,
             onMovePtz: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) },
-            onAim: { id, heading in aimOnStage(id, heading: heading) }
+            onAim: { id, heading in aimOnStage(id, heading: heading) },
+            camRecording: camRecording,
+            lightUnits: stageLightUnits
         )
         .onChange(of: link.tallyNote) { _, note in
             if !note.isEmpty { studio.note(note) }
@@ -408,7 +992,7 @@ struct StudioControlScreen: View {
         let playing = link.cameras.filter { liveReady[$0.id] != nil }
         return VStack(alignment: .leading, spacing: 8) {
             if playing.isEmpty {
-                Text(link.state == .online ? "실시간 그림 없음" : "오프라인")
+                Text(link.state == .online ? "실시간 그림 없음" : "올리멕스 미연결 · 미리보기 없음")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -417,7 +1001,7 @@ struct StudioControlScreen: View {
                     HStack(spacing: 12) {
                         ForEach(playing) { camera in
                             if let url = liveReady[camera.id] {
-                                LivePicture(title: camera.name, url: url)
+                                LivePicture(title: camera.name, url: url, recording: camRecording.contains(camera.id))
                             }
                         }
                     }
@@ -458,20 +1042,47 @@ struct StudioControlScreen: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                switch pick {
-                case .olimex:
-                    olimexInspector
-                case .c3(let id):
-                    if let board = studio.profile.c3Boards.first(where: { $0.id == id }) {
-                        c3Inspector(board)
-                    }
-                case .camera(let id):
-                    if let camera = link.cameras.first(where: { $0.id == id }) {
-                        cameraInspector(camera)
-                    }
-                case .ptz(let id):
-                    if let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
+                Text("설정 · 프리셋")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                switch sideTab {
+                case .ptz:
+                    if case .ptz(let id) = pick,
+                       let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
                         ptzInspector(camera)
+                    } else {
+                        Text("왼쪽 PTZ 목록에서 카메라를 고르세요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                case .fixedCam:
+                    switch pick {
+                    case .olimex:
+                        olimexInspector
+                    case .camera(let id):
+                        if let camera = link.cameras.first(where: { $0.id == id }) {
+                            cameraInspector(camera)
+                        }
+                    default:
+                        olimexInspector
+                    }
+                case .ronin:
+                    if case .c3(let id) = pick,
+                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+                        c3Inspector(board)
+                    } else {
+                        Text("왼쪽 로닌 목록에서 보드를 고르세요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                case .light:
+                    if case .c3(let id) = pick,
+                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) {
+                        lightInspector(board)
+                    } else {
+                        Text("왼쪽 조명 목록에서 보드를 고르세요.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
                 LogList()
@@ -503,6 +1114,9 @@ struct StudioControlScreen: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("고프로·액션5만 이 기판입니다. 로닌은 OLED/RMSID C3, 울란지 조명은 S3 입니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("고프로 5 블랙 포함: 카메라 자체 와이파이에 붙이지 않습니다. 올리멕스 블루투스로만 붙습니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -538,7 +1152,7 @@ struct StudioControlScreen: View {
                 .textFieldStyle(.roundedBorder)
             Text(board.boardSlot.map { "슬롯 \($0.rawValue) · \($0.boardTitle)" } ?? "슬롯 미정 · \(board.duty.title)")
                 .font(.caption)
-            Text("\(board.link.title) · \(c3Link.boardId == board.id && c3Link.state == .online ? "온라인 \(board.socketHost):82" : "오프라인 \(board.socketHost):82")")
+            Text("\(board.link.title) · \(c3OnlineText(for: board).label) · \(board.socketHost):82")
                 .font(.caption.weight(.semibold))
                 .textSelection(.enabled)
             Text("와이파이 MAC \(board.wifiMac.isEmpty ? "아직 없음" : board.wifiMac)")
@@ -562,7 +1176,9 @@ struct StudioControlScreen: View {
             .disabled(c3Link.state == .connecting || !board.link.shoots)
             if board.duty == .ronin {
                 let spot = studio.stageSpot(for: board.id)
-                Text("로닌은 C3 블루투스로 붙입니다. CAN 배선이 아닙니다.")
+                Text("로닌 설정 · 프리셋")
+                    .font(.subheadline.weight(.semibold))
+                Text("로닌은 C3 블루투스로 붙입니다. CAN 배선이 아닙니다. 조종판은 아래 칸입니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(board.gimbalName.isEmpty
@@ -574,7 +1190,7 @@ struct StudioControlScreen: View {
                 }
                 .buttonStyle(DeskButtonStyle(expand: true))
                 if c3Link.gimbals.isEmpty {
-                    Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 오프라인이면 붙인 뒤 바로 스캔합니다. 조종은 이 보드만입니다.")
+                    Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 오프라인이면 붙인 뒤 바로 스캔합니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -598,79 +1214,27 @@ struct StudioControlScreen: View {
                     rollYaw = next
                     Task { await studio.nudgeRoninYaw(roll: next, boardId: board.id, quiet: true) }
                 }), in: -30...30, step: 1)
-                PtzControlPad(
-                    title: "로닌",
-                    speed: $stickSpeed,
-                    zoom: $roninZoomSlider,
-                    focus: $roninFocus,
-                    iris: $roninIris,
-                    showFocus: false,
-                    showIris: false,
-                    showZoom: board.boardSlot == .oled,
-                    scenes: roninScenes,
-                    selectedScene: roninSelectedScene,
-                    twoStep: $roninTwoStep,
-                    onNudge: { pan, tilt in steerRonin(pan: pan * stickSpeed, tilt: tilt * stickSpeed) },
-                    onStop: {},
-                    onZoomChanged: { value in
-                        guard board.boardSlot == .oled else { return }
-                        let speed = Int(((value - 0.5) * 1600).rounded())
-                        Task { await studio.zoomRonin(speed: speed, boardId: board.id, quiet: true) }
-                    },
-                    onFocusHold: { _ in },
-                    onFocusStop: {},
-                    onIrisStep: { _ in },
-                    onIrisAuto: {},
-                    onSelectScene: { number in
-                        roninSelectedScene = number
-                    },
-                    onRecall: {
-                        let scene = roninScenes.first { $0.number == roninSelectedScene }
-                        guard let scene, scene.saved else {
-                            studio.note("로닌 장면 \(roninSelectedScene) 은 아직 저장되지 않았습니다.")
-                            return
-                        }
-                        yaw = scene.pan
-                        pitch = scene.tilt
-                        queueRonin(yaw: yaw, pitch: pitch)
-                    },
-                    onStopPreset: {
-                        ptzSequenceTask?.cancel()
-                        yaw = 0
-                        pitch = 0
-                        queueRonin(yaw: 0, pitch: 0, home: true)
-                    },
-                    movePaths: roninMovePath.steps.isEmpty ? [] : [roninMovePath],
-                    onRecallPath: { path in
-                        ptzSequenceTask?.cancel()
-                        ptzSequenceTask = Task {
-                            for step in path.steps {
-                                if Task.isCancelled { break }
-                                if let scene = roninScenes.first(where: { $0.number == step.sceneNumber }), scene.saved {
-                                    yaw = scene.pan
-                                    pitch = scene.tilt
-                                    queueRonin(yaw: yaw, pitch: pitch)
-                                }
-                                try? await Task.sleep(nanoseconds: UInt64(max(0.3, step.dwellSeconds) * 1_000_000_000))
+                Text("프리셋")
+                    .font(.caption.weight(.semibold))
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 6)], spacing: 6) {
+                    ForEach(roninScenes) { scene in
+                        Button {
+                            roninSelectedScene = scene.number
+                        } label: {
+                            VStack(spacing: 2) {
+                                Text("\(scene.number)").font(.caption.weight(.bold))
+                                Text(scene.saved ? (scene.name.isEmpty ? "저장됨" : scene.name) : "빈칸")
+                                    .font(.caption2)
+                                    .lineLimit(1)
                             }
+                            .frame(maxWidth: .infinity)
+                            .padding(6)
                         }
-                    },
-                    onAddPathStep: { number in
-                        if let idx = roninScenes.firstIndex(where: { $0.number == number }) {
-                            roninScenes[idx].pan = yaw
-                            roninScenes[idx].tilt = pitch
-                            roninScenes[idx].zoom = roninZoomSlider
-                            roninScenes[idx].saved = true
-                            roninScenes[idx].name = "로닌 \(number)"
-                        }
-                        roninMovePath.steps.append(PtzMoveStep(sceneNumber: number, dwellSeconds: 2))
-                        studio.note("로닌 경로에 장면 \(number) 을 넣었습니다.")
-                    },
-                    onClearPath: {
-                        roninMovePath.steps = []
-                        studio.note("로닌 이동 경로를 비웠습니다.")
+                        .buttonStyle(DeskButtonStyle(selected: roninSelectedScene == scene.number, expand: true))
                     }
-                )
+                }
+                Toggle("2단 조작", isOn: $roninTwoStep)
+                    .font(.caption)
                 Button("지금 각을 장면 \(roninSelectedScene) 에 저장") {
                     if let idx = roninScenes.firstIndex(where: { $0.number == roninSelectedScene }) {
                         roninScenes[idx].pan = yaw
@@ -694,87 +1258,43 @@ struct StudioControlScreen: View {
                 }
                 .buttonStyle(DeskButtonStyle(selected: true, expand: true))
             } else {
-                Text("울란지 VL120BI·VL200BI 입니다. 대마다 밝기·색온도·켜기/끄기를 따로 보냅니다.")
+                Text("조명 제어는 아래 칸입니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text("S3 슬롯 전용입니다. OLED·RMSID 와 같은 기판이면 안 됩니다.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("울란지 블루투스 스캔") {
-                    Task { await studio.scanUlanziLights(board.id) }
+            }
+        }
+    }
+
+    private func lightInspector(_ board: C3BoardRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(board.listTitle, systemImage: "lightbulb.fill")
+                .font(.headline)
+            Text("역할 \(board.roleTitle)")
+                .font(.caption.weight(.semibold))
+            TextField("기판 이름", text: Binding(get: { board.name }, set: { studio.renameC3(board.id, $0) }))
+                .textFieldStyle(.roundedBorder)
+            Text("\(board.link.title) · \(c3OnlineText(for: board).label) · \(board.socketHost):82")
+                .font(.caption.weight(.semibold))
+                .textSelection(.enabled)
+            Text("와이파이 MAC \(board.wifiMac.isEmpty ? "아직 없음" : board.wifiMac)")
+                .font(.caption.monospaced())
+                .textSelection(.enabled)
+            Picker("연결", selection: Binding(get: { board.link }, set: { studio.chooseC3Mode(board.id, $0) })) {
+                ForEach(BoardLane.c3Choices) { lane in
+                    Text(lane.title).tag(lane)
                 }
-                .buttonStyle(DeskButtonStyle(expand: true))
-                if c3Link.gimbals.isEmpty {
-                    Text("스캔하면 주변 이름이 나옵니다. 붙이면 아래 칸에 저장됩니다.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(c3Link.gimbals) { light in
-                        Button("붙이기 · \(light.name)") {
-                            Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
-                        }
-                        .buttonStyle(DeskButtonStyle(selected: c3Link.savedLights.contains(where: { $0.name == light.name }), expand: true))
-                    }
-                }
-                if c3Link.savedLights.isEmpty {
-                    Text("저장된 울란지가 없습니다. 스캔 후 붙이거나 보드가 예전에 저장한 2대를 기다리세요.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(c3Link.savedLights) { light in
-                    let key = lightKey(board.id, light.index)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("칸 \(light.index) · \(light.name)")
-                            .font(.caption.weight(.semibold))
-                        Text("밝기 \(Int(lightLevel[key] ?? 40))")
-                        Slider(value: Binding(
-                            get: { lightLevel[key] ?? 40 },
-                            set: { lightLevel[key] = $0; queueLight(board.id, index: light.index) }
-                        ), in: 0...100, step: 1)
-                        Text("색온도 \(Int(lightKelvin[key] ?? 4500))K")
-                        Slider(value: Binding(
-                            get: { lightKelvin[key] ?? 4500 },
-                            set: { lightKelvin[key] = $0; queueLight(board.id, index: light.index) }
-                        ), in: 2700...6500, step: 100)
-                        Toggle(isOn: Binding(
-                            get: { lightOnByKey[key] ?? true },
-                            set: { next in
-                                lightOnByKey[key] = next
-                                Task {
-                                    await studio.setLight(
-                                        board.id,
-                                        index: light.index,
-                                        brightness: Int(lightLevel[key] ?? 40),
-                                        kelvin: Int(lightKelvin[key] ?? 4500),
-                                        on: next
-                                    )
-                                }
-                            }
-                        )) {
-                            Text(lightOnByKey[key] ?? true ? "켜짐" : "꺼짐")
-                        }
-                        .toggleStyle(.switch)
-                    }
-                    .padding(.vertical, 4)
-                }
-                if c3Link.savedLights.count > 1 {
-                    Button("모두 같은 값으로 (묶음)") {
-                        let first = c3Link.savedLights[0]
-                        let key = lightKey(board.id, first.index)
-                        Task {
-                            await studio.setAllLights(
-                                board.id,
-                                brightness: Int(lightLevel[key] ?? 40),
-                                kelvin: Int(lightKelvin[key] ?? 4500),
-                                on: lightOnByKey[key] ?? true
-                            )
-                        }
-                    }
-                    .buttonStyle(DeskButtonStyle(expand: true))
-                }
-                Text("칸마다 즉시 나갑니다. ack true 일 때만 성공입니다.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            }
+            Button(c3Link.boardId == board.id && c3Link.state == .connecting ? "연결 중" : "지금 연결") {
+                studio.reconnectC3(board.id)
+            }
+            .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
+            .disabled(c3Link.state == .connecting || !board.link.shoots)
+            Text("울란지 VL120BI·VL200BI 입니다. 밝기·색온도·켜기/끄기는 아래 칸에서 조작합니다. ack true 일 때만 성공입니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !c3Link.savedLights.isEmpty {
+                Text("저장 \(c3Link.savedLights.count)대 · \(c3Link.savedLights.map(\.name).joined(separator: ", "))")
+                    .font(.caption.weight(.semibold))
             }
         }
     }
@@ -830,10 +1350,15 @@ struct StudioControlScreen: View {
                 }
             }
             HStack {
-                Button("녹화") { Task { await studio.olimexCamera(camera, start: true) } }
+                Button("녹화") { Task { await setCamRecording(camera, start: true) } }
                     .buttonStyle(DeskButtonStyle(tone: .record))
-                Button("정지") { Task { await studio.olimexCamera(camera, start: false) } }
+                Button("정지") { Task { await setCamRecording(camera, start: false) } }
                     .buttonStyle(DeskButtonStyle(tone: .stop))
+            }
+            if camRecording.contains(camera.id) {
+                Text("녹화 중 · 빨간 테두리")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(record)
             }
             HStack {
                 Button("탈리 켜기") { Task { await studio.tally(camera, on: true) } }
@@ -860,92 +1385,52 @@ struct StudioControlScreen: View {
 
     private func ptzInspector(_ camera: PtzRecord) -> some View {
         let pose = ptzPose[camera.id] ?? PtzPose()
+        let spot = studio.stageSpot(for: camera.id)
+        let scenes = Array(PtzScene.ten(camera.scenes).prefix(9))
         return VStack(alignment: .leading, spacing: 8) {
-            Label("PTZ", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
+            Label("PTZ 설정 · 프리셋", systemImage: "arrow.up.and.down.and.arrow.left.and.right")
                 .font(.headline)
             TextField("카메라 이름", text: Binding(get: { camera.name }, set: { studio.renamePtz(camera.id, $0) }))
                 .textFieldStyle(.roundedBorder)
-            Text("\(camera.host) · ONVIF \(camera.onvifPort) · Visca \(camera.viscaPort) · \(ptzOnline.contains(camera.id) ? "온라인" : "오프라인")")
+            Text("\(camera.host) · ONVIF \(camera.onvifPort) · Visca \(camera.viscaPort)")
                 .font(.caption.weight(.semibold))
+            Text(ptzOnline.contains(camera.id) ? "온라인" : "오프라인")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(ptzOnline.contains(camera.id)
+                                 ? Color(red: 0.55, green: 0.85, blue: 0.55)
+                                 : Color.white.opacity(0.55))
             Text("MAC \(camera.mac.isEmpty ? "아직 없음" : camera.mac)")
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
             Text(camera.endpoint.isEmpty ? "ONVIF 주소를 찾는 중입니다." : camera.endpoint)
                 .font(.caption)
                 .textSelection(.enabled)
-            let spot = studio.stageSpot(for: camera.id)
-            Text("기본 시선 \(Int(spot.homeYaw))° · 팬 \(Int(wrapDegrees(spot.homeYaw + pose.yaw)))° · 틸트 \(Int(pose.pitch))°")
+            Text("기본 시선 \(Int(spot.homeYaw))° · 팬 \(Int(wrapDegrees(spot.homeYaw + pose.yaw)))° · 틸트 \(Int(pose.pitch))° · 줌 \(String(format: "%.2f", pose.zoom))")
                 .font(.caption.weight(.semibold))
-            PtzControlPad(
-                title: "PTZ",
-                speed: $stickSpeed,
-                zoom: Binding(
-                    get: { ptzPose[camera.id]?.zoom ?? 0 },
-                    set: {
-                        setPose(camera.id, zoom: $0)
-                        sendAbsolute(camera)
+            Text("조종판은 아래 칸입니다. 여기서는 설정과 장면 저장만 합니다.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("프리셋")
+                .font(.caption.weight(.semibold))
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 6)], spacing: 6) {
+                ForEach(scenes) { scene in
+                    Button {
+                        ptzSelectedScene[camera.id] = scene.number
+                    } label: {
+                        VStack(spacing: 2) {
+                            Text("\(scene.number)").font(.caption.weight(.bold))
+                            Text(scene.saved ? (scene.name.isEmpty ? "저장됨" : scene.name) : "빈칸")
+                                .font(.caption2)
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(6)
                     }
-                ),
-                focus: Binding(
-                    get: { ptzFocus[camera.id] ?? 0.5 },
-                    set: { ptzFocus[camera.id] = $0 }
-                ),
-                iris: Binding(
-                    get: { ptzIris[camera.id] ?? 0.5 },
-                    set: { ptzIris[camera.id] = $0 }
-                ),
-                scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
-                selectedScene: ptzSelectedScene[camera.id],
-                twoStep: $ptzTwoStep,
-                onNudge: { pan, tilt in steer(camera, pan: pan * stickSpeed, tilt: tilt * stickSpeed, zoom: 0) },
-                onStop: { halt(camera) },
-                onZoomChanged: { value in
-                    setPose(camera.id, zoom: value)
-                    sendAbsolute(camera)
-                },
-                onFocusHold: { dir in
-                    Task { _ = await Visca.focus(host: camera.host, port: UInt16(camera.viscaPort), direction: dir) }
-                },
-                onFocusStop: {
-                    Task { _ = await Visca.focus(host: camera.host, port: UInt16(camera.viscaPort), direction: 0) }
-                },
-                onIrisStep: { dir in
-                    Task { _ = await Visca.iris(host: camera.host, port: UInt16(camera.viscaPort), direction: dir) }
-                },
-                onIrisAuto: {
-                    Task { _ = await Visca.iris(host: camera.host, port: UInt16(camera.viscaPort), direction: 0, auto: true) }
-                },
-                onSelectScene: { number in
-                    ptzSelectedScene[camera.id] = number
-                },
-                onRecall: {
-                    let number = ptzSelectedScene[camera.id] ?? 1
-                    let saved = PtzScene.ten(camera.scenes).first { $0.number == number }
-                    guard let saved, saved.saved else {
-                        studio.note("장면 \(number) 은 아직 저장되지 않았습니다.")
-                        return
-                    }
-                    setPose(camera.id, yaw: saved.pan, pitch: saved.tilt, zoom: saved.zoom)
-                    Task { _ = await studio.recallPtzScene(camera.id, number: number) }
-                },
-                onStopPreset: {
-                    ptzSequenceTask?.cancel()
-                    halt(camera)
-                },
-                movePaths: camera.movePaths,
-                onRecallPath: { path in
-                    ptzSequenceTask?.cancel()
-                    ptzSequenceTask = Task {
-                        await studio.recallPtzMovePath(camera.id, path: path)
-                    }
-                },
-                onAddPathStep: { number in
-                    studio.appendPtzMoveStep(camera.id, sceneNumber: number)
-                },
-                onClearPath: {
-                    studio.clearPtzMovePath(camera.id)
+                    .buttonStyle(DeskButtonStyle(selected: ptzSelectedScene[camera.id] == scene.number, expand: true))
                 }
-            )
+            }
+            Toggle("2단 조작", isOn: $ptzTwoStep)
+                .font(.caption)
             Button("지금 각을 장면 \(ptzSelectedScene[camera.id] ?? 1) 에 저장") {
                 let number = ptzSelectedScene[camera.id] ?? 1
                 let current = ptzPose[camera.id] ?? PtzPose()
@@ -962,10 +1447,6 @@ struct StudioControlScreen: View {
                 Task { await refreshPtz(camera) }
             }
             .buttonStyle(DeskButtonStyle(expand: true))
-        }
-        .onChange(of: studio.ptzRecallTick) { _, _ in
-            guard let aim = studio.ptzLive[camera.id] else { return }
-            setPose(camera.id, yaw: aim.pan, pitch: aim.tilt, zoom: aim.zoom)
         }
         .task(id: camera.id) { await refreshPtz(camera) }
     }
@@ -1174,6 +1655,10 @@ struct StudioControlScreen: View {
                             mac: ptzMac
                         )
                         ptzPassword = ""
+                        sideTab = .ptz
+                        if let last = studio.profile.ptzCameras.last {
+                            pick = .ptz(last.id)
+                        }
                         showPtz = false
                     }
                     .buttonStyle(DeskButtonStyle(selected: true, expand: true))
@@ -1335,6 +1820,9 @@ private struct FloorPlan: View {
     var ptzOnline: Set<UUID>
     var onMovePtz: (UUID, Double, Double) -> Void
     var onAim: (String, Double) -> Void
+    var camRecording: Set<String> = []
+    /// 울란지 대별 표시. 2대면 무대에 2개.
+    var lightUnits: [(id: String, name: String, boardId: UUID, index: Int)] = []
     @State private var drag: String?
     @State private var dragAim = false
     @State private var draft: FloorMark?
@@ -1381,21 +1869,29 @@ private struct FloorPlan: View {
                         online: liveC3 == gimbal.id
                     )
                 }
-                for board in studio.profile.c3Boards where board.duty == .light {
-                    let spot = studio.stageSpot(for: board.id)
-                    paint(
-                        context: context,
-                        size: size,
-                        x: spot.x,
-                        y: spot.y,
-                        aim: 0,
-                        pitch: 0,
-                        title: board.name,
-                        mark: "lightbulb.fill",
-                        chosen: selected == board.id.uuidString,
-                        useLens: false,
-                        online: liveC3 == board.id
-                    )
+                let lightRows = lightUnits.isEmpty
+                    ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
+                    : lightUnits
+                let lightsByBoard = Dictionary(grouping: lightRows, by: \.boardId)
+                for (boardId, units) in lightsByBoard {
+                    let spot = studio.stageSpot(for: boardId)
+                    let count = max(units.count, 1)
+                    for (i, unit) in units.enumerated() {
+                        let spread = count <= 1 ? 0.0 : (Double(i) - Double(count - 1) / 2.0) * 1.4
+                        paint(
+                            context: context,
+                            size: size,
+                            x: spot.x + spread,
+                            y: spot.y,
+                            aim: 0,
+                            pitch: 0,
+                            title: unit.name,
+                            mark: "lightbulb.fill",
+                            chosen: selected == boardId.uuidString,
+                            useLens: false,
+                            online: liveC3 == boardId
+                        )
+                    }
                 }
                 for camera in ptz {
                     let spot = studio.stageSpot(for: camera.id)
@@ -1431,7 +1927,8 @@ private struct FloorPlan: View {
                         mark: symbolName(camera),
                         chosen: chosen,
                         useLens: chosen,
-                        online: camerasOnline
+                        online: camerasOnline,
+                        recording: camRecording.contains(camera.id)
                     )
                 }
             }
@@ -1561,11 +2058,12 @@ private struct FloorPlan: View {
     private let pad: CGFloat = 28
     private let brass = Color(red: 0.54, green: 0.42, blue: 0.20)
 
-    private func paint(context: GraphicsContext, size: CGSize, x: Double, y: Double, aim: Double, pitch: Double, title: String, mark: String, chosen: Bool, useLens: Bool, degrees: Double? = nil, throwMeters: Double? = nil, online: Bool = true) {
+    private func paint(context: GraphicsContext, size: CGSize, x: Double, y: Double, aim: Double, pitch: Double, title: String, mark: String, chosen: Bool, useLens: Bool, degrees: Double? = nil, throwMeters: Double? = nil, online: Bool = true, recording: Bool = false) {
         let at = plan(x: x, y: y, size: size)
         let fov = degrees ?? lens.degrees
         let reachBase = throwMeters ?? lens.throwMeters
         let reach = useLens ? reachBase * max(0.2, cos(pitch * .pi / 180)) : 1.8
+        let recordRed = Color(red: 0.86, green: 0.28, blue: 0.28)
         if useLens {
             var path = Path()
             path.move(to: at)
@@ -1590,13 +2088,15 @@ private struct FloorPlan: View {
         let height = pixels(0.55, size: size)
         let box = CGRect(x: at.x - width / 2, y: at.y - height / 2, width: width, height: height)
         context.fill(Path(roundedRect: box, cornerRadius: 8), with: .color(Color.white.opacity(chosen ? 0.16 : 0.08)))
-        context.stroke(Path(roundedRect: box, cornerRadius: 8), with: .color(chosen ? .white : .white.opacity(0.4)), lineWidth: chosen ? 2 : 1)
+        let strokeColor: Color = recording ? recordRed : (chosen ? .white : .white.opacity(0.4))
+        context.stroke(Path(roundedRect: box, cornerRadius: 8), with: .color(strokeColor), lineWidth: recording ? 3 : (chosen ? 2 : 1))
         let side = min(width, height) * 0.55
         var icon = context.resolve(Image(systemName: mark))
         icon.shading = .color(.white)
         context.draw(icon, in: CGRect(x: at.x - side / 2, y: at.y - side / 2 - 4, width: side, height: side))
-        let state = online ? "온라인" : "오프라인"
-        context.draw(Text(state).font(.caption2.weight(.bold)).foregroundStyle(online ? Color(red: 0.55, green: 0.85, blue: 0.55) : Color.white.opacity(0.55)), at: CGPoint(x: at.x, y: box.maxY - 2), anchor: .bottom)
+        let state = recording ? "녹화" : (online ? "온라인" : "오프라인")
+        let stateColor: Color = recording ? recordRed : (online ? Color(red: 0.55, green: 0.85, blue: 0.55) : Color.white.opacity(0.55))
+        context.draw(Text(state).font(.caption2.weight(.bold)).foregroundStyle(stateColor), at: CGPoint(x: at.x, y: box.maxY - 2), anchor: .bottom)
         context.draw(Text(title).font(.caption2.weight(chosen ? .bold : .regular)).foregroundStyle(.white), at: CGPoint(x: at.x, y: box.minY - 4), anchor: .bottom)
     }
 
@@ -1691,15 +2191,21 @@ private struct FloorPlan: View {
 private struct LivePicture: View {
     var title: String
     var url: URL
+    var recording: Bool = false
     @State private var player: AVPlayer?
+    private let recordRed = Color(red: 0.86, green: 0.28, blue: 0.28)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption.weight(.semibold))
             VideoPlayer(player: player)
-                .frame(width: 520, height: 292)
+                .frame(width: 360, height: 200)
                 .background(Color.black)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(recording ? recordRed : Color.white.opacity(0.2), lineWidth: recording ? 3 : 1)
+                )
         }
         .onAppear {
             let next = AVPlayer(url: url)

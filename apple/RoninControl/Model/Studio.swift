@@ -1166,11 +1166,12 @@ final class Studio: ObservableObject {
         profile.cameraGroups[name]?.contains(cameraId) == true
     }
 
-    /// 액션 카메라 한 대의 녹화입니다. 올리멕스 웹소켓으로만 보냅니다.
-    func olimexCamera(_ camera: BoardCamera, start: Bool) async {
+    /// 액션 카메라 한 대의 녹화입니다. 올리멕스 웹소켓으로만 보냅니다. 성공이면 true.
+    @discardableResult
+    func olimexCamera(_ camera: BoardCamera, start: Bool) async -> Bool {
         guard profile.olimexRegistered else {
             note("액션 카메라는 올리멕스 기판에 있습니다. 먼저 등록하세요.")
-            return
+            return false
         }
         let ok = await boardSocket.send([
             "op": "record-one",
@@ -1185,6 +1186,7 @@ final class Studio: ObservableObject {
         } else {
             noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
         }
+        return ok
     }
 
     /// 조명 C3 가 주변 울란지 이름을 읽습니다.
@@ -1592,9 +1594,14 @@ final class Studio: ObservableObject {
                 reconnectOlimex(quiet: true)
             }
             // connecting(다시 붙는 중)이면 건드리지 않습니다. 깜빡임·재연결 루프를 막습니다.
+            // 마지막으로 붙였던 보드(boardId)를 우선합니다. 없으면 로닌→조명 순.
             if c3Socket.state == .offline {
                 if let id = c3Socket.boardId {
                     reconnectC3(id)
+                } else if let ronin = profile.c3Boards.first(where: { $0.duty == .ronin && $0.link.shoots }) {
+                    reconnectC3(ronin.id)
+                } else if let light = profile.c3Boards.first(where: { $0.duty == .light && $0.link.shoots }) {
+                    reconnectC3(light.id)
                 } else {
                     reconnectC3()
                 }
