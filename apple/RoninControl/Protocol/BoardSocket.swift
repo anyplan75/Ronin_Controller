@@ -88,6 +88,8 @@ struct BoardCamera: Identifiable, Equatable {
     var name: String
     var kind: String
     var ble: String
+    /// 기판이 대별 녹화 상태를 줄 때만 채웁니다. 없으면 nil 이고 앱이 tally.note 로 맞춥니다.
+    var recording: Bool? = nil
 }
 
 /// 기판 웹소켓입니다. 열림 알림이 오기 전에는 온라인으로 두지 않습니다.
@@ -106,7 +108,6 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     @Published private(set) var wifiMac = ""
     @Published private(set) var ethMac = ""
     @Published private(set) var apMac = ""
-
     private var session: URLSession?
     private var task: URLSessionWebSocketTask?
     private var generation = 0
@@ -116,6 +117,9 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     private var offlineWork: DispatchWorkItem?
     private var wantConnected = false
     private var reconnectDelay: TimeInterval = 1
+    /// 녹화·탈리 한 건의 ack/tally.note 를 기다리는 콜백입니다.
+    private var tallyWaiter: ((Bool, String) -> Void)?
+    private var tallyWaitName = ""
 
     var endpoint: String {
         let host = reportedHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -187,6 +191,7 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     }
 
     /// 소켓이 열린 뒤에만 보냅니다. 실패하면 false이고, 연결됨으로 바꾸지 않습니다.
+    /// 주의: true 는 웹소켓 쓰기 성공일 뿐, BLE 셔터 성공이 아닙니다.
     func send(_ payload: [String: Any]) async -> Bool {
         guard state == .online, let task else { return false }
         guard JSONSerialization.isValidJSONObject(payload),
@@ -201,6 +206,60 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             softDrop("명령을 보내지 못했습니다.")
             return false
         }
+    }
+
+    /// 보내고 기판 tally.note(BLE 결과)를 기다립니다. 소켓만 열린 것으로 성공 처리하지 않습니다.
+    func sendAwaitingTally(
+        _ payload: [String: Any],
+        matching name: String,
+        timeout: TimeInterval = 18
+    ) async -> (sent: Bool, ok: Bool, note: String) {
+        guard await send(payload) else {
+            return (false, false, "")
+        }
+        return await withCheckedContinuation { continuation in
+            var finished = false
+            let finish: (Bool, String) -> Void = { [weak self] ok, note in
+                guard !finished else { return }
+                finished = true
+                self?.tallyWaiter = nil
+                self?.tallyWaitName = ""
+                continuation.resume(returning: (true, ok, note))
+            }
+            tallyWaitName = name
+            tallyWaiter = { ok, note in
+                finish(ok, note)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+                guard let self, self.tallyWaiter != nil else { return }
+                let fallback = self.tallyNote
+                let text = fallback.isEmpty
+                    ? "\(name) 기판 BLE 답을 기다렸지만 오지 않았습니다. 녹화로 두지 않습니다."
+                    : fallback
+                finish(false, text)
+            }
+        }
+    }
+
+    /// 기판 tally.note 문장으로 BLE 성공·실패를 가릅니다.
+    static func tallyOutcome(_ note: String) -> TallyOutcome {
+        if note.contains("붙지 못했습니다")
+            || note.contains("보내지 않았습니다")
+            || note.contains("답하지 않았습니다")
+            || note.contains("명령이 없어") {
+            return .failure
+        }
+        // 셔터는 상태 0인데 LED만 실패한 경우도 녹화는 성공으로 봅니다.
+        if note.contains("받았습니다") || note.contains("셔터는 상태 0") {
+            return .success
+        }
+        return .unknown
+    }
+
+    enum TallyOutcome {
+        case success
+        case failure
+        case unknown
     }
 
     func urlSession(
@@ -274,7 +333,14 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
                 let id = (row["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let kind = (row["kind"] as? String) ?? ""
                 let ble = (row["ble"] as? String) ?? BoardSocket.ble(for: kind)
-                return BoardCamera(id: (id?.isEmpty == false ? id! : name), name: name, kind: kind, ble: ble)
+                let recording = row["recording"] as? Bool
+                return BoardCamera(
+                    id: (id?.isEmpty == false ? id! : name),
+                    name: name,
+                    kind: kind,
+                    ble: ble,
+                    recording: recording
+                )
             }
         }
         if let ronin = object["ronin"] as? [String: Any] {
@@ -284,8 +350,32 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         if let count = object["recording"] as? Int {
             reportedRecording = count
         }
-        if let tally = object["tally"] as? [String: Any], let note = tally["note"] as? String {
+        // 연결 hello/카메라 목록에는 ack 없음. 녹화·설정 응답만.
+        if object["cameras"] == nil, let ack = object["ack"] as? Bool {
+            let reason = (object["reason"] as? String)
+                ?? (object["tally"] as? [String: Any]).flatMap { $0["note"] as? String }
+                ?? (ack ? "응답을 받았습니다." : "기판이 실패라고 답했습니다.")
+            if let note = (object["tally"] as? [String: Any])?["note"] as? String, !note.isEmpty {
+                tallyNote = note
+            } else if !reason.isEmpty {
+                tallyNote = reason
+            }
+            if let waiter = tallyWaiter {
+                if tallyWaitName.isEmpty || reason.contains(tallyWaitName) || tallyNote.contains(tallyWaitName) {
+                    waiter(ack, reason)
+                }
+            }
+        } else if let tally = object["tally"] as? [String: Any], let note = tally["note"] as? String {
             tallyNote = note
+            if let waiter = tallyWaiter {
+                if tallyWaitName.isEmpty || note.contains(tallyWaitName) {
+                    switch BoardSocket.tallyOutcome(note) {
+                    case .success: waiter(true, note)
+                    case .failure: waiter(false, note)
+                    case .unknown: break
+                    }
+                }
+            }
         }
         if let picked = hostForLane(object) {
             reportedHost = picked
@@ -301,6 +391,11 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
 
     private func softDrop(_ text: String) {
         stopKeepAlive()
+        if let waiter = tallyWaiter {
+            tallyWaiter = nil
+            tallyWaitName = ""
+            waiter(false, text)
+        }
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session?.invalidateAndCancel()
@@ -365,6 +460,12 @@ final class BoardSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         yaw = nil
         pitch = nil
         reportedRecording = nil
+        if let waiter = tallyWaiter {
+            tallyWaiter = nil
+            tallyWaitName = ""
+            // 대기 중인 sendAwaitingTally 를 실패로 끝냅니다.
+            waiter(false, "올리멕스 연결이 끊겨 명령을 보내지 않았습니다.")
+        }
     }
 
     /// 고른 길과 다른 주소로 바꾸지 않습니다. 와이파이 중인데 이더넷 주소로 갈아타면 다시 끊깁니다.
@@ -500,7 +601,8 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
     private var generation = 0
     private var waiter: ((Bool, String) -> Void)?
     private var otaStarted = false
-    private var lastHost = ""
+    /// 기판 hello 가 알려 준 host. 등록 lanHost 와 맞춰 둘 때 씁니다.
+    @Published private(set) var lastHost = ""
     @Published private(set) var lastSlot = ""
     private var lastFw = ""
     private var lastBoard: C3BoardRecord?

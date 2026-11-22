@@ -6,7 +6,7 @@
 #include <ETH.h>
 
 #ifndef HUB_FW_VERSION
-#define HUB_FW_VERSION "1.0.62"
+#define HUB_FW_VERSION "1.0.63"
 #endif
 
 static WebServer http(80);

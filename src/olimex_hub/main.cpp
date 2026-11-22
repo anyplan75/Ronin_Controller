@@ -14,7 +14,7 @@
 #include "hub_ota.h"
 
 #ifndef HUB_FW_VERSION
-#define HUB_FW_VERSION "1.0.62"
+#define HUB_FW_VERSION "1.0.63"
 #endif
 
 #if __has_include("wifi_local.h")
@@ -58,6 +58,7 @@ struct LiveCam {
   char ble[8];
   uint8_t addrType;
   bool used;
+  bool recording;
 };
 
 static HubCam cams[8];
@@ -79,6 +80,36 @@ static void tallyNote(const char* note) {
   sendText(out);
 }
 
+// 녹화·설정 결과. 앱은 ack true 일 때만 UI를 바꿉니다(소켓 송신만으로 성공 금지).
+static void replyJob(bool ok, const char* note, const char* id, bool recording) {
+  JsonDocument doc;
+  doc["ack"] = ok;
+  doc["reason"] = note == nullptr ? "" : note;
+  if (id != nullptr && id[0] != 0) doc["id"] = id;
+  doc["recording"] = recording;
+  doc["tally"]["note"] = note == nullptr ? "" : note;
+  String out;
+  serializeJson(doc, out);
+  sendText(out);
+}
+
+static void markRecording(const char* id, bool on) {
+  if (id == nullptr || id[0] == 0) return;
+  for (LiveCam& cam : liveCams) {
+    if (!cam.used || strcmp(cam.id, id) != 0) continue;
+    cam.recording = on;
+    return;
+  }
+}
+
+static int countRecording() {
+  int n = 0;
+  for (const LiveCam& cam : liveCams) {
+    if (cam.used && cam.recording) n++;
+  }
+  return n;
+}
+
 static void publish() {
   JsonDocument doc;
   JsonArray list = doc["cameras"].to<JsonArray>();
@@ -89,7 +120,9 @@ static void publish() {
     row["name"] = cam.name;
     row["kind"] = cam.kind;
     row["ble"] = cam.ble;
+    row["recording"] = cam.recording;
   }
+  doc["recording"] = countRecording();
   if (WiFi.status() == WL_CONNECTED) {
     doc["wifiHost"] = WiFi.localIP().toString();
     doc["host"] = WiFi.localIP().toString();
@@ -305,6 +338,14 @@ static void scanCameras() {
   }
   const int seen = results.getCount();
   scan->clearResults();
+  // 스캔으로 목록을 갈아끼워도 녹화 중 표시는 유지합니다.
+  for (int i = 0; i < count; i++) {
+    for (const LiveCam& old : liveCams) {
+      if (!old.used || strcmp(old.id, next[i].id) != 0) continue;
+      next[i].recording = old.recording;
+      break;
+    }
+  }
   memcpy(liveCams, next, sizeof(liveCams));
   Serial.print("블루투스 스캔 끝. 주변 ");
   Serial.print(seen);
@@ -483,10 +524,9 @@ static bool writeGoPro(const uint8_t* body, uint8_t bodyLen, bool setting) {
   if (write == nullptr) return false;
   noteReady = false;
   noteLen = 0;
-  // 셔터는 무응답 쓰기로 먼저 보내고, 짧게 notify 를 확인합니다.
-  const bool wantResponse = setting;
-  if (!write->writeValue(frame.data, frame.length, wantResponse)) return false;
-  if (!waitNote(setting ? 700 : 450)) return false;
+  // 응답 쓰기 + notify. 무응답 쓰기는 고프로가 상태 0을 안 주는 경우가 있어 녹화 무반응으로 보였습니다.
+  if (!write->writeValue(frame.data, frame.length, true)) return false;
+  if (!waitNote(setting ? 900 : 1200)) return false;
   return goproAccepted();
 }
 
@@ -501,10 +541,9 @@ static bool writeOsmo(uint8_t cmd, const uint8_t* payload, size_t payloadLen) {
   if (len == 0) return false;
   noteReady = false;
   noteLen = 0;
-  // 녹화(0x03)는 무응답 쓰기 + 짧은 대기. 설정만 응답 대기.
-  const bool wantResponse = cmd != 0x03;
-  if (!write->writeValue(frame, len, wantResponse)) return false;
-  if (!waitNote(wantResponse ? 700 : 450)) return false;
+  // 녹화(0x03)도 응답 쓰기로 상태 0을 확인합니다. 앱표시와 실기가 어긋나지 않게.
+  if (!write->writeValue(frame, len, true)) return false;
+  if (!waitNote(cmd == 0x03 ? 1200 : 900)) return false;
   return osmoAccepted(cmd);
 }
 
@@ -629,7 +668,18 @@ static void runJob(const HubJob& job) {
     if (strcmp(job.ble, "CE80") == 0 || (strcmp(job.ble, "FFF0") == 0 && job.kind == kJobTally)) break;
   }
   if (ok) session.touched = millis();
-  tallyNote(note);
+  bool recordingFlag = false;
+  if (job.kind == kJobRecord) {
+    if (ok) markRecording(job.id, job.start);
+    recordingFlag = false;
+    for (const LiveCam& cam : liveCams) {
+      if (cam.used && strcmp(cam.id, job.id) == 0) {
+        recordingFlag = cam.recording;
+        break;
+      }
+    }
+  }
+  replyJob(ok, note, job.id, recordingFlag);
 }
 
 static int pickJobIndex() {

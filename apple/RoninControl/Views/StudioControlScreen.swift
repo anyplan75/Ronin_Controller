@@ -65,8 +65,12 @@ struct StudioControlScreen: View {
     /// 로닌용 앱 쪽 정지 프리셋(보드 장면과 별개).
     @State private var roninScenes: [PtzScene] = (1...9).map { PtzScene.empty($0) }
     @State private var roninMovePath = PtzMovePath(name: "로닌 경로", steps: [])
-    /// 고정캠 녹화 중 표시(앱이 보낸 뒤 성공한 카메라 id). 기판이 대별 상태를 안 주면 이 표시를 씁니다.
+    /// 고정캠 녹화 중 표시. 소켓 send 가 아니라 기판 BLE tally.note(또는 cameras[].recording) 성공 때만 넣습니다.
     @State private var camRecording: Set<String> = []
+    /// 녹화/정지 요청을 보낸 뒤 BLE 답을 기다리는 카메라 id.
+    @State private var camRecordPending: Set<String> = []
+    /// 묶음 녹화 때 대별 답을 맞추기 위한 기대 시작/정지.
+    @State private var camRecordWantStart: [String: Bool] = [:]
 
     private let ink = Color(red: 0.93, green: 0.94, blue: 0.95)
     private let panel = Color(red: 0.11, green: 0.12, blue: 0.14)
@@ -148,12 +152,22 @@ struct StudioControlScreen: View {
             studio.rememberOlimex(wifi: link.wifiMac, ethernet: link.ethMac, hotspot: link.apMac)
         }
         .onChange(of: c3Link.wifiMac) { _, _ in
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: "")
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: c3Link.lastHost)
             if let id = c3Link.boardId { studio.rememberC3(id, wifi: c3Link.wifiMac, hotspot: c3Link.apMac) }
+            if !c3Link.lastSlot.isEmpty {
+                studio.boardLanAlive[c3Link.lastSlot] = true
+            } else if let slot = studio.profile.c3Boards.first(where: { $0.id == c3Link.boardId })?.boardSlot?.rawValue {
+                studio.boardLanAlive[slot] = true
+            }
         }
         .onChange(of: c3Link.lastSlot) { _, slot in
             guard !slot.isEmpty else { return }
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: "")
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: c3Link.lastHost)
+            studio.boardLanAlive[slot] = true
+        }
+        .onChange(of: c3Link.lastHost) { _, host in
+            guard !host.isEmpty else { return }
+            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: host)
         }
         .task {
             guard !didLaunchBoards else { return }
@@ -250,6 +264,9 @@ struct StudioControlScreen: View {
             case .offline: return ("오프라인", false)
             }
         }
+        if board.link == .lan, let slot = board.boardSlot, studio.boardLanAlive[slot.rawValue] == false {
+            return ("망 무응답 \(board.socketHost)", false)
+        }
         return ("대기(다른 보드 연결)", nil)
     }
 
@@ -274,20 +291,32 @@ struct StudioControlScreen: View {
                 }
                 .buttonStyle(DeskButtonStyle(selected: link.state == .online || link.state == .connecting))
                 .disabled(link.state == .connecting || !studio.profile.olimexRegistered || !link.lane.shoots)
-                Button("모두 녹화") { Task { await studio.fieldRecord(group: "all", start: true) } }
-                    .buttonStyle(DeskButtonStyle(tone: .record))
-                Button("모두 정지") { Task { await studio.fieldRecord(group: "all", start: false) } }
-                    .buttonStyle(DeskButtonStyle(tone: .stop))
+                Button("모두 녹화") {
+                    markGroupRecordPending(group: "all", start: true)
+                    Task { await studio.fieldRecord(group: "all", start: true) }
+                }
+                .buttonStyle(DeskButtonStyle(tone: .record))
+                Button("모두 정지") {
+                    markGroupRecordPending(group: "all", start: false)
+                    Task { await studio.fieldRecord(group: "all", start: false) }
+                }
+                .buttonStyle(DeskButtonStyle(tone: .stop))
             }
             HStack(spacing: 8) {
                 ForEach(["A", "B", "C"], id: \.self) { name in
                     let count = studio.profile.cameraGroups[name]?.count ?? 0
-                    Button("\(name) 묶음 \(count) 녹화") { Task { await studio.fieldRecord(group: name, start: true) } }
-                        .buttonStyle(DeskButtonStyle(selected: count > 0, tone: .record))
-                    Button("정지") { Task { await studio.fieldRecord(group: name, start: false) } }
-                        .buttonStyle(DeskButtonStyle(tone: .stop))
+                    Button("\(name) 묶음 \(count) 녹화") {
+                        markGroupRecordPending(group: name, start: true)
+                        Task { await studio.fieldRecord(group: name, start: true) }
+                    }
+                    .buttonStyle(DeskButtonStyle(selected: count > 0, tone: .record))
+                    Button("정지") {
+                        markGroupRecordPending(group: name, start: false)
+                        Task { await studio.fieldRecord(group: name, start: false) }
+                    }
+                    .buttonStyle(DeskButtonStyle(tone: .stop))
                 }
-                Text("카메라 줄의 A·B·C가 묶음입니다.")
+                Text("카메라 줄의 A·B·C가 묶음입니다. 빨간 테두리는 BLE 답 이후.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -512,7 +541,7 @@ struct StudioControlScreen: View {
                         DeviceThumbCard(
                             title: camera.name,
                             subtitle: camera.kind.isEmpty ? "고정캠" : camera.kind,
-                            detail: camRecording.contains(camera.id) ? "녹화 중" : "대기",
+                            detail: camRecordDetail(camera),
                             symbol: cameraSymbol(camera),
                             online: true,
                             selected: pick == .camera(camera.id),
@@ -525,10 +554,12 @@ struct StudioControlScreen: View {
                                 Task { await setCamRecording(camera, start: true) }
                             }
                             .buttonStyle(DeskButtonStyle(tone: .record))
+                            .disabled(camRecordPending.contains(camera.id))
                             Button("정지") {
                                 Task { await setCamRecording(camera, start: false) }
                             }
                             .buttonStyle(DeskButtonStyle(tone: .stop))
+                            .disabled(camRecordPending.contains(camera.id))
                             ForEach(["A", "B", "C"], id: \.self) { name in
                                 Button(name) { studio.toggleCameraGroup(name, camera.id) }
                                     .buttonStyle(DeskButtonStyle(selected: studio.cameraInGroup(name, camera.id)))
@@ -540,13 +571,73 @@ struct StudioControlScreen: View {
         }
     }
 
+    private func camRecordDetail(_ camera: BoardCamera) -> String {
+        if camRecordPending.contains(camera.id) { return "BLE 대기" }
+        if camRecording.contains(camera.id) { return "녹화 중" }
+        return "대기"
+    }
+
     private func setCamRecording(_ camera: BoardCamera, start: Bool) async {
+        camRecordPending.insert(camera.id)
+        camRecordWantStart[camera.id] = start
         let ok = await studio.olimexCamera(camera, start: start)
+        camRecordPending.remove(camera.id)
+        camRecordWantStart.removeValue(forKey: camera.id)
         if ok {
             if start {
                 camRecording.insert(camera.id)
             } else {
                 camRecording.remove(camera.id)
+            }
+        }
+        // 실패면 빨간 테두리를 바꾸지 않습니다(이전 실기 상태 유지).
+    }
+
+    /// 기판 cameras[].recording 또는 tally.note 로 빨간 테두리를 맞춥니다. 소켓 send 만으로는 바꾸지 않습니다.
+    private func applyCamRecordingFromBoard(note: String? = nil) {
+        for camera in link.cameras {
+            if let reported = camera.recording {
+                if reported {
+                    camRecording.insert(camera.id)
+                } else {
+                    camRecording.remove(camera.id)
+                }
+                camRecordPending.remove(camera.id)
+                camRecordWantStart.removeValue(forKey: camera.id)
+                continue
+            }
+            guard let note, !note.isEmpty, note.contains(camera.name) else { continue }
+            switch BoardSocket.tallyOutcome(note) {
+            case .success:
+                if let wantStart = camRecordWantStart[camera.id] {
+                    if wantStart {
+                        camRecording.insert(camera.id)
+                    } else {
+                        camRecording.remove(camera.id)
+                    }
+                }
+                camRecordPending.remove(camera.id)
+                camRecordWantStart.removeValue(forKey: camera.id)
+            case .failure:
+                camRecordPending.remove(camera.id)
+                camRecordWantStart.removeValue(forKey: camera.id)
+            case .unknown:
+                break
+            }
+        }
+    }
+
+    private func markGroupRecordPending(group: String, start: Bool) {
+        let ids = group == "all" ? link.cameras.map(\.id) : (studio.profile.cameraGroups[group] ?? [])
+        for id in ids {
+            camRecordPending.insert(id)
+            camRecordWantStart[id] = start
+        }
+        // 답이 안 오는 대는 20초 뒤 대기 표시만 해제합니다. 빨간 테두리는 바꾸지 않습니다.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            for id in ids where camRecordPending.contains(id) {
+                camRecordPending.remove(id)
             }
         }
     }
@@ -984,6 +1075,10 @@ struct StudioControlScreen: View {
         )
         .onChange(of: link.tallyNote) { _, note in
             if !note.isEmpty { studio.note(note) }
+            applyCamRecordingFromBoard(note: note)
+        }
+        .onChange(of: link.cameras) { _, _ in
+            applyCamRecordingFromBoard()
         }
         .background(canvas)
     }
@@ -1174,6 +1269,10 @@ struct StudioControlScreen: View {
             }
             .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
             .disabled(c3Link.state == .connecting || !board.link.shoots)
+            Button("망 다시 확인 (.152/.154)") {
+                studio.recheckC3Lan()
+            }
+            .buttonStyle(DeskButtonStyle(expand: true))
             if board.duty == .ronin {
                 let spot = studio.stageSpot(for: board.id)
                 Text("로닌 설정 · 프리셋")
@@ -1352,11 +1451,17 @@ struct StudioControlScreen: View {
             HStack {
                 Button("녹화") { Task { await setCamRecording(camera, start: true) } }
                     .buttonStyle(DeskButtonStyle(tone: .record))
+                    .disabled(camRecordPending.contains(camera.id))
                 Button("정지") { Task { await setCamRecording(camera, start: false) } }
                     .buttonStyle(DeskButtonStyle(tone: .stop))
+                    .disabled(camRecordPending.contains(camera.id))
             }
-            if camRecording.contains(camera.id) {
-                Text("녹화 중 · 빨간 테두리")
+            if camRecordPending.contains(camera.id) {
+                Text("올리멕스 BLE 답 대기 · 아직 녹화로 두지 않음")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            } else if camRecording.contains(camera.id) {
+                Text("녹화 중 · 빨간 테두리(기판 BLE 확인)")
                     .font(.caption.weight(.bold))
                     .foregroundStyle(record)
             }
