@@ -11,6 +11,11 @@
 
 #include "dji_ble.h"
 #include "gopro_ble_frame.h"
+#include "hub_ota.h"
+
+#ifndef HUB_FW_VERSION
+#define HUB_FW_VERSION "1.0.62"
+#endif
 
 #if __has_include("wifi_local.h")
 #include "wifi_local.h"
@@ -94,7 +99,7 @@ static void publish() {
     if (WiFi.status() != WL_CONNECTED) doc["host"] = ETH.localIP().toString();
   }
   doc["port"] = 81;
-  doc["fw"] = "1.0.62-hub";
+  doc["fw"] = String(HUB_FW_VERSION) + "-hub";
   doc["wifiMac"] = WiFi.macAddress();
   doc["ethMac"] = ethMacText;
   doc["apMac"] = WiFi.softAPmacAddress();
@@ -951,7 +956,9 @@ static void finishJoin() {
 static void banner() {
   Serial.println();
   Serial.println("올리멕스 액션캠 허브");
-  Serial.println("PoE 192.168.10.150 웹소켓 81");
+  Serial.print("fw ");
+  Serial.println(HUB_FW_VERSION);
+  Serial.println("PoE 192.168.10.150 웹소켓 81 · OTA http://ip/update");
   Serial.println("핫스팟 Ronin-Olimex 192.168.4.1 웹소켓 81");
   Serial.println("같은 와이파이 기본 192.168.10.151 웹소켓 81. 블루투스 설정이 있으면 그 주소를 씁니다.");
   Serial.println("주변 고프로 FEA6, 오즈모 FFF0, 인스타360 이름을 스캔해 웹소켓으로 보냅니다.");
@@ -1000,11 +1007,13 @@ void setup() {
   server.addHandler(&socket);
   server.begin();
   Serial.println("웹소켓 81번을 열었습니다.");
+  hubOtaBegin();
 }
 
 void loop() {
   if (joinAsked) finishJoin();
   else keepStation();
+  hubOtaLoop();
   pump();
   if (!busy) keepSession();
   if (!busy && !linkHeld && jobCount == 0 && (int32_t)(millis() - nextScanAt) >= 0) scanCameras();
