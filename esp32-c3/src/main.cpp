@@ -239,6 +239,13 @@ static void startHotspot(int channel) {
   else WiFi.softAP("Ronin-C3");
 }
 
+/// 랜(STA)에 붙었으면 핫스팟을 끕니다. AP+STA 동시는 C3에서 ping은 되는데 HTTP/WS가 끊기는 원인이었습니다.
+static void stopHotspotKeepStation() {
+  // BLE와 같이 쓸 때는 modem sleep 을 끄면 abort 됩니다. 핫스팟만 끕니다.
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+}
+
 /// 핫스팟을 먼저 켜면 라디오가 1번 채널에 고정됩니다. 집 2.4GHz는 다른 채널이라 붙지 못합니다.
 static bool beginStation(const String& ssid, const String& pass, const String& ipText) {
   staWanted = true;
@@ -259,7 +266,8 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
     return false;
   }
   WiFi.persistent(false);
-  WiFi.setAutoReconnect(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   allowKoreaChannels();
   IPAddress ip;
@@ -302,7 +310,6 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
   const uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) delay(200);
   bool ok = WiFi.status() == WL_CONNECTED;
-  startHotspot(bestChannel);
   IPAddress wanted;
   if (fixedLan(useIp, &wanted)) {
     Serial.print("USEIP ");
@@ -326,11 +333,17 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
   }
   prefs.putString("wifiIp", useIp);
   if (ok) {
+    // 랜 성공 뒤에는 핫스팟을 끄고 STA만 유지합니다(HTTP/WS 안정).
+    stopHotspotKeepStation();
+    if (fixedLan(useIp, &wanted)) pinAddress(wanted);
     Serial.print("같은 와이파이 주소 ");
     Serial.println(WiFi.localIP());
+    Serial.println("핫스팟 끔(랜 전용).");
   } else if (WiFi.status() == WL_CONNECT_FAILED) {
+    startHotspot(bestChannel);
     Serial.println("2.4GHz에 비밀번호가 맞지 않습니다. 처음 연결에서 다시 넣으세요.");
   } else {
+    startHotspot(bestChannel);
     Serial.println("2.4GHz에 붙지 못했습니다. 핫스팟은 켜 둡니다.");
   }
   nextStaTry = millis() + 15000;
