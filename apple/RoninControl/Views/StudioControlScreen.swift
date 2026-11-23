@@ -5,7 +5,7 @@ import SwiftUI
 struct StudioControlScreen: View {
     @EnvironmentObject private var studio: Studio
     @EnvironmentObject private var link: BoardSocket
-    @EnvironmentObject private var c3Link: C3JobSocket
+    @EnvironmentObject private var c3Bag: C3SocketBag
     @State private var pick: DeskPick = .olimex
     @State private var sideTab: StudioSideTab = .ptz
     @State private var askC3Job = false
@@ -85,7 +85,7 @@ struct StudioControlScreen: View {
                 // 좌·우 패널은 위→아래 전체 높이. 중간만 평면도+하단 조종(하단 스크롤 없음).
                 if geo.size.width < 760 {
                     HStack(spacing: 0) {
-                        tabRail.frame(width: min(160, geo.size.width * 0.34))
+                        tabRail.frame(width: min(140, geo.size.width * 0.28))
                         VStack(spacing: 0) {
                             floor
                                 .frame(maxHeight: .infinity)
@@ -93,11 +93,12 @@ struct StudioControlScreen: View {
                             bottomStage
                                 .frame(height: bottomStageHeight(geo.size.height))
                         }
-                        inspector.frame(width: min(180, geo.size.width * 0.34))
+                        // 이동형 프리셋이 반드시 보이도록 최소 폭 확보
+                        inspector.frame(width: max(200, min(240, geo.size.width * 0.38)))
                     }
                 } else {
                     HStack(spacing: 0) {
-                        tabRail.frame(width: min(300, geo.size.width * 0.26))
+                        tabRail.frame(width: min(260, geo.size.width * 0.22))
                         VStack(spacing: 0) {
                             floor
                                 .frame(maxHeight: .infinity)
@@ -105,7 +106,7 @@ struct StudioControlScreen: View {
                             bottomStage
                                 .frame(height: bottomStageHeight(geo.size.height))
                         }
-                        inspector.frame(width: min(320, geo.size.width * 0.26))
+                        inspector.frame(width: max(260, min(340, geo.size.width * 0.28)))
                     }
                 }
             }
@@ -151,29 +152,36 @@ struct StudioControlScreen: View {
         .onChange(of: link.ethMac) { _, _ in
             studio.rememberOlimex(wifi: link.wifiMac, ethernet: link.ethMac, hotspot: link.apMac)
         }
-        .onChange(of: c3Link.wifiMac) { _, _ in
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: c3Link.lastHost)
-            if let id = c3Link.boardId { studio.rememberC3(id, wifi: c3Link.wifiMac, hotspot: c3Link.apMac) }
-            if !c3Link.lastSlot.isEmpty {
-                studio.boardLanAlive[c3Link.lastSlot] = true
-            } else if let slot = studio.profile.c3Boards.first(where: { $0.id == c3Link.boardId })?.boardSlot?.rawValue {
-                studio.boardLanAlive[slot] = true
+        .onReceive(c3Bag.objectWillChange) { _ in
+            for board in studio.profile.c3Boards {
+                let link = c3(board)
+                guard link.state == .online else { continue }
+                studio.applyBoardHello(boardId: board.id, slot: link.lastSlot, wifi: link.wifiMac, host: link.lastHost)
+                if !link.wifiMac.isEmpty {
+                    studio.rememberC3(board.id, wifi: link.wifiMac, hotspot: link.apMac)
+                }
+                if !link.lastSlot.isEmpty {
+                    studio.boardLanAlive[link.lastSlot] = true
+                }
             }
-        }
-        .onChange(of: c3Link.lastSlot) { _, slot in
-            guard !slot.isEmpty else { return }
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: c3Link.lastHost)
-            studio.boardLanAlive[slot] = true
-        }
-        .onChange(of: c3Link.lastHost) { _, host in
-            guard !host.isEmpty else { return }
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: host)
         }
         .task {
             guard !didLaunchBoards else { return }
             didLaunchBoards = true
             await studio.ensureBoardRolesOnLaunch()
             syncPickToTab(sideTab)
+            ensureC3ForTab(sideTab)
+        }
+        .task {
+            // 로닌/C3/고프로가 죽었다가 살아나면 주기적으로 다시 붙입니다.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                await studio.refreshBoardLanAlive()
+                studio.reconnectAliveC3()
+                if studio.profile.olimexRegistered, link.state != .online {
+                    studio.reconnectOlimex(quiet: true)
+                }
+            }
         }
         .onChange(of: pick) { _, next in
             if case .c3(let id) = next {
@@ -193,12 +201,12 @@ struct StudioControlScreen: View {
     private func bottomStageHeight(_ total: CGFloat) -> CGFloat {
         switch sideTab {
         case .fixedCam:
-            return liveReady.isEmpty ? 64 : min(220, max(140, total * 0.24))
+            return liveReady.isEmpty ? 48 : min(120, max(90, total * 0.14))
         case .ptz, .ronin:
-            // 옆배치 축소판 — 한 화면에 맞춤
-            return min(240, max(180, total * 0.28))
+            // PTZ·로닌 동일 높이. 옆=장면 프리셋, 오른쪽=이동형만.
+            return min(320, max(240, total * 0.36))
         case .light:
-            return min(220, max(160, total * 0.26))
+            return min(320, max(220, total * 0.34))
         }
     }
 
@@ -234,40 +242,38 @@ struct StudioControlScreen: View {
         }
     }
 
-    /// 로닌·조명 탭으로 오면 해당 보드 소켓을 붙입니다. (한 소켓이라 탭마다 바꿔 붙음)
+    /// 로닌·조명 탭: 해당 역할 보드를 **모두** 붙입니다(동시 연결).
     private func ensureC3ForTab(_ tab: StudioSideTab) {
         switch tab {
         case .ronin:
-            if case .c3(let id) = pick,
-               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .ronin }) {
-                studio.reconnectC3(id)
-            } else if let first = studio.profile.c3Boards.first(where: { $0.duty == .ronin }) {
-                studio.reconnectC3(first.id)
+            for board in studio.profile.c3Boards where board.duty == .ronin && board.link.shoots {
+                studio.reconnectC3(board.id)
             }
         case .light:
-            if case .c3(let id) = pick,
-               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
-                studio.reconnectC3(id)
-            } else if let first = studio.profile.c3Boards.first(where: { $0.duty == .light }) {
-                studio.reconnectC3(first.id)
+            for board in studio.profile.c3Boards where board.duty == .light && board.link.shoots {
+                studio.reconnectC3(board.id)
             }
+        case .fixedCam:
+            // 고프로·액션5 반응: 올리멕스 소켓을 탭 진입마다 살립니다.
+            studio.reconnectOlimex(quiet: true)
         default:
             break
         }
     }
 
+    private func c3(_ board: C3BoardRecord) -> C3JobSocket { c3Bag.socket(for: board.id) }
+    private func c3(_ id: UUID) -> C3JobSocket { c3Bag.socket(for: id) }
+
     private func c3OnlineText(for board: C3BoardRecord) -> (label: String, online: Bool?) {
-        if c3Link.boardId == board.id {
-            switch c3Link.state {
-            case .online: return ("온라인", true)
-            case .connecting: return ("연결 중", nil)
-            case .offline: return ("오프라인", false)
+        switch c3Bag.state(for: board.id) {
+        case .online: return ("온라인", true)
+        case .connecting: return ("연결 중", nil)
+        case .offline:
+            if board.link == .lan, let slot = board.boardSlot, studio.boardLanAlive[slot.rawValue] == false {
+                return ("망 무응답 \(board.socketHost)", false)
             }
+            return ("오프라인", false)
         }
-        if board.link == .lan, let slot = board.boardSlot, studio.boardLanAlive[slot.rawValue] == false {
-            return ("망 무응답 \(board.socketHost)", false)
-        }
-        return ("대기(다른 보드 연결)", nil)
     }
 
     private var transport: some View {
@@ -290,7 +296,7 @@ struct StudioControlScreen: View {
                     studio.reconnectOlimex()
                 }
                 .buttonStyle(DeskButtonStyle(selected: link.state == .online || link.state == .connecting))
-                .disabled(link.state == .connecting || !studio.profile.olimexRegistered || !link.lane.shoots)
+                .disabled(!studio.profile.olimexRegistered || !link.lane.shoots)
                 Button("모두 녹화") {
                     markGroupRecordPending(group: "all", start: true)
                     Task { await studio.fieldRecord(group: "all", start: true) }
@@ -779,6 +785,12 @@ struct StudioControlScreen: View {
                 get: { ptzIris[camera.id] ?? 0.5 },
                 set: { ptzIris[camera.id] = $0 }
             ),
+            showFocus: false,
+            showIris: true,
+            showZoom: true,
+            showSceneGrid: true,
+            showMovePaths: false,
+            padSize: 160,
             scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
             selectedScene: ptzSelectedScene[camera.id],
             twoStep: $ptzTwoStep,
@@ -851,8 +863,11 @@ struct StudioControlScreen: View {
             focus: $roninFocus,
             iris: $roninIris,
             showFocus: false,
-            showIris: false,
-            showZoom: board.boardSlot == .oled,
+            showIris: true,
+            showZoom: true,
+            showSceneGrid: true,
+            showMovePaths: false,
+            padSize: 160,
             scenes: roninScenes,
             selectedScene: roninSelectedScene,
             twoStep: $roninTwoStep,
@@ -937,9 +952,9 @@ struct StudioControlScreen: View {
                     Task { await studio.scanUlanziLights(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle())
-                if c3Link.savedLights.count > 1 {
+                if c3(board).savedLights.count > 1 {
                     Button("묶음") {
-                        let first = c3Link.savedLights[0]
+                        let first = c3(board).savedLights[0]
                         let key = lightKey(board.id, first.index)
                         Task {
                             await studio.setAllLights(
@@ -953,23 +968,23 @@ struct StudioControlScreen: View {
                     .buttonStyle(DeskButtonStyle())
                 }
             }
-            if !c3Link.gimbals.isEmpty {
+            if !c3(board).gimbals.isEmpty {
                 HStack(spacing: 6) {
-                    ForEach(c3Link.gimbals) { light in
+                    ForEach(c3(board).gimbals) { light in
                         Button("붙이기 · \(light.name)") {
                             Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
                         }
-                        .buttonStyle(DeskButtonStyle(selected: c3Link.savedLights.contains(where: { $0.name == light.name })))
+                        .buttonStyle(DeskButtonStyle(selected: c3(board).savedLights.contains(where: { $0.name == light.name })))
                     }
                 }
             }
-            if c3Link.savedLights.isEmpty {
+            if c3(board).savedLights.isEmpty {
                 Text("저장된 울란지가 없습니다. 스캔 후 붙이거나 보드가 예전에 저장한 2대를 기다리세요.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
                 HStack(alignment: .top, spacing: 10) {
-                    ForEach(c3Link.savedLights) { light in
+                    ForEach(c3(board).savedLights) { light in
                         lightUnitPane(board.id, light)
                     }
                 }
@@ -1014,6 +1029,35 @@ struct StudioControlScreen: View {
                     .font(.caption2)
             }
             .toggleStyle(.switch)
+            Text("FX · VL200BI")
+                .font(.caption2.weight(.semibold))
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                ForEach([
+                    ("스트로보", "strobe1"),
+                    ("스트로보2", "strobe2"),
+                    ("스트로보3", "strobe3"),
+                    ("플래시", "flash"),
+                    ("TV", "tv"),
+                    ("촛불", "candle"),
+                ], id: \.1) { title, name in
+                    Button(title) {
+                        Task { await studio.setLightEffect(boardId, index: light.index, name: name) }
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                }
+            }
+            Button("CCT 복귀") {
+                Task {
+                    await studio.setLight(
+                        boardId,
+                        index: light.index,
+                        brightness: Int(lightLevel[key] ?? 40),
+                        kelvin: Int(lightKelvin[key] ?? 4500),
+                        on: true
+                    )
+                }
+            }
+            .buttonStyle(DeskButtonStyle(selected: true))
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1034,8 +1078,8 @@ struct StudioControlScreen: View {
         var rows: [(id: String, name: String, boardId: UUID, index: Int)] = []
         for board in studio.profile.c3Boards where board.duty == .light {
             let lights: [SavedLight]
-            if c3Link.boardId == board.id, !c3Link.savedLights.isEmpty {
-                lights = c3Link.savedLights
+            if c3Bag.state(for: board.id) == .online, !c3(board).savedLights.isEmpty {
+                lights = c3(board).savedLights
             } else {
                 lights = []
             }
@@ -1052,7 +1096,7 @@ struct StudioControlScreen: View {
 
     private var floor: some View {
         FloorPlan(
-            gimbal: studio.roninC3,
+            roninBoards: studio.profile.c3Boards.filter { $0.duty == .ronin },
             cameras: link.cameras,
             meters: cameraMeters,
             selected: selectedMark,
@@ -1060,8 +1104,8 @@ struct StudioControlScreen: View {
             liveYaw: yaw,
             livePitch: pitch,
             tool: floorTool,
-            camerasOnline: link.state == .online,
-            liveC3: c3Link.state == .online ? c3Link.boardId : nil,
+            camerasOnline: Set(link.state == .online ? link.cameras.map(\.id) : []),
+            onlineC3: Set(studio.profile.c3Boards.filter { c3Bag.state(for: $0.id) == .online }.map(\.id)),
             onTool: { floorTool = $0 },
             onMoveCamera: { id, x, y in cameraMeters[id] = CGPoint(x: x, y: y) },
             onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) },
@@ -1137,48 +1181,46 @@ struct StudioControlScreen: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("설정 · 프리셋")
+                // 오른쪽 = 이동형 프리셋만. 장면(고정) 프리셋은 아래 조종부 옆.
+                Text("이동형 프리셋")
+                    .font(.title3.weight(.bold))
+                Text("최대 \(Studio.maxTravelPresets)개 · 오른쪽 전용")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                switch sideTab {
-                case .ptz:
-                    if case .ptz(let id) = pick,
-                       let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
-                        ptzInspector(camera)
-                    } else {
-                        Text("왼쪽 PTZ 목록에서 카메라를 고르세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                // PTZ 경로 + 로닌 경로를 항상 같이 보여 체감 변화 확보
+                if let camera = studio.profile.ptzCameras.first(where: { camera in
+                    if case .ptz(let id) = pick { return camera.id == id }
+                    return false
+                }) ?? studio.profile.ptzCameras.first {
+                    travelPresetBank(camera: camera)
+                } else {
+                    Text("PTZ를 등록하면 여기 경로 칸이 생깁니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("경로 자리 안내") { studio.note("왼쪽에서 PTZ를 등록·고르면 이동형 프리셋을 넣습니다.") }
+                        .buttonStyle(DeskButtonStyle(expand: true))
+                }
+                Divider().overlay(line)
+                roninTravelPresetBank
+                Divider().overlay(line)
+                // 기기 온라인 분리 요약(무대와 같은 기준)
+                Text("무대 기기 상태")
+                    .font(.headline)
+                ForEach(studio.profile.c3Boards) { board in
+                    let st = c3OnlineText(for: board)
+                    HStack {
+                        Text(board.listTitle).font(.caption.weight(.semibold))
+                        Spacer()
+                        Text(st.label)
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(st.online == true ? Color(red: 0.55, green: 0.85, blue: 0.55) : Color.white.opacity(0.55))
                     }
-                case .fixedCam:
-                    switch pick {
-                    case .olimex:
-                        olimexInspector
-                    case .camera(let id):
-                        if let camera = link.cameras.first(where: { $0.id == id }) {
-                            cameraInspector(camera)
-                        }
-                    default:
-                        olimexInspector
-                    }
-                case .ronin:
-                    if case .c3(let id) = pick,
-                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
-                        c3Inspector(board)
-                    } else {
-                        Text("왼쪽 로닌 목록에서 보드를 고르세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                case .light:
-                    if case .c3(let id) = pick,
-                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) {
-                        lightInspector(board)
-                    } else {
-                        Text("왼쪽 조명 목록에서 보드를 고르세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                }
+                HStack {
+                    Text("올리멕스·캠")
+                    Spacer()
+                    Text(link.state == .online ? "온라인 \(link.cameras.count)대" : "오프라인")
+                        .font(.caption.weight(.bold))
                 }
                 LogList()
             }
@@ -1186,7 +1228,130 @@ struct StudioControlScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(panel)
-        .overlay(alignment: .leading) { Rectangle().fill(line).frame(width: 1) }
+        .overlay(alignment: .leading) { Rectangle().fill(Color.orange.opacity(0.9)).frame(width: 3) }
+    }
+
+    /// 뮤직뱅크형 PTZ 이동 경로(최대 20).
+    private func travelPresetBank(camera: PtzRecord) -> some View {
+        let paths = Array(camera.movePaths.prefix(Studio.maxTravelPresets))
+        let scenes = Array(PtzScene.ten(camera.scenes).prefix(9))
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("\(camera.name) · \(paths.count)/\(Studio.maxTravelPresets)")
+                .font(.headline)
+            Text("정지 장면을 순서대로 넣어 카메라 워킹을 만듭니다. Recall=재생, Stop=중단.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("경로 추가") {
+                _ = studio.addPtzMovePath(camera.id)
+            }
+            .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            .disabled(camera.movePaths.count >= Studio.maxTravelPresets)
+            ForEach(paths) { path in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(path.name).font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Button("Recall") {
+                            ptzSequenceTask?.cancel()
+                            ptzSequenceTask = Task { await studio.recallPtzMovePath(camera.id, path: path) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: true))
+                        Button("Stop") {
+                            ptzSequenceTask?.cancel()
+                            halt(camera)
+                        }
+                        .buttonStyle(DeskButtonStyle())
+                        Button("삭제") { studio.deletePtzMovePath(camera.id, pathId: path.id) }
+                            .buttonStyle(DeskButtonStyle())
+                    }
+                    Text(path.steps.isEmpty ? "빈 경로" : path.steps.map { "\($0.sceneNumber)" }.joined(separator: " → "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        ForEach(scenes.filter(\.saved).prefix(6)) { scene in
+                            Button("+\(scene.number)") {
+                                studio.appendPtzMoveStep(camera.id, sceneNumber: scene.number, pathId: path.id)
+                            }
+                            .buttonStyle(DeskButtonStyle())
+                        }
+                        Button("비우기") { studio.clearPtzMovePath(camera.id, pathId: path.id) }
+                            .buttonStyle(DeskButtonStyle())
+                    }
+                }
+                .padding(8)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+            Text("고정(장면) 프리셋은 아래 조종부 옆에 있습니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var roninTravelPresetBank: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("로닌 워킹 · \(roninMovePath.steps.count)칸")
+                .font(.headline)
+            Text(roninMovePath.steps.isEmpty
+                  ? "장면 번호(+N)를 눌러 워킹 경로를 만드세요."
+                  : roninMovePath.steps.map { "\($0.sceneNumber)" }.joined(separator: " → "))
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            HStack {
+                ForEach(roninScenes.prefix(6)) { scene in
+                    Button("+\(scene.number)") {
+                        if let idx = roninScenes.firstIndex(where: { $0.number == scene.number }) {
+                            roninScenes[idx].pan = yaw
+                            roninScenes[idx].tilt = pitch
+                            roninScenes[idx].zoom = roninZoomSlider
+                            roninScenes[idx].saved = true
+                            roninScenes[idx].name = "로닌 \(scene.number)"
+                        }
+                        roninMovePath.steps.append(PtzMoveStep(sceneNumber: scene.number, dwellSeconds: 2))
+                        studio.note("로닌 경로에 장면 \(scene.number) 을 넣었습니다.")
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                }
+            }
+            HStack {
+                Button("Recall") {
+                    guard let board = selectedRoninBoard else { return }
+                    ptzSequenceTask?.cancel()
+                    ptzSequenceTask = Task {
+                        for step in roninMovePath.steps {
+                            if Task.isCancelled { break }
+                            let scene = roninScenes.first { $0.number == step.sceneNumber }
+                            guard let scene, scene.saved else { continue }
+                            await studio.nudgeRonin(yaw: scene.pan, pitch: scene.tilt, quiet: true, boardId: board.id)
+                            try? await Task.sleep(nanoseconds: UInt64(max(0.3, step.dwellSeconds) * 1_000_000_000))
+                        }
+                    }
+                }
+                .buttonStyle(DeskButtonStyle(selected: true))
+                Button("Stop") { ptzSequenceTask?.cancel() }
+                    .buttonStyle(DeskButtonStyle())
+                Button("비우기") {
+                    roninMovePath.steps = []
+                    studio.note("로닌 이동 경로를 비웠습니다.")
+                }
+                .buttonStyle(DeskButtonStyle())
+            }
+            if let board = selectedRoninBoard {
+                Text(c3OnlineText(for: board).label)
+                    .font(.caption.weight(.semibold))
+                Button("지금 연결 · \(board.listTitle)") { studio.reconnectC3(board.id) }
+                    .buttonStyle(DeskButtonStyle(expand: true))
+                Button("로닌 보드 전부 연결") { studio.reconnectAllC3() }
+                    .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            }
+        }
+    }
+
+    private var selectedRoninBoard: C3BoardRecord? {
+        if case .c3(let id) = pick,
+           let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+            return board
+        }
+        return studio.profile.c3Boards.first(where: { $0.duty == .ronin })
     }
 
     private var olimexInspector: some View {
@@ -1264,11 +1429,11 @@ struct StudioControlScreen: View {
                     Text(lane.title).tag(lane)
                 }
             }
-            Button(c3Link.boardId == board.id && c3Link.state == .connecting ? "연결 중" : "지금 연결") {
+            Button(c3Bag.state(for: board.id) == .connecting ? "연결 중" : "지금 연결") {
                 studio.reconnectC3(board.id)
             }
-            .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
-            .disabled(c3Link.state == .connecting || !board.link.shoots)
+            .buttonStyle(DeskButtonStyle(selected: c3Bag.state(for: board.id) == .online, expand: true))
+            .disabled(!board.link.shoots)
             Button("망 다시 확인 (.152/.154)") {
                 studio.recheckC3Lan()
             }
@@ -1281,23 +1446,23 @@ struct StudioControlScreen: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(board.gimbalName.isEmpty
-                     ? (c3Link.pairedName.isEmpty ? "아직 붙인 로닌 이름이 없습니다." : "붙음 \(c3Link.pairedName)")
-                     : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
+                     ? (c3(board).pairedName.isEmpty ? "아직 붙인 로닌 이름이 없습니다." : "붙음 \(c3(board).pairedName)")
+                     : "붙일 이름 \(board.gimbalName)\(c3(board).pairedName.isEmpty ? "" : " · 지금 \(c3(board).pairedName)")")
                     .font(.caption.weight(.semibold))
                 Button("로닌 블루투스 스캔") {
                     Task { await studio.scanRoninGimbals(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle(expand: true))
-                if c3Link.gimbals.isEmpty {
+                if c3(board).gimbals.isEmpty {
                     Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 오프라인이면 붙인 뒤 바로 스캔합니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(c3Link.gimbals) { gimbal in
+                    ForEach(c3(board).gimbals) { gimbal in
                         Button("붙이기 · \(gimbal.name)") {
                             Task { await studio.pairRoninGimbal(name: gimbal.name, id: gimbal.id, boardId: board.id) }
                         }
-                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3Link.pairedName == gimbal.name, expand: true))
+                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3(board).pairedName == gimbal.name, expand: true))
                     }
                 }
                 if !board.gimbalName.isEmpty {
@@ -1383,16 +1548,16 @@ struct StudioControlScreen: View {
                     Text(lane.title).tag(lane)
                 }
             }
-            Button(c3Link.boardId == board.id && c3Link.state == .connecting ? "연결 중" : "지금 연결") {
+            Button(c3Bag.state(for: board.id) == .connecting ? "연결 중" : "지금 연결") {
                 studio.reconnectC3(board.id)
             }
-            .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
-            .disabled(c3Link.state == .connecting || !board.link.shoots)
+            .buttonStyle(DeskButtonStyle(selected: c3Bag.state(for: board.id) == .online, expand: true))
+            .disabled(!board.link.shoots)
             Text("울란지 VL120BI·VL200BI 입니다. 밝기·색온도·켜기/끄기는 아래 칸에서 조작합니다. ack true 일 때만 성공입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if !c3Link.savedLights.isEmpty {
-                Text("저장 \(c3Link.savedLights.count)대 · \(c3Link.savedLights.map(\.name).joined(separator: ", "))")
+            if !c3(board).savedLights.isEmpty {
+                Text("저장 \(c3(board).savedLights.count)대 · \(c3(board).savedLights.map(\.name).joined(separator: ", "))")
                     .font(.caption.weight(.semibold))
             }
         }
@@ -1603,7 +1768,7 @@ struct StudioControlScreen: View {
                     ptzOnline.remove(next.0.id)
                     studio.note(result.0)
                 }
-                try? await Task.sleep(nanoseconds: 220_000_000)
+                try? await Task.sleep(nanoseconds: 40_000_000)
             }
             absoluteTask = nil
             if absolutePending != nil, let pending = absolutePending {
@@ -1626,7 +1791,7 @@ struct StudioControlScreen: View {
             pitch = tilt
         } else {
             let now = Date()
-            if now.timeIntervalSince(ptzSent) < 0.16 { return }
+            if now.timeIntervalSince(ptzSent) < 0.05 { return }
             ptzSent = now
             yaw = wrapDegrees(yaw + pan * 8)
             pitch = min(90, max(-56, pitch + tilt * 4))
@@ -1692,7 +1857,7 @@ struct StudioControlScreen: View {
 
     private func steer(_ camera: PtzRecord, pan: Double, tilt: Double, zoom: Double) {
         let now = Date()
-        if now.timeIntervalSince(ptzSent) < 0.18 { return }
+        if now.timeIntervalSince(ptzSent) < 0.05 { return }
         ptzSent = now
         ptzDrive?.cancel()
         ptzDrive = Task {
@@ -1907,7 +2072,8 @@ private struct LensLook {
 /// 가로 14m, 깊이 18m 무대를 미터로만 그립니다. 0°는 객석(+Y)입니다.
 private struct FloorPlan: View {
     @EnvironmentObject private var studio: Studio
-    var gimbal: C3BoardRecord?
+    /// 로닌 보드별 분리 표시(OLED·RMSID 각각).
+    var roninBoards: [C3BoardRecord]
     var cameras: [BoardCamera]
     var meters: [String: CGPoint]
     var selected: String?
@@ -1915,8 +2081,10 @@ private struct FloorPlan: View {
     var liveYaw: Double
     var livePitch: Double
     var tool: FloorTool
-    var camerasOnline: Bool
-    var liveC3: UUID?
+    /// 카메라별 온라인(올리멕스 연결 시 전부, 아니면 비움).
+    var camerasOnline: Set<String>
+    /// C3 보드별 온라인.
+    var onlineC3: Set<UUID>
     var onTool: (FloorTool) -> Void
     var onMoveCamera: (String, Double, Double) -> Void
     var onMoveGimbal: (UUID, Double, Double) -> Void
@@ -1952,51 +2120,55 @@ private struct FloorPlan: View {
                 context.stroke(Path(room), with: .color(.white.opacity(0.35)), lineWidth: 1.5)
                 let stageDraw = tool == .stage ? sized(stageMark) : stageMark
                 let fohDraw = tool == .foh ? sized(fohMark) : fohMark
-                paintZone(context: context, size: size, mark: stageDraw, title: "무대", fill: Color(red: 0.45, green: 0.62, blue: 0.78).opacity(0.28), stroke: Color(red: 0.62, green: 0.78, blue: 0.9))
-                paintZone(context: context, size: size, mark: fohDraw, title: "FOH", fill: Color(red: 0.54, green: 0.42, blue: 0.20).opacity(0.28), stroke: Color(red: 0.93, green: 0.78, blue: 0.42))
-                context.draw(Text("객석").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
-                if let gimbal {
+                paintZone(context: context, size: size, mark: stageDraw, title: "무대", fill: Color(red: 0.35, green: 0.55, blue: 0.72).opacity(0.42), stroke: Color(red: 0.45, green: 0.85, blue: 1.0))
+                paintZone(context: context, size: size, mark: fohDraw, title: "FOH", fill: Color(red: 0.62, green: 0.38, blue: 0.12).opacity(0.42), stroke: Color(red: 1.0, green: 0.78, blue: 0.28))
+                context.draw(Text("객석 · 무대/FOH 분리").font(.caption.weight(.bold)).foregroundStyle(.white.opacity(0.85)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
+                for (ri, gimbal) in roninBoards.enumerated() {
                     let spot = studio.stageSpot(for: gimbal.id)
                     let chosen = selected == gimbal.id.uuidString
-                    let aim = spot.homeYaw + liveYaw
-                    let pitch = spot.homePitch + livePitch
+                    let aim = spot.homeYaw + (chosen ? liveYaw : 0)
+                    let pitch = spot.homePitch + (chosen ? livePitch : 0)
+                    let spread = roninBoards.count <= 1 ? 0.0 : (Double(ri) - Double(roninBoards.count - 1) / 2.0) * 1.6
                     paint(
                         context: context,
                         size: size,
-                        x: spot.x,
+                        x: spot.x + spread,
                         y: spot.y,
                         aim: aim,
                         pitch: pitch,
-                        title: gimbal.name,
+                        title: gimbal.listTitle,
                         mark: "rotate.3d",
                         chosen: chosen,
                         useLens: chosen,
-                        online: liveC3 == gimbal.id
+                        online: onlineC3.contains(gimbal.id)
                     )
                 }
                 let lightRows = lightUnits.isEmpty
                     ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
                     : lightUnits
-                let lightsByBoard = Dictionary(grouping: lightRows, by: \.boardId)
-                for (boardId, units) in lightsByBoard {
-                    let spot = studio.stageSpot(for: boardId)
-                    let count = max(units.count, 1)
-                    for (i, unit) in units.enumerated() {
-                        let spread = count <= 1 ? 0.0 : (Double(i) - Double(count - 1) / 2.0) * 1.4
-                        paint(
-                            context: context,
-                            size: size,
-                            x: spot.x + spread,
-                            y: spot.y,
-                            aim: 0,
-                            pitch: 0,
-                            title: unit.name,
-                            mark: "lightbulb.fill",
-                            chosen: selected == boardId.uuidString,
-                            useLens: false,
-                            online: liveC3 == boardId
-                        )
-                    }
+                for unit in lightRows {
+                    let spotId = Studio.lightUnitSpotId(boardId: unit.boardId, index: unit.index)
+                    let live: StageSpot = {
+                        if let found = studio.profile.stageSpots.first(where: { $0.deviceId == spotId }) {
+                            return found
+                        }
+                        let base = studio.stageSpot(for: unit.boardId)
+                        let spread = Double(unit.index) * 1.5 - 0.75
+                        return StageSpot(deviceId: spotId, x: base.x + spread, y: base.y, z: base.z, aimYaw: 0)
+                    }()
+                    paint(
+                        context: context,
+                        size: size,
+                        x: live.x,
+                        y: live.y,
+                        aim: 0,
+                        pitch: 0,
+                        title: unit.name,
+                        mark: "lightbulb.fill",
+                        chosen: selected == unit.id || selected == spotId.uuidString,
+                        useLens: false,
+                        online: onlineC3.contains(unit.boardId)
+                    )
                 }
                 for camera in ptz {
                     let spot = studio.stageSpot(for: camera.id)
@@ -2032,7 +2204,7 @@ private struct FloorPlan: View {
                         mark: symbolName(camera),
                         chosen: chosen,
                         useLens: chosen,
-                        online: camerasOnline,
+                        online: camerasOnline.contains(camera.id),
                         recording: camRecording.contains(camera.id)
                     )
                 }
@@ -2075,7 +2247,12 @@ private struct FloorPlan: View {
                             onAim(drag, heading)
                             return
                         }
-                        if let id = UUID(uuidString: drag), gimbal?.id == id || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
+                        if let id = UUID(uuidString: drag),
+                           roninBoards.contains(where: { $0.id == id }) {
+                            onMoveGimbal(id, room.x, room.y)
+                        } else if let id = UUID(uuidString: drag),
+                                  lightUnits.contains(where: { Studio.lightUnitSpotId(boardId: $0.boardId, index: $0.index) == id })
+                                    || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
                             onMoveGimbal(id, room.x, room.y)
                         } else if let id = UUID(uuidString: drag), ptz.contains(where: { $0.id == id }) {
                             onMovePtz(id, room.x, room.y)
@@ -2089,7 +2266,13 @@ private struct FloorPlan: View {
                         dragAim = false
                     }
             )
-            .onAppear { fillSizes(tool) }
+            .onAppear {
+                fillSizes(tool)
+                seedLightSpots()
+            }
+            .onChange(of: lightUnits.count) { _, _ in
+                seedLightSpots()
+            }
             .onChange(of: tool) { _, new in
                 draft = nil
                 fillSizes(new)
@@ -2153,10 +2336,22 @@ private struct FloorPlan: View {
     private func paintZone(context: GraphicsContext, size: CGSize, mark: FloorMark, title: String, fill: Color, stroke: Color) {
         let box = rect(x0: mark.x, y0: mark.y, x1: mark.x + mark.w, y1: mark.y + mark.d, size: size)
         context.fill(Path(box), with: .color(fill))
-        context.stroke(Path(box), with: .color(stroke), lineWidth: 2)
-        context.draw(Text(title).font(.caption.weight(.bold)).foregroundStyle(.white), at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
+        // 무대·FOH 경계를 굵게 그려 분리 체감
+        context.stroke(Path(box), with: .color(stroke), lineWidth: 4)
+        var hatch = Path()
+        let step: CGFloat = 10
+        var x = box.minX
+        while x < box.maxX {
+            hatch.move(to: CGPoint(x: x, y: box.minY))
+            hatch.addLine(to: CGPoint(x: min(x + step, box.maxX), y: box.maxY))
+            x += step
+        }
+        context.stroke(hatch, with: .color(stroke.opacity(0.35)), lineWidth: 1)
+        context.draw(Text(title).font(.title3.weight(.bold)).foregroundStyle(.white), at: CGPoint(x: box.midX, y: box.midY - 6), anchor: .center)
         if title == "FOH" {
-            context.draw(Text("객석 앞").font(.caption2).foregroundStyle(.white.opacity(0.8)), at: CGPoint(x: box.midX, y: box.midY + 14), anchor: .center)
+            context.draw(Text("객석 앞 · 분리").font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9)), at: CGPoint(x: box.midX, y: box.midY + 16), anchor: .center)
+        } else if title == "무대" {
+            context.draw(Text("공연 구역 · 분리").font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9)), at: CGPoint(x: box.midX, y: box.midY + 16), anchor: .center)
         }
     }
 
@@ -2255,9 +2450,22 @@ private struct FloorPlan: View {
         return "camera.fill"
     }
 
+    private func seedLightSpots() {
+        let rows = lightUnits.isEmpty
+            ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
+            : lightUnits
+        for unit in rows {
+            let spotId = Studio.lightUnitSpotId(boardId: unit.boardId, index: unit.index)
+            if studio.profile.stageSpots.contains(where: { $0.deviceId == spotId }) { continue }
+            let base = studio.stageSpot(for: unit.boardId)
+            let spread = Double(unit.index) * 1.5 - 0.75
+            studio.moveStage(deviceId: spotId, x: base.x + spread, y: base.y)
+        }
+    }
+
     private func canAim(_ id: String) -> Bool {
         guard let uuid = UUID(uuidString: id) else { return false }
-        if gimbal?.id == uuid { return true }
+        if roninBoards.contains(where: { $0.id == uuid }) { return true }
         return ptz.contains { $0.id == uuid }
     }
 
@@ -2268,7 +2476,7 @@ private struct FloorPlan: View {
     }
 
     private func hit(_ point: CGPoint, size: CGSize) -> String? {
-        if let gimbal {
+        for gimbal in roninBoards {
             let spot = studio.stageSpot(for: gimbal.id)
             let at = plan(x: spot.x, y: spot.y, size: size)
             if hypot(at.x - point.x, at.y - point.y) < 28 { return gimbal.id.uuidString }
@@ -2283,10 +2491,18 @@ private struct FloorPlan: View {
             let at = plan(x: spot.x, y: spot.y, size: size)
             if hypot(at.x - point.x, at.y - point.y) < 28 { return camera.id.uuidString }
         }
-        for board in studio.profile.c3Boards where board.duty == .light {
-            let spot = studio.stageSpot(for: board.id)
+        let rows = lightUnits.isEmpty
+            ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
+            : lightUnits
+        for unit in rows {
+            let spotId = Studio.lightUnitSpotId(boardId: unit.boardId, index: unit.index)
+            let spot: StageSpot = {
+                if let found = studio.profile.stageSpots.first(where: { $0.deviceId == spotId }) { return found }
+                let base = studio.stageSpot(for: unit.boardId)
+                return StageSpot(deviceId: spotId, x: base.x + Double(unit.index) * 1.5 - 0.75, y: base.y, z: base.z, aimYaw: 0)
+            }()
             let at = plan(x: spot.x, y: spot.y, size: size)
-            if hypot(at.x - point.x, at.y - point.y) < 28 { return board.id.uuidString }
+            if hypot(at.x - point.x, at.y - point.y) < 28 { return spotId.uuidString }
         }
         return nil
     }

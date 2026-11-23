@@ -106,7 +106,11 @@ final class Studio: ObservableObject {
     /// 와이파이 연결과 기판 직접 연결을 따로 둡니다. 숫자 주소는 프로필에 덮어쓰지 않습니다.
     @Published var bridgeLinks: [UUID: BridgeLinks] = [:]
     let boardSocket = BoardSocket()
-    let c3Socket = C3JobSocket()
+    /// OLED·RMSID·S3 동시 연결. 하나 고른다고 다른 보드를 끊지 않습니다.
+    let c3Bag = C3SocketBag()
+    /// 호환용 — 지정 보드 소켓. 없으면 빈 UUID 소켓(연결 전).
+    func c3Socket(for id: UUID) -> C3JobSocket { c3Bag.socket(for: id) }
+    func c3Socket(for board: C3BoardRecord) -> C3JobSocket { c3Bag.socket(for: board.id) }
     /// 화면이 지금 보여주는 팬·틸트·줌입니다. 컴패니언 저장이 이 값을 넣습니다.
     @Published var ptzLive: [UUID: PtzScene.Aim] = [:]
     /// 장면 부르기가 화면 슬라이더를 따라가게 하는 번호입니다.
@@ -163,8 +167,8 @@ final class Studio: ObservableObject {
     }
 
     var roninC3: C3BoardRecord? {
-        if let id = c3Socket.boardId,
-           let live = profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+        let ronins = profile.c3Boards.filter { $0.duty == .ronin }
+        if let live = ronins.first(where: { c3Bag.state(for: $0.id) == .online }) {
             return live
         }
         return profile.c3Boards.first { $0.boardSlot == .oled }
@@ -231,6 +235,12 @@ final class Studio: ObservableObject {
     func ensureBoardRolesOnLaunch() async {
         syncBoardRoles(quiet: true)
         await refreshBoardLanAlive()
+        // OLED·RMSID·S3 를 한꺼번에 붙입니다. 예전엔 한 소켓이라 하나만 살아 있었습니다.
+        reconnectAllC3()
+        // 고프로·액션5는 올리멕스. 조명/PTZ만 되고 캠이 죽은 채 남지 않게 같이 붙입니다.
+        if profile.olimexRegistered {
+            reconnectOlimex(quiet: true)
+        }
     }
 
     /// OLED=.152 / S3=.153 / RMSID=.154 WS hello 를 다시 찍어 망 응답을 표시합니다.
@@ -520,22 +530,58 @@ final class Studio: ObservableObject {
         return moved.0
     }
 
+    /// 이동형 프리셋(경로) 최대 개수 — UI3.
+    static let maxTravelPresets = 20
+
     /// 이동형 경로에 정지 장면 한 칸을 붙입니다.
-    func appendPtzMoveStep(_ cameraId: UUID, sceneNumber: Int, dwellSeconds: Double = 2) {
+    func appendPtzMoveStep(_ cameraId: UUID, sceneNumber: Int, dwellSeconds: Double = 2, pathId: UUID? = nil) {
         guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return }
         var paths = profile.ptzCameras[index].movePaths
         if paths.isEmpty {
             paths = [PtzMovePath(name: "경로 1", steps: [])]
         }
-        paths[0].steps.append(PtzMoveStep(sceneNumber: sceneNumber, dwellSeconds: dwellSeconds))
+        let pathIndex: Int = {
+            if let pathId, let found = paths.firstIndex(where: { $0.id == pathId }) { return found }
+            return 0
+        }()
+        paths[pathIndex].steps.append(PtzMoveStep(sceneNumber: sceneNumber, dwellSeconds: dwellSeconds))
         profile.ptzCameras[index].movePaths = paths
-        note("\(profile.ptzCameras[index].name) 경로에 장면 \(sceneNumber) 을 넣었습니다.")
+        note("\(profile.ptzCameras[index].name) \(paths[pathIndex].name)에 장면 \(sceneNumber) 을 넣었습니다.")
     }
 
-    func clearPtzMovePath(_ cameraId: UUID) {
+    /// 뮤직뱅크형 이동 경로를 하나 더 만듭니다(최대 20).
+    @discardableResult
+    func addPtzMovePath(_ cameraId: UUID, name: String = "") -> PtzMovePath? {
+        guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return nil }
+        if profile.ptzCameras[index].movePaths.count >= Self.maxTravelPresets {
+            note("이동형 프리셋은 최대 \(Self.maxTravelPresets)개입니다.")
+            return nil
+        }
+        let n = profile.ptzCameras[index].movePaths.count + 1
+        let path = PtzMovePath(name: name.isEmpty ? "경로 \(n)" : name, steps: [])
+        profile.ptzCameras[index].movePaths.append(path)
+        note("\(profile.ptzCameras[index].name)에 \(path.name) 을 추가했습니다.")
+        return path
+    }
+
+    func clearPtzMovePath(_ cameraId: UUID, pathId: UUID? = nil) {
         guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return }
+        if let pathId, let p = profile.ptzCameras[index].movePaths.firstIndex(where: { $0.id == pathId }) {
+            profile.ptzCameras[index].movePaths[p].steps = []
+            note("\(profile.ptzCameras[index].name) \(profile.ptzCameras[index].movePaths[p].name) 을 비웠습니다.")
+            return
+        }
         profile.ptzCameras[index].movePaths = [PtzMovePath(name: "경로 1", steps: [])]
         note("\(profile.ptzCameras[index].name) 이동 경로를 비웠습니다.")
+    }
+
+    func deletePtzMovePath(_ cameraId: UUID, pathId: UUID) {
+        guard let index = profile.ptzCameras.firstIndex(where: { $0.id == cameraId }) else { return }
+        profile.ptzCameras[index].movePaths.removeAll { $0.id == pathId }
+        if profile.ptzCameras[index].movePaths.isEmpty {
+            profile.ptzCameras[index].movePaths = [PtzMovePath(name: "경로 1", steps: [])]
+        }
+        note("이동형 프리셋을 지웠습니다.")
     }
 
     /// 이동형 프리셋 Recall. Stop 은 호출 쪽에서 Task 를 취소합니다.
@@ -810,6 +856,18 @@ final class Studio: ObservableObject {
         }
     }
 
+
+    /// 울란지 대마다 무대 자리를 따로 둡니다(보드 id와 다른 안정 UUID).
+    static func lightUnitSpotId(boardId: UUID, index: Int) -> UUID {
+        var bytes = boardId.uuid
+        // 인덱스·보드를 섞어 안정적인 고유 id를 만듭니다.
+        bytes.0 = bytes.0 &+ UInt8(truncatingIfNeeded: index &+ 1)
+        bytes.1 ^= UInt8(truncatingIfNeeded: index &* 31)
+        bytes.2 ^= 0x4C // 'L'
+        bytes.3 = UInt8(truncatingIfNeeded: index)
+        return UUID(uuid: bytes)
+    }
+
     func stageSpot(for deviceId: UUID) -> StageSpot {
         if let found = profile.stageSpots.first(where: { $0.deviceId == deviceId }) {
             return found
@@ -974,13 +1032,16 @@ final class Studio: ObservableObject {
             noteOffline("\(board.listTitle) 은 USB 점검입니다. 줌을 보내지 않았습니다.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
         let payload: [String: Any] = ["op": "ronin", "action": "zoom", "speed": speed]
-        let result = await c3Socket.command(payload, timeout: quiet ? 1.5 : 4)
-        if quiet && result.ack { return }
+        if quiet {
+            _ = await c3Socket(for: board).fire(payload)
+            return
+        }
+        let result = await c3Socket(for: board).command(payload, timeout: 2)
         note(result.sent ? result.reason : "\(board.listTitle) 에 줌을 보내지 않았습니다. \(result.reason)")
     }
 
@@ -996,19 +1057,25 @@ final class Studio: ObservableObject {
             noteOffline("\(board.listTitle) 은 USB 점검입니다. 팬과 틸트를 보내지 않았습니다.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
         var payload: [String: Any] = ["op": "ronin", "pan": yaw, "yaw": yaw, "pitch": pitch]
         if roll != 0 { payload["roll"] = roll }
         if home { payload["home"] = true }
-        // 연속 팬·틸트는 짧은 대기(fw 1.0.58: DUML notify ≤280ms). 큐가 쌓이지 않게 합니다.
-        let result = await c3Socket.command(payload, timeout: home ? 4 : (quiet ? 0.7 : 2))
-        if result.ack, !c3Socket.pairedName.isEmpty {
-            rememberGimbalName(board.id, c3Socket.pairedName)
+        // 연속 팬·틸트(quiet): ack 대기 없이 fire — 체감 <0.5s. 제자리·일반은 command.
+        if quiet && !home {
+            let sent = await c3Socket(for: board).fire(payload)
+            if !sent {
+                note("\(board.listTitle) 에 팬·틸트를 보내지 못했습니다(오프라인).")
+            }
+            return
         }
-        if quiet && result.ack { return }
+        let result = await c3Socket(for: board).command(payload, timeout: home ? 4 : 2)
+        if result.ack, !c3Socket(for: board).pairedName.isEmpty {
+            rememberGimbalName(board.id, c3Socket(for: board).pairedName)
+        }
         if result.ack {
             if home {
                 note("\(board.listTitle) 이 로닌 제자리를 블루투스로 보냈다고 답했습니다.")
@@ -1018,7 +1085,6 @@ final class Studio: ObservableObject {
                 note("\(board.listTitle) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
             }
         } else {
-            // quiet 여도 「붙은 로닌 없음」은 무조건 알립니다. 조용한 실패가 무반응처럼 보였습니다.
             let hard = result.reason.contains("붙은 로닌") || result.reason.contains("붙지 못") || !result.sent
             if !quiet || hard {
                 note(result.sent ? result.reason : "\(board.listTitle) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
@@ -1036,12 +1102,12 @@ final class Studio: ObservableObject {
             noteOffline("\(board.listTitle) 은 USB 점검입니다. 요를 보내지 않았습니다.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
         let payload: [String: Any] = ["op": "ronin", "action": "yaw", "roll": roll, "yaw": roll]
-        let result = await c3Socket.command(payload, timeout: quiet ? 1.5 : 4)
+        let result = await c3Socket(for: board).command(payload, timeout: quiet ? 1.5 : 4)
         if quiet && result.ack { return }
         note(result.sent ? result.reason : "\(board.listTitle) 에 요를 보내지 않았습니다. \(result.reason)")
     }
@@ -1052,11 +1118,11 @@ final class Studio: ObservableObject {
             noteOffline("로닌용 OLED/RMSID C3 를 먼저 등록하세요.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
-        let result = await c3Socket.command(["op": "scan"], timeout: 10)
+        let result = await c3Socket(for: board).command(["op": "scan"], timeout: 10)
         note(result.sent ? result.reason : "로닌 스캔을 보내지 못했습니다. \(result.reason)")
     }
 
@@ -1066,15 +1132,15 @@ final class Studio: ObservableObject {
             noteOffline("로닌용 OLED/RMSID C3 를 먼저 등록하세요.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
         var payload: [String: Any] = ["op": "pair", "name": name]
         if !id.isEmpty { payload["id"] = id }
-        let result = await c3Socket.command(payload, timeout: 15)
+        let result = await c3Socket(for: board).command(payload, timeout: 15)
         if result.ack {
-            rememberGimbalName(board.id, c3Socket.pairedName.isEmpty ? name : c3Socket.pairedName)
+            rememberGimbalName(board.id, c3Socket(for: board).pairedName.isEmpty ? name : c3Socket(for: board).pairedName)
         }
         note(result.sent ? result.reason : "로닌 붙이기를 보내지 못했습니다. \(result.reason)")
     }
@@ -1194,8 +1260,17 @@ final class Studio: ObservableObject {
             note("액션 카메라는 올리멕스 기판에 있습니다. 먼저 등록하세요.")
             return false
         }
+        note("\(camera.name) \(start ? "녹화" : "정지") 보내는 중…")
+        if boardSocket.state != .online {
+            // 고프로 조작 불가의 흔한 원인: 올리멕스 소켓이 죽은 채 UI만 남아 있음 → 한 번 다시 붙임.
+            reconnectOlimex(quiet: true)
+            let deadline = Date().addingTimeInterval(2.5)
+            while Date() < deadline, boardSocket.state != .online {
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
+        }
         guard boardSocket.state == .online else {
-            noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
+            noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다. 「지금 연결」을 확인하세요.")
             return false
         }
         let result = await boardSocket.sendAwaitingTally([
@@ -1206,7 +1281,7 @@ final class Studio: ObservableObject {
             "ble": camera.ble.isEmpty ? BoardSocket.ble(for: camera.kind) : camera.ble,
             "start": start,
             "tally": start,
-        ], matching: camera.name, timeout: 18)
+        ], matching: camera.name, timeout: 10)
         if !result.sent {
             noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
             return false
@@ -1229,11 +1304,11 @@ final class Studio: ObservableObject {
             note("조명 담당 S3 를 찾지 못했습니다.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
-        let result = await c3Socket.command(["op": "light", "action": "scan"], timeout: 12)
+        let result = await c3Socket(for: board).command(["op": "light", "action": "scan"], timeout: 12)
         note(result.sent ? result.reason : "울란지 스캔을 보내지 못했습니다. \(result.reason)")
     }
 
@@ -1243,15 +1318,15 @@ final class Studio: ObservableObject {
             note("조명 담당 S3 를 찾지 못했습니다.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
         var payload: [String: Any] = ["op": "light", "action": "pair", "name": name]
         if !lightId.isEmpty { payload["id"] = lightId }
-        let result = await c3Socket.command(payload, timeout: 18)
+        let result = await c3Socket(for: board).command(payload, timeout: 18)
         if result.ack {
-            rememberGimbalName(board.id, c3Socket.pairedName.isEmpty ? name : c3Socket.pairedName)
+            rememberGimbalName(board.id, c3Socket(for: board).pairedName.isEmpty ? name : c3Socket(for: board).pairedName)
         }
         note(result.sent ? result.reason : "울란지 붙이기를 보내지 못했습니다. \(result.reason)")
     }
@@ -1266,7 +1341,7 @@ final class Studio: ObservableObject {
             if !quiet { note("\(board.listTitle) 은 USB 점검입니다. 조명을 보내지 않았습니다.") }
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             if !quiet { note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82") }
             return
         }
@@ -1279,10 +1354,10 @@ final class Studio: ObservableObject {
         ]
         // 슬라이더(quiet)는 ack 대기 없이 바로 보냅니다. 펌웨어가 최신값만 남깁니다.
         if quiet {
-            _ = await c3Socket.fire(payload)
+            _ = await c3Socket(for: board).fire(payload)
             return
         }
-        let result = await c3Socket.command(payload, timeout: 4)
+        let result = await c3Socket(for: board).command(payload, timeout: 4)
         if result.ack {
             note(result.reason.isEmpty
                  ? "\(board.listTitle) 칸\(index) 밝기 \(brightness), \(kelvin)K 를 받았다고 답했습니다."
@@ -1292,17 +1367,42 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// VL200BI FX(스트로보·플래시 등). 펌 1.0.65+ · 프로토콜 FF A1 01 fx fx AA.
+    func setLightEffect(_ id: UUID, index: Int, name: String, all: Bool = false) async {
+        guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
+            note("조명 담당 S3 를 찾지 못했습니다.")
+            return
+        }
+        if !(await c3Socket(for: board).ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
+            return
+        }
+        var payload: [String: Any] = [
+            "op": "light",
+            "action": "effect",
+            "name": name,
+        ]
+        if all {
+            payload["scope"] = "all"
+        } else {
+            payload["index"] = index
+        }
+        note("\(board.listTitle) FX \(name) 보내는 중…")
+        let result = await c3Socket(for: board).command(payload, timeout: 6)
+        note(result.sent ? (result.reason.isEmpty ? "FX \(name) 응답" : result.reason) : "FX를 보내지 못했습니다. \(result.reason)")
+    }
+
     /// 저장된 울란지 모두(선택). 개별 UI가 기본이고, 이 버튼만 묶음입니다.
     func setAllLights(_ id: UUID, brightness: Int, kelvin: Int, on: Bool) async {
         guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
             note("조명 담당 S3 를 찾지 못했습니다.")
             return
         }
-        if !(await c3Socket.ensureOnline(board)) {
+        if !(await c3Socket(for: board).ensureOnline(board)) {
             note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
             return
         }
-        let result = await c3Socket.command([
+        let result = await c3Socket(for: board).command([
             "op": "light",
             "action": "all",
             "brightness": brightness,
@@ -1384,7 +1484,26 @@ final class Studio: ObservableObject {
         } else {
             note("\(board.listTitle) \(host):82 에 붙습니다.")
         }
-        c3Socket.connect(board)
+        c3Bag.socket(for: board.id).connect(board)
+    }
+
+    /// 등록된 C3 전부를 동시에 붙입니다(하나 때문에 다른 쪽을 끊지 않음).
+    func reconnectAllC3() {
+        let boards = profile.c3Boards.filter { $0.link.shoots }
+        guard !boards.isEmpty else { return }
+        note("C3 \(boards.count)대를 동시에 붙입니다.")
+        c3Bag.connectAll(boards)
+    }
+
+    /// 망에서 살아 있는데 오프라인인 보드만 다시 붙입니다(연결 복구).
+    func reconnectAliveC3() {
+        for board in profile.c3Boards where board.link.shoots {
+            if let slot = board.boardSlot, boardLanAlive[slot.rawValue] == false {
+                continue
+            }
+            if c3Bag.state(for: board.id) == .online { continue }
+            c3Bag.socket(for: board.id).connect(board)
+        }
     }
 
     /// 로닌·조명 탭에서 망 무응답일 때 다시 찍습니다.
@@ -1396,7 +1515,7 @@ final class Studio: ObservableObject {
         guard let index = profile.c3Boards.firstIndex(where: { $0.id == id }) else { return }
         let stored: BoardLane = lane == .poe ? .lan : lane
         profile.c3Boards[index].linkMode = stored.rawValue
-        if c3Socket.boardId == id { c3Socket.disconnect() }
+        c3Bag.disconnect(id)
         note("\(profile.c3Boards[index].name) 연결을 \(stored.title) 로 바꿨습니다. 명령을 보내면 그때 붙습니다.")
     }
 
@@ -1553,7 +1672,7 @@ final class Studio: ObservableObject {
             return
         }
         boardSocket.disconnect(quiet: true)
-        c3Socket.disconnect()
+        c3Bag.disconnectAll()
         venues.currentId = place.id
         profile = place.profile
         let lane = BoardLane(stored: profile.boardLane)
@@ -1638,17 +1757,10 @@ final class Studio: ObservableObject {
             if profile.olimexRegistered && boardSocket.state == .offline && boardSocket.lane.shoots {
                 reconnectOlimex(quiet: true)
             }
-            // connecting(다시 붙는 중)이면 건드리지 않습니다. 깜빡임·재연결 루프를 막습니다.
-            // 마지막으로 붙였던 보드(boardId)를 우선합니다. 없으면 로닌→조명 순.
-            if c3Socket.state == .offline {
-                if let id = c3Socket.boardId {
-                    reconnectC3(id)
-                } else if let ronin = profile.c3Boards.first(where: { $0.duty == .ronin && $0.link.shoots }) {
-                    reconnectC3(ronin.id)
-                } else if let light = profile.c3Boards.first(where: { $0.duty == .light && $0.link.shoots }) {
-                    reconnectC3(light.id)
-                } else {
-                    reconnectC3()
+            // 보드마다 독립 소켓. 오프라인인 것만 다시 붙입니다(다른 보드를 끊지 않음).
+            for board in profile.c3Boards where board.link.shoots {
+                if c3Bag.state(for: board.id) == .offline {
+                    reconnectC3(board.id)
                 }
             }
             try? await Task.sleep(nanoseconds: 12_000_000_000)

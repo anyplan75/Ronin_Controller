@@ -4,9 +4,9 @@
 
 | 파일 | 슬롯 | 빌드 | fw | 크기 |
 | --- | --- | --- | --- | --- |
-| `firmware-c3-oled.bin` | oled | `c3-oled` | **1.0.62** | ≤1.25MB |
-| `firmware-c3-rmsid.bin` | rmsid | `c3-rmsid` | **1.0.62** | ≤1.25MB |
-| `firmware-s3-light.bin` | s3 | `s3-light` | **1.0.62** | (울란지 이중연결·최신값) |
+| `firmware-c3-oled.bin` | oled | `c3-oled` | **1.0.64** | ≤1.25MB |
+| `firmware-c3-rmsid.bin` | rmsid | `c3-rmsid` | **1.0.64** | ≤1.25MB |
+| `firmware-s3-light.bin` | s3 | `s3-light` | **1.0.64** | (울란지 BLE 유지·루프 자동페어 제거) |
 
 올리멕스 허브도 C3·S3와 같이 와이파이 HTTP OTA(`http://192.168.10.151/update`, `/version`)를 씁니다. USB는 최초·비상만. bin은 `Firmware/firmware-olimex-hub-1.0.62.bin` 입니다.
 

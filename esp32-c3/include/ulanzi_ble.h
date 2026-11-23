@@ -26,6 +26,9 @@ bool ulanziBleApply(int brightness, int kelvin, bool on, char* reason, size_t re
 /// 저장 칸(0·1) 한 대만. 묶음이 아닙니다.
 bool ulanziBleApplyIndex(uint8_t index, int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
 bool ulanziBleApplyAll(int brightness, int kelvin, bool on, char* reason, size_t reasonCap);
+/// FX: flash/tv/candle/strobe1-3. 코드는 lctl 관측(FF A1 01 fx fx AA).
+bool ulanziBleEffectIndex(uint8_t index, uint8_t fx, char* reason, size_t reasonCap);
+bool ulanziBleEffectAll(uint8_t fx, char* reason, size_t reasonCap);
 void ulanziBleFillList(JsonDocument& doc);
 /// 저장된 울란지 2칸을 hello·응답에 넣습니다. 앱 개별 UI용입니다.
 void ulanziBleFillSaved(JsonDocument& doc);

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// 기판마다 고르는 연결입니다. 기본은 같은 와이파이 망입니다. USB는 펌웨어와 점검이고 촬영 경로가 아닙니다.
@@ -625,7 +626,13 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             detail = "연결됨 \(board.socketHost)"
             return
         }
-        if boardId == board.id, state == .connecting, task != nil { return }
+        // 「연결 중」에 고정되면 다시 눌러도 무시되던 문제 → 강제 재오픈.
+        if boardId == board.id, state == .connecting {
+            reconnectWork?.cancel()
+            offlineWork?.cancel()
+            open(board, clearLists: false)
+            return
+        }
         open(board, clearLists: boardId != board.id)
     }
 
@@ -664,9 +671,18 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         let task = session.webSocketTask(with: url)
         self.task = task
         task.resume()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.generation == token, self.state == .connecting else { return }
-            self.softDrop("\(host):\(board.link.c3Port) 이 열리지 않았습니다. C3 는 2.4GHz만 붙습니다.")
+            // 처음 붙기 실패는 「연결 중」 루프에 가두지 않고 오프라인으로 닫습니다.
+            self.wantConnected = false
+            self.reconnectWork?.cancel()
+            self.offlineWork?.cancel()
+            self.task?.cancel(with: .goingAway, reason: nil)
+            self.task = nil
+            self.session?.invalidateAndCancel()
+            self.session = nil
+            self.state = .offline
+            self.detail = "\(host):\(board.link.c3Port) 이 열리지 않았습니다. 「지금 연결」로 다시 시도하세요."
         }
     }
 
@@ -870,7 +886,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         }
         state = .connecting
         detail = "다시 붙는 중… \(board.socketHost)"
-        // 짧은 끊김은 UI 오프라인으로 안 보입니다. 4초 넘기면 그때 오프라인.
+        // 짧은 끊김은 잠시만 「연결 중」. 1.5초 넘기면 오프라인 표시(고정 방지).
         offlineWork?.cancel()
         let markOffline = DispatchWorkItem { [weak self] in
             guard let self, self.wantConnected, self.state != .online else { return }
@@ -878,14 +894,14 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             self.detail = text
         }
         offlineWork = markOffline
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: markOffline)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: markOffline)
         scheduleReconnect(board)
     }
 
     private func scheduleReconnect(_ board: C3BoardRecord) {
         reconnectWork?.cancel()
-        let delay = min(reconnectDelay, 8)
-        reconnectDelay = min(reconnectDelay * 1.6, 8)
+        let delay = min(reconnectDelay, 5)
+        reconnectDelay = min(reconnectDelay * 1.6, 5)
         let token = generation
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.wantConnected, self.generation == token else { return }
@@ -948,4 +964,51 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             }
         }
     }
+}
+
+/// OLED·RMSID·S3 를 **동시에** 붙입니다. 예전 단일 소켓은 하나 고르면 다른 보드를 끊었습니다.
+@MainActor
+final class C3SocketBag: ObservableObject {
+    private var map: [UUID: C3JobSocket] = [:]
+    private var watches: [UUID: AnyCancellable] = [:]
+    /// 자식 소켓이 바뀔 때마다 올라갑니다. 화면 onReceive 용.
+    @Published private(set) var pulse: UInt64 = 0
+
+    func socket(for id: UUID) -> C3JobSocket {
+        if let live = map[id] { return live }
+        let next = C3JobSocket()
+        map[id] = next
+        watches[id] = next.objectWillChange.sink { [weak self] _ in
+            self?.pulse &+= 1
+            self?.objectWillChange.send()
+        }
+        return next
+    }
+
+    func state(for id: UUID) -> BoardLinkState {
+        map[id]?.state ?? .offline
+    }
+
+    func detail(for id: UUID) -> String {
+        map[id]?.detail ?? "대기"
+    }
+
+    func connectAll(_ boards: [C3BoardRecord]) {
+        for board in boards where board.link.shoots {
+            socket(for: board.id).connect(board)
+        }
+    }
+
+    func disconnect(_ id: UUID) {
+        map[id]?.disconnect()
+    }
+
+    func disconnectAll() {
+        for socket in map.values {
+            socket.disconnect()
+        }
+    }
+
+    /// hello·OTA 반영용 — 살아 있는 소켓만.
+    var allSockets: [C3JobSocket] { Array(map.values) }
 }

@@ -239,6 +239,13 @@ static void startHotspot(int channel) {
   else WiFi.softAP("Ronin-C3");
 }
 
+/// 랜(STA)에 붙었으면 핫스팟을 끕니다. AP+STA 동시는 C3에서 ping은 되는데 HTTP/WS가 끊기는 원인이었습니다.
+static void stopHotspotKeepStation() {
+  // BLE와 같이 쓸 때는 modem sleep 을 끄면 abort 됩니다. 핫스팟만 끕니다.
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+}
+
 /// 핫스팟을 먼저 켜면 라디오가 1번 채널에 고정됩니다. 집 2.4GHz는 다른 채널이라 붙지 못합니다.
 static bool beginStation(const String& ssid, const String& pass, const String& ipText) {
   staWanted = true;
@@ -259,7 +266,8 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
     return false;
   }
   WiFi.persistent(false);
-  WiFi.setAutoReconnect(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   allowKoreaChannels();
   IPAddress ip;
@@ -302,7 +310,6 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
   const uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) delay(200);
   bool ok = WiFi.status() == WL_CONNECTED;
-  startHotspot(bestChannel);
   IPAddress wanted;
   if (fixedLan(useIp, &wanted)) {
     Serial.print("USEIP ");
@@ -326,11 +333,17 @@ static bool beginStation(const String& ssid, const String& pass, const String& i
   }
   prefs.putString("wifiIp", useIp);
   if (ok) {
+    // 랜 성공 뒤에는 핫스팟을 끄고 STA만 유지합니다(HTTP/WS 안정).
+    stopHotspotKeepStation();
+    if (fixedLan(useIp, &wanted)) pinAddress(wanted);
     Serial.print("같은 와이파이 주소 ");
     Serial.println(WiFi.localIP());
+    Serial.println("핫스팟 끔(랜 전용).");
   } else if (WiFi.status() == WL_CONNECT_FAILED) {
+    startHotspot(bestChannel);
     Serial.println("2.4GHz에 비밀번호가 맞지 않습니다. 처음 연결에서 다시 넣으세요.");
   } else {
+    startHotspot(bestChannel);
     Serial.println("2.4GHz에 붙지 못했습니다. 핫스팟은 켜 둡니다.");
   }
   nextStaTry = millis() + 15000;
@@ -670,6 +683,45 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       reply(num, ok, reason);
       return;
     }
+    if (strcmp(action, "effect") == 0 || strcmp(action, "fx") == 0) {
+      // flash=0x04 tv=0x05 candle=0x06 strobe1=0x0C strobe2=0x0D strobe3=0x0E
+      uint8_t fx = (uint8_t)(doc["fx"] | 0);
+      if (fx == 0) fx = (uint8_t)(doc["effect"] | 0);
+      const char* name = doc["name"] | "";
+      if (fx == 0 && name[0]) {
+        if (strcmp(name, "flash") == 0) fx = 0x04;
+        else if (strcmp(name, "tv") == 0) fx = 0x05;
+        else if (strcmp(name, "candle") == 0) fx = 0x06;
+        else if (strcmp(name, "strobe") == 0 || strcmp(name, "strobe1") == 0) fx = 0x0C;
+        else if (strcmp(name, "strobe2") == 0) fx = 0x0D;
+        else if (strcmp(name, "strobe3") == 0) fx = 0x0E;
+      }
+      if (fx == 0) {
+        reply(num, false, "FX 코드(fx) 또는 이름(flash/tv/candle/strobe1-3)이 필요합니다.");
+        return;
+      }
+      char reason[200];
+      bool ok = false;
+      if (strcmp(doc["scope"] | "", "all") == 0) {
+        ok = ulanziBleEffectAll(fx, reason, sizeof(reason));
+      } else if (doc["index"].is<int>()) {
+        int idx = doc["index"] | -1;
+        ok = (idx >= 0 && idx < 2) ? ulanziBleEffectIndex((uint8_t)idx, fx, reason, sizeof(reason)) : false;
+        if (!ok && reason[0] == 0) snprintf(reason, sizeof(reason), "울란지 칸 번호가 잘못되었습니다.");
+      } else if (ulanziBleSavedCount() >= 1) {
+        ok = ulanziBleEffectIndex(0, fx, reason, sizeof(reason));
+      } else {
+        snprintf(reason, sizeof(reason), "저장된 울란지가 없습니다.");
+        ok = false;
+      }
+      JsonDocument out;
+      out["ack"] = ok;
+      out["reason"] = reason;
+      out["fx"] = fx;
+      ulanziBleFillSaved(out);
+      replyDoc(num, out);
+      return;
+    }
     int brightness = doc["brightness"] | 40;
     int kelvin = doc["kelvin"] | 4500;
     bool on = doc["on"] | true;
@@ -756,13 +808,8 @@ void loop() {
   boardOtaLoop();
 #if defined(BOARD_HAS_LIGHT)
   if (job == "light") {
+    // 루프에서 자동페어·재스캔하지 않습니다. 붙인 BLE 를 유지하고, 끊김만 ulanziBleLoop 가 조용히 복구합니다.
     ulanziBleLoop();
-    if (WiFi.status() == WL_CONNECTED && !ulanziBleBusy() && ulanziBleSavedCount() < 2 && millis() >= nextAutoPairAt) {
-      nextAutoPairAt = millis() + 25000;
-      char reason[180];
-      if (ulanziBleAutoPair(reason, sizeof(reason))) Serial.println(reason);
-      else Serial.println(reason);
-    }
   }
 #endif
 #if defined(BOARD_HAS_RONIN)

@@ -338,15 +338,27 @@ static bool connectSlot(uint8_t slot, const char* name, const char* id, char* re
 }
 
 void ulanziBleLoop() {
+  // 끊김: prefs 는 유지한 채 표시만 내리고, 아래에서 저장 이름으로 조용히 다시 붙입니다(스캔·자동페어 없음).
   for (uint8_t i = 0; i < 2; i++) {
     if (links[i].client != nullptr && links[i].linked && !links[i].client->isConnected()) {
       Serial.print("울란지 칸 ");
       Serial.print(i);
-      Serial.println(" 블루투스가 끊겼습니다.");
+      Serial.println(" 블루투스가 끊겼습니다. 저장 이름으로 다시 붙입니다.");
       clearOne(i, true);
     }
   }
   if (busy) return;
+  // 저장된 칸이 비었으면 스캔 없이 재연결만(루프 자동페어 제거로 불안정 완화).
+  for (uint8_t i = 0; i < 2; i++) {
+    if (linkAlive(i) || !savedNames[i][0]) continue;
+    if ((uint32_t)(millis() - lastApplyMs) < 800) break;
+    busy = true;
+    char reason[160];
+    connectSlot(i, savedNames[i], savedIds[i], reason, sizeof(reason));
+    lastApplyMs = millis();
+    busy = false;
+    return;
+  }
   if ((uint32_t)(millis() - lastApplyMs) < kMinApplyGapMs) return;
   for (uint8_t i = 0; i < 2; i++) {
     if (!pending[i].valid) continue;
@@ -614,3 +626,67 @@ bool ulanziBleApplyAll(int brightness, int kelvin, bool on, char* reason, size_t
   snprintf(reason, reasonCap, "울란지 %u/%u 성공. %s", (unsigned)okCount, (unsigned)savedCount, notes);
   return okCount > 0;
 }
+
+static bool effectOnLink(LightLink& L, uint8_t fx, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (!(L.linked && L.client != nullptr && L.client->isConnected() && L.writeChar != nullptr)) {
+    snprintf(reason, reasonCap, "붙은 울란지가 없습니다. 앱에서 이름을 골라 붙이세요.");
+    return false;
+  }
+  // FX: FF A1 01 <fx> <fx> AA (kevinlouie/lctl 관측). 0x00=켜기(CCT 복귀 전 단계).
+  uint8_t pkt[] = {0xFF, 0xA1, 0x01, fx, fx, 0xAA};
+  if (!writePkt(L, pkt, sizeof(pkt))) {
+    snprintf(reason, reasonCap, "울란지 FX 0x%02X 를 쓰지 못했습니다.", (unsigned)fx);
+    return false;
+  }
+  snprintf(reason, reasonCap, "울란지 %s FX 0x%02X 를 보냈습니다.", L.name, (unsigned)fx);
+  return true;
+}
+
+bool ulanziBleEffectIndex(uint8_t index, uint8_t fx, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (index >= savedCount || !savedNames[index][0]) {
+    snprintf(reason, reasonCap, "울란지 칸 %u 가 비어 있습니다.", (unsigned)index);
+    return false;
+  }
+  busy = true;
+  if (!linkAlive(index)) {
+    char pairReason[160];
+    if (!connectSlot(index, savedNames[index], savedIds[index], pairReason, sizeof(pairReason))) {
+      snprintf(reason, reasonCap, "%s", pairReason);
+      busy = false;
+      return false;
+    }
+  }
+  bool ok = effectOnLink(links[index], fx, reason, reasonCap);
+  lastApplyMs = millis();
+  busy = false;
+  return ok;
+}
+
+bool ulanziBleEffectAll(uint8_t fx, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (savedCount == 0) {
+    snprintf(reason, reasonCap, "저장된 울란지가 없습니다.");
+    return false;
+  }
+  uint8_t okCount = 0;
+  char notes[180] = {};
+  for (uint8_t i = 0; i < savedCount; i++) {
+    char one[120];
+    if (!ulanziBleEffectIndex(i, fx, one, sizeof(one))) {
+      strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+      strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+      continue;
+    }
+    okCount++;
+    strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+    strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+  }
+  snprintf(reason, reasonCap, "울란지 FX %u/%u. %s", (unsigned)okCount, (unsigned)savedCount, notes);
+  return okCount > 0;
+}
+
