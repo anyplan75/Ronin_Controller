@@ -237,6 +237,10 @@ final class Studio: ObservableObject {
         await refreshBoardLanAlive()
         // OLED·RMSID·S3 를 한꺼번에 붙입니다. 예전엔 한 소켓이라 하나만 살아 있었습니다.
         reconnectAllC3()
+        // 고프로·액션5는 올리멕스. 조명/PTZ만 되고 캠이 죽은 채 남지 않게 같이 붙입니다.
+        if profile.olimexRegistered {
+            reconnectOlimex(quiet: true)
+        }
     }
 
     /// OLED=.152 / S3=.153 / RMSID=.154 WS hello 를 다시 찍어 망 응답을 표시합니다.
@@ -1363,6 +1367,31 @@ final class Studio: ObservableObject {
         }
     }
 
+    /// VL200BI FX(스트로보·플래시 등). 펌 1.0.65+ · 프로토콜 FF A1 01 fx fx AA.
+    func setLightEffect(_ id: UUID, index: Int, name: String, all: Bool = false) async {
+        guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
+            note("조명 담당 S3 를 찾지 못했습니다.")
+            return
+        }
+        if !(await c3Socket(for: board).ensureOnline(board)) {
+            note("\(board.listTitle) 에 붙지 못했습니다. \(board.socketHost):82")
+            return
+        }
+        var payload: [String: Any] = [
+            "op": "light",
+            "action": "effect",
+            "name": name,
+        ]
+        if all {
+            payload["scope"] = "all"
+        } else {
+            payload["index"] = index
+        }
+        note("\(board.listTitle) FX \(name) 보내는 중…")
+        let result = await c3Socket(for: board).command(payload, timeout: 6)
+        note(result.sent ? (result.reason.isEmpty ? "FX \(name) 응답" : result.reason) : "FX를 보내지 못했습니다. \(result.reason)")
+    }
+
     /// 저장된 울란지 모두(선택). 개별 UI가 기본이고, 이 버튼만 묶음입니다.
     func setAllLights(_ id: UUID, brightness: Int, kelvin: Int, on: Bool) async {
         guard let board = profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) else {
@@ -1464,6 +1493,17 @@ final class Studio: ObservableObject {
         guard !boards.isEmpty else { return }
         note("C3 \(boards.count)대를 동시에 붙입니다.")
         c3Bag.connectAll(boards)
+    }
+
+    /// 망에서 살아 있는데 오프라인인 보드만 다시 붙입니다(연결 복구).
+    func reconnectAliveC3() {
+        for board in profile.c3Boards where board.link.shoots {
+            if let slot = board.boardSlot, boardLanAlive[slot.rawValue] == false {
+                continue
+            }
+            if c3Bag.state(for: board.id) == .online { continue }
+            c3Bag.socket(for: board.id).connect(board)
+        }
     }
 
     /// 로닌·조명 탭에서 망 무응답일 때 다시 찍습니다.

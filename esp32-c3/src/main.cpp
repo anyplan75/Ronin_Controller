@@ -683,6 +683,45 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
       reply(num, ok, reason);
       return;
     }
+    if (strcmp(action, "effect") == 0 || strcmp(action, "fx") == 0) {
+      // flash=0x04 tv=0x05 candle=0x06 strobe1=0x0C strobe2=0x0D strobe3=0x0E
+      uint8_t fx = (uint8_t)(doc["fx"] | 0);
+      if (fx == 0) fx = (uint8_t)(doc["effect"] | 0);
+      const char* name = doc["name"] | "";
+      if (fx == 0 && name[0]) {
+        if (strcmp(name, "flash") == 0) fx = 0x04;
+        else if (strcmp(name, "tv") == 0) fx = 0x05;
+        else if (strcmp(name, "candle") == 0) fx = 0x06;
+        else if (strcmp(name, "strobe") == 0 || strcmp(name, "strobe1") == 0) fx = 0x0C;
+        else if (strcmp(name, "strobe2") == 0) fx = 0x0D;
+        else if (strcmp(name, "strobe3") == 0) fx = 0x0E;
+      }
+      if (fx == 0) {
+        reply(num, false, "FX 코드(fx) 또는 이름(flash/tv/candle/strobe1-3)이 필요합니다.");
+        return;
+      }
+      char reason[200];
+      bool ok = false;
+      if (strcmp(doc["scope"] | "", "all") == 0) {
+        ok = ulanziBleEffectAll(fx, reason, sizeof(reason));
+      } else if (doc["index"].is<int>()) {
+        int idx = doc["index"] | -1;
+        ok = (idx >= 0 && idx < 2) ? ulanziBleEffectIndex((uint8_t)idx, fx, reason, sizeof(reason)) : false;
+        if (!ok && reason[0] == 0) snprintf(reason, sizeof(reason), "울란지 칸 번호가 잘못되었습니다.");
+      } else if (ulanziBleSavedCount() >= 1) {
+        ok = ulanziBleEffectIndex(0, fx, reason, sizeof(reason));
+      } else {
+        snprintf(reason, sizeof(reason), "저장된 울란지가 없습니다.");
+        ok = false;
+      }
+      JsonDocument out;
+      out["ack"] = ok;
+      out["reason"] = reason;
+      out["fx"] = fx;
+      ulanziBleFillSaved(out);
+      replyDoc(num, out);
+      return;
+    }
     int brightness = doc["brightness"] | 40;
     int kelvin = doc["kelvin"] | 4500;
     bool on = doc["on"] | true;

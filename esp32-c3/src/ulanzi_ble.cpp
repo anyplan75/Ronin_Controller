@@ -626,3 +626,67 @@ bool ulanziBleApplyAll(int brightness, int kelvin, bool on, char* reason, size_t
   snprintf(reason, reasonCap, "울란지 %u/%u 성공. %s", (unsigned)okCount, (unsigned)savedCount, notes);
   return okCount > 0;
 }
+
+static bool effectOnLink(LightLink& L, uint8_t fx, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (!(L.linked && L.client != nullptr && L.client->isConnected() && L.writeChar != nullptr)) {
+    snprintf(reason, reasonCap, "붙은 울란지가 없습니다. 앱에서 이름을 골라 붙이세요.");
+    return false;
+  }
+  // FX: FF A1 01 <fx> <fx> AA (kevinlouie/lctl 관측). 0x00=켜기(CCT 복귀 전 단계).
+  uint8_t pkt[] = {0xFF, 0xA1, 0x01, fx, fx, 0xAA};
+  if (!writePkt(L, pkt, sizeof(pkt))) {
+    snprintf(reason, reasonCap, "울란지 FX 0x%02X 를 쓰지 못했습니다.", (unsigned)fx);
+    return false;
+  }
+  snprintf(reason, reasonCap, "울란지 %s FX 0x%02X 를 보냈습니다.", L.name, (unsigned)fx);
+  return true;
+}
+
+bool ulanziBleEffectIndex(uint8_t index, uint8_t fx, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (index >= savedCount || !savedNames[index][0]) {
+    snprintf(reason, reasonCap, "울란지 칸 %u 가 비어 있습니다.", (unsigned)index);
+    return false;
+  }
+  busy = true;
+  if (!linkAlive(index)) {
+    char pairReason[160];
+    if (!connectSlot(index, savedNames[index], savedIds[index], pairReason, sizeof(pairReason))) {
+      snprintf(reason, reasonCap, "%s", pairReason);
+      busy = false;
+      return false;
+    }
+  }
+  bool ok = effectOnLink(links[index], fx, reason, reasonCap);
+  lastApplyMs = millis();
+  busy = false;
+  return ok;
+}
+
+bool ulanziBleEffectAll(uint8_t fx, char* reason, size_t reasonCap) {
+  if (reason == nullptr || reasonCap == 0) return false;
+  reason[0] = 0;
+  if (savedCount == 0) {
+    snprintf(reason, reasonCap, "저장된 울란지가 없습니다.");
+    return false;
+  }
+  uint8_t okCount = 0;
+  char notes[180] = {};
+  for (uint8_t i = 0; i < savedCount; i++) {
+    char one[120];
+    if (!ulanziBleEffectIndex(i, fx, one, sizeof(one))) {
+      strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+      strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+      continue;
+    }
+    okCount++;
+    strncat(notes, one, sizeof(notes) - strlen(notes) - 1);
+    strncat(notes, " | ", sizeof(notes) - strlen(notes) - 1);
+  }
+  snprintf(reason, reasonCap, "울란지 FX %u/%u. %s", (unsigned)okCount, (unsigned)savedCount, notes);
+  return okCount > 0;
+}
+

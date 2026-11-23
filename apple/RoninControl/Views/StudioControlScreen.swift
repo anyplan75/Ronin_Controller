@@ -170,6 +170,18 @@ struct StudioControlScreen: View {
             didLaunchBoards = true
             await studio.ensureBoardRolesOnLaunch()
             syncPickToTab(sideTab)
+            ensureC3ForTab(sideTab)
+        }
+        .task {
+            // 로닌/C3/고프로가 죽었다가 살아나면 주기적으로 다시 붙입니다.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 8_000_000_000)
+                await studio.refreshBoardLanAlive()
+                studio.reconnectAliveC3()
+                if studio.profile.olimexRegistered, link.state != .online {
+                    studio.reconnectOlimex(quiet: true)
+                }
+            }
         }
         .onChange(of: pick) { _, next in
             if case .c3(let id) = next {
@@ -194,7 +206,7 @@ struct StudioControlScreen: View {
             // PTZ·로닌 동일 높이. 옆=장면 프리셋, 오른쪽=이동형만.
             return min(320, max(240, total * 0.36))
         case .light:
-            return min(240, max(180, total * 0.28))
+            return min(320, max(220, total * 0.34))
         }
     }
 
@@ -241,6 +253,9 @@ struct StudioControlScreen: View {
             for board in studio.profile.c3Boards where board.duty == .light && board.link.shoots {
                 studio.reconnectC3(board.id)
             }
+        case .fixedCam:
+            // 고프로·액션5 반응: 올리멕스 소켓을 탭 진입마다 살립니다.
+            studio.reconnectOlimex(quiet: true)
         default:
             break
         }
@@ -1014,6 +1029,35 @@ struct StudioControlScreen: View {
                     .font(.caption2)
             }
             .toggleStyle(.switch)
+            Text("FX · VL200BI")
+                .font(.caption2.weight(.semibold))
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+                ForEach([
+                    ("스트로보", "strobe1"),
+                    ("스트로보2", "strobe2"),
+                    ("스트로보3", "strobe3"),
+                    ("플래시", "flash"),
+                    ("TV", "tv"),
+                    ("촛불", "candle"),
+                ], id: \.1) { title, name in
+                    Button(title) {
+                        Task { await studio.setLightEffect(boardId, index: light.index, name: name) }
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                }
+            }
+            Button("CCT 복귀") {
+                Task {
+                    await studio.setLight(
+                        boardId,
+                        index: light.index,
+                        brightness: Int(lightLevel[key] ?? 40),
+                        kelvin: Int(lightKelvin[key] ?? 4500),
+                        on: true
+                    )
+                }
+            }
+            .buttonStyle(DeskButtonStyle(selected: true))
         }
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
