@@ -1021,8 +1021,11 @@ final class Studio: ObservableObject {
             return
         }
         let payload: [String: Any] = ["op": "ronin", "action": "zoom", "speed": speed]
-        let result = await c3Socket(for: board).command(payload, timeout: quiet ? 1.5 : 4)
-        if quiet && result.ack { return }
+        if quiet {
+            _ = await c3Socket(for: board).fire(payload)
+            return
+        }
+        let result = await c3Socket(for: board).command(payload, timeout: 2)
         note(result.sent ? result.reason : "\(board.listTitle) 에 줌을 보내지 않았습니다. \(result.reason)")
     }
 
@@ -1045,12 +1048,18 @@ final class Studio: ObservableObject {
         var payload: [String: Any] = ["op": "ronin", "pan": yaw, "yaw": yaw, "pitch": pitch]
         if roll != 0 { payload["roll"] = roll }
         if home { payload["home"] = true }
-        // 연속 팬·틸트는 짧은 대기(fw 1.0.58: DUML notify ≤280ms). 큐가 쌓이지 않게 합니다.
-        let result = await c3Socket(for: board).command(payload, timeout: home ? 4 : (quiet ? 0.7 : 2))
+        // 연속 팬·틸트(quiet): ack 대기 없이 fire — 체감 <0.5s. 제자리·일반은 command.
+        if quiet && !home {
+            let sent = await c3Socket(for: board).fire(payload)
+            if !sent {
+                note("\(board.listTitle) 에 팬·틸트를 보내지 못했습니다(오프라인).")
+            }
+            return
+        }
+        let result = await c3Socket(for: board).command(payload, timeout: home ? 4 : 2)
         if result.ack, !c3Socket(for: board).pairedName.isEmpty {
             rememberGimbalName(board.id, c3Socket(for: board).pairedName)
         }
-        if quiet && result.ack { return }
         if result.ack {
             if home {
                 note("\(board.listTitle) 이 로닌 제자리를 블루투스로 보냈다고 답했습니다.")
@@ -1060,7 +1069,6 @@ final class Studio: ObservableObject {
                 note("\(board.listTitle) 이 팬 \(Int(yaw))°, 틸트 \(Int(pitch))° 를 블루투스로 받았다고 답했습니다.")
             }
         } else {
-            // quiet 여도 「붙은 로닌 없음」은 무조건 알립니다. 조용한 실패가 무반응처럼 보였습니다.
             let hard = result.reason.contains("붙은 로닌") || result.reason.contains("붙지 못") || !result.sent
             if !quiet || hard {
                 note(result.sent ? result.reason : "\(board.listTitle) 에 팬과 틸트를 보내지 않았습니다. \(result.reason)")
@@ -1236,8 +1244,16 @@ final class Studio: ObservableObject {
             note("액션 카메라는 올리멕스 기판에 있습니다. 먼저 등록하세요.")
             return false
         }
+        if boardSocket.state != .online {
+            // 고프로 조작 불가의 흔한 원인: 올리멕스 소켓이 죽은 채 UI만 남아 있음 → 한 번 다시 붙임.
+            reconnectOlimex(quiet: true)
+            let deadline = Date().addingTimeInterval(4)
+            while Date() < deadline, boardSocket.state != .online {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
         guard boardSocket.state == .online else {
-            noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
+            noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다. 「지금 연결」을 확인하세요.")
             return false
         }
         let result = await boardSocket.sendAwaitingTally([

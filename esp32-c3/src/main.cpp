@@ -769,13 +769,8 @@ void loop() {
   boardOtaLoop();
 #if defined(BOARD_HAS_LIGHT)
   if (job == "light") {
+    // 루프에서 자동페어·재스캔하지 않습니다. 붙인 BLE 를 유지하고, 끊김만 ulanziBleLoop 가 조용히 복구합니다.
     ulanziBleLoop();
-    if (WiFi.status() == WL_CONNECTED && !ulanziBleBusy() && ulanziBleSavedCount() < 2 && millis() >= nextAutoPairAt) {
-      nextAutoPairAt = millis() + 25000;
-      char reason[180];
-      if (ulanziBleAutoPair(reason, sizeof(reason))) Serial.println(reason);
-      else Serial.println(reason);
-    }
   }
 #endif
 #if defined(BOARD_HAS_RONIN)

@@ -7,7 +7,7 @@
 // s3    = 울란지 VL200BI 두 대(조명)
 
 #ifndef FW_VERSION
-#define FW_VERSION "1.0.63"
+#define FW_VERSION "1.0.64"
 #endif
 
 enum class BoardSlot : uint8_t { OledRs2 = 0, RmsidSc = 1, S3Light = 2 };

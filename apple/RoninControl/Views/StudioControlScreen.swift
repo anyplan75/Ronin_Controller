@@ -85,7 +85,7 @@ struct StudioControlScreen: View {
                 // 좌·우 패널은 위→아래 전체 높이. 중간만 평면도+하단 조종(하단 스크롤 없음).
                 if geo.size.width < 760 {
                     HStack(spacing: 0) {
-                        tabRail.frame(width: min(160, geo.size.width * 0.34))
+                        tabRail.frame(width: min(140, geo.size.width * 0.28))
                         VStack(spacing: 0) {
                             floor
                                 .frame(maxHeight: .infinity)
@@ -93,11 +93,12 @@ struct StudioControlScreen: View {
                             bottomStage
                                 .frame(height: bottomStageHeight(geo.size.height))
                         }
-                        inspector.frame(width: min(180, geo.size.width * 0.34))
+                        // 이동형 프리셋이 반드시 보이도록 최소 폭 확보
+                        inspector.frame(width: max(168, min(200, geo.size.width * 0.36)))
                     }
                 } else {
                     HStack(spacing: 0) {
-                        tabRail.frame(width: min(300, geo.size.width * 0.26))
+                        tabRail.frame(width: min(260, geo.size.width * 0.22))
                         VStack(spacing: 0) {
                             floor
                                 .frame(maxHeight: .infinity)
@@ -105,7 +106,7 @@ struct StudioControlScreen: View {
                             bottomStage
                                 .frame(height: bottomStageHeight(geo.size.height))
                         }
-                        inspector.frame(width: min(320, geo.size.width * 0.26))
+                        inspector.frame(width: max(220, min(280, geo.size.width * 0.22)))
                     }
                 }
             }
@@ -188,12 +189,12 @@ struct StudioControlScreen: View {
     private func bottomStageHeight(_ total: CGFloat) -> CGFloat {
         switch sideTab {
         case .fixedCam:
-            // UI3: 장면(미리보기) 축소 → 컨트롤 공간 확보
-            return liveReady.isEmpty ? 48 : min(150, max(100, total * 0.16))
+            return liveReady.isEmpty ? 48 : min(120, max(90, total * 0.14))
         case .ptz, .ronin:
-            return min(260, max(190, total * 0.30))
+            // 프리셋은 오른쪽, 조종부는 아래를 키움
+            return min(320, max(220, total * 0.36))
         case .light:
-            return min(220, max(160, total * 0.26))
+            return min(240, max(180, total * 0.28))
         }
     }
 
@@ -1043,7 +1044,7 @@ struct StudioControlScreen: View {
 
     private var floor: some View {
         FloorPlan(
-            gimbal: studio.roninC3,
+            roninBoards: studio.profile.c3Boards.filter { $0.duty == .ronin },
             cameras: link.cameras,
             meters: cameraMeters,
             selected: selectedMark,
@@ -1051,8 +1052,8 @@ struct StudioControlScreen: View {
             liveYaw: yaw,
             livePitch: pitch,
             tool: floorTool,
-            camerasOnline: link.state == .online,
-            liveC3: studio.profile.c3Boards.first(where: { c3Bag.state(for: $0.id) == .online })?.id,
+            camerasOnline: Set(link.state == .online ? link.cameras.map(\.id) : []),
+            onlineC3: Set(studio.profile.c3Boards.filter { c3Bag.state(for: $0.id) == .online }.map(\.id)),
             onTool: { floorTool = $0 },
             onMoveCamera: { id, x, y in cameraMeters[id] = CGPoint(x: x, y: y) },
             onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) },
@@ -1695,7 +1696,7 @@ struct StudioControlScreen: View {
                     ptzOnline.remove(next.0.id)
                     studio.note(result.0)
                 }
-                try? await Task.sleep(nanoseconds: 220_000_000)
+                try? await Task.sleep(nanoseconds: 40_000_000)
             }
             absoluteTask = nil
             if absolutePending != nil, let pending = absolutePending {
@@ -1718,7 +1719,7 @@ struct StudioControlScreen: View {
             pitch = tilt
         } else {
             let now = Date()
-            if now.timeIntervalSince(ptzSent) < 0.16 { return }
+            if now.timeIntervalSince(ptzSent) < 0.05 { return }
             ptzSent = now
             yaw = wrapDegrees(yaw + pan * 8)
             pitch = min(90, max(-56, pitch + tilt * 4))
@@ -1784,7 +1785,7 @@ struct StudioControlScreen: View {
 
     private func steer(_ camera: PtzRecord, pan: Double, tilt: Double, zoom: Double) {
         let now = Date()
-        if now.timeIntervalSince(ptzSent) < 0.18 { return }
+        if now.timeIntervalSince(ptzSent) < 0.05 { return }
         ptzSent = now
         ptzDrive?.cancel()
         ptzDrive = Task {
@@ -1999,7 +2000,8 @@ private struct LensLook {
 /// 가로 14m, 깊이 18m 무대를 미터로만 그립니다. 0°는 객석(+Y)입니다.
 private struct FloorPlan: View {
     @EnvironmentObject private var studio: Studio
-    var gimbal: C3BoardRecord?
+    /// 로닌 보드별 분리 표시(OLED·RMSID 각각).
+    var roninBoards: [C3BoardRecord]
     var cameras: [BoardCamera]
     var meters: [String: CGPoint]
     var selected: String?
@@ -2007,8 +2009,10 @@ private struct FloorPlan: View {
     var liveYaw: Double
     var livePitch: Double
     var tool: FloorTool
-    var camerasOnline: Bool
-    var liveC3: UUID?
+    /// 카메라별 온라인(올리멕스 연결 시 전부, 아니면 비움).
+    var camerasOnline: Set<String>
+    /// C3 보드별 온라인.
+    var onlineC3: Set<UUID>
     var onTool: (FloorTool) -> Void
     var onMoveCamera: (String, Double, Double) -> Void
     var onMoveGimbal: (UUID, Double, Double) -> Void
@@ -2047,23 +2051,24 @@ private struct FloorPlan: View {
                 paintZone(context: context, size: size, mark: stageDraw, title: "무대", fill: Color(red: 0.45, green: 0.62, blue: 0.78).opacity(0.28), stroke: Color(red: 0.62, green: 0.78, blue: 0.9))
                 paintZone(context: context, size: size, mark: fohDraw, title: "FOH", fill: Color(red: 0.54, green: 0.42, blue: 0.20).opacity(0.28), stroke: Color(red: 0.93, green: 0.78, blue: 0.42))
                 context.draw(Text("객석").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
-                if let gimbal {
+                for (ri, gimbal) in roninBoards.enumerated() {
                     let spot = studio.stageSpot(for: gimbal.id)
                     let chosen = selected == gimbal.id.uuidString
-                    let aim = spot.homeYaw + liveYaw
-                    let pitch = spot.homePitch + livePitch
+                    let aim = spot.homeYaw + (chosen ? liveYaw : 0)
+                    let pitch = spot.homePitch + (chosen ? livePitch : 0)
+                    let spread = roninBoards.count <= 1 ? 0.0 : (Double(ri) - Double(roninBoards.count - 1) / 2.0) * 1.6
                     paint(
                         context: context,
                         size: size,
-                        x: spot.x,
+                        x: spot.x + spread,
                         y: spot.y,
                         aim: aim,
                         pitch: pitch,
-                        title: gimbal.name,
+                        title: gimbal.listTitle,
                         mark: "rotate.3d",
                         chosen: chosen,
                         useLens: chosen,
-                        online: liveC3 == gimbal.id
+                        online: onlineC3.contains(gimbal.id)
                     )
                 }
                 let lightRows = lightUnits.isEmpty
@@ -2086,7 +2091,7 @@ private struct FloorPlan: View {
                             mark: "lightbulb.fill",
                             chosen: selected == boardId.uuidString,
                             useLens: false,
-                            online: liveC3 == boardId
+                            online: onlineC3.contains(boardId)
                         )
                     }
                 }
@@ -2124,7 +2129,7 @@ private struct FloorPlan: View {
                         mark: symbolName(camera),
                         chosen: chosen,
                         useLens: chosen,
-                        online: camerasOnline,
+                        online: camerasOnline.contains(camera.id),
                         recording: camRecording.contains(camera.id)
                     )
                 }
@@ -2167,7 +2172,9 @@ private struct FloorPlan: View {
                             onAim(drag, heading)
                             return
                         }
-                        if let id = UUID(uuidString: drag), gimbal?.id == id || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
+                        if let id = UUID(uuidString: drag),
+                           roninBoards.contains(where: { $0.id == id })
+                            || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
                             onMoveGimbal(id, room.x, room.y)
                         } else if let id = UUID(uuidString: drag), ptz.contains(where: { $0.id == id }) {
                             onMovePtz(id, room.x, room.y)
@@ -2349,7 +2356,7 @@ private struct FloorPlan: View {
 
     private func canAim(_ id: String) -> Bool {
         guard let uuid = UUID(uuidString: id) else { return false }
-        if gimbal?.id == uuid { return true }
+        if roninBoards.contains(where: { $0.id == uuid }) { return true }
         return ptz.contains { $0.id == uuid }
     }
 
@@ -2360,7 +2367,7 @@ private struct FloorPlan: View {
     }
 
     private func hit(_ point: CGPoint, size: CGSize) -> String? {
-        if let gimbal {
+        for gimbal in roninBoards {
             let spot = studio.stageSpot(for: gimbal.id)
             let at = plan(x: spot.x, y: spot.y, size: size)
             if hypot(at.x - point.x, at.y - point.y) < 28 { return gimbal.id.uuidString }

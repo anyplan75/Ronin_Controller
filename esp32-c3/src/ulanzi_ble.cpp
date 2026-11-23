@@ -338,15 +338,27 @@ static bool connectSlot(uint8_t slot, const char* name, const char* id, char* re
 }
 
 void ulanziBleLoop() {
+  // 끊김: prefs 는 유지한 채 표시만 내리고, 아래에서 저장 이름으로 조용히 다시 붙입니다(스캔·자동페어 없음).
   for (uint8_t i = 0; i < 2; i++) {
     if (links[i].client != nullptr && links[i].linked && !links[i].client->isConnected()) {
       Serial.print("울란지 칸 ");
       Serial.print(i);
-      Serial.println(" 블루투스가 끊겼습니다.");
+      Serial.println(" 블루투스가 끊겼습니다. 저장 이름으로 다시 붙입니다.");
       clearOne(i, true);
     }
   }
   if (busy) return;
+  // 저장된 칸이 비었으면 스캔 없이 재연결만(루프 자동페어 제거로 불안정 완화).
+  for (uint8_t i = 0; i < 2; i++) {
+    if (linkAlive(i) || !savedNames[i][0]) continue;
+    if ((uint32_t)(millis() - lastApplyMs) < 800) break;
+    busy = true;
+    char reason[160];
+    connectSlot(i, savedNames[i], savedIds[i], reason, sizeof(reason));
+    lastApplyMs = millis();
+    busy = false;
+    return;
+  }
   if ((uint32_t)(millis() - lastApplyMs) < kMinApplyGapMs) return;
   for (uint8_t i = 0; i < 2; i++) {
     if (!pending[i].valid) continue;
