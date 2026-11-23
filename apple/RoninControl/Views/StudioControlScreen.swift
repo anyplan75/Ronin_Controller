@@ -5,7 +5,7 @@ import SwiftUI
 struct StudioControlScreen: View {
     @EnvironmentObject private var studio: Studio
     @EnvironmentObject private var link: BoardSocket
-    @EnvironmentObject private var c3Link: C3JobSocket
+    @EnvironmentObject private var c3Bag: C3SocketBag
     @State private var pick: DeskPick = .olimex
     @State private var sideTab: StudioSideTab = .ptz
     @State private var askC3Job = false
@@ -151,23 +151,18 @@ struct StudioControlScreen: View {
         .onChange(of: link.ethMac) { _, _ in
             studio.rememberOlimex(wifi: link.wifiMac, ethernet: link.ethMac, hotspot: link.apMac)
         }
-        .onChange(of: c3Link.wifiMac) { _, _ in
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: c3Link.lastHost)
-            if let id = c3Link.boardId { studio.rememberC3(id, wifi: c3Link.wifiMac, hotspot: c3Link.apMac) }
-            if !c3Link.lastSlot.isEmpty {
-                studio.boardLanAlive[c3Link.lastSlot] = true
-            } else if let slot = studio.profile.c3Boards.first(where: { $0.id == c3Link.boardId })?.boardSlot?.rawValue {
-                studio.boardLanAlive[slot] = true
+        .onReceive(c3Bag.objectWillChange) { _ in
+            for board in studio.profile.c3Boards {
+                let link = c3(board)
+                guard link.state == .online else { continue }
+                studio.applyBoardHello(boardId: board.id, slot: link.lastSlot, wifi: link.wifiMac, host: link.lastHost)
+                if !link.wifiMac.isEmpty {
+                    studio.rememberC3(board.id, wifi: link.wifiMac, hotspot: link.apMac)
+                }
+                if !link.lastSlot.isEmpty {
+                    studio.boardLanAlive[link.lastSlot] = true
+                }
             }
-        }
-        .onChange(of: c3Link.lastSlot) { _, slot in
-            guard !slot.isEmpty else { return }
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: slot, wifi: c3Link.wifiMac, host: c3Link.lastHost)
-            studio.boardLanAlive[slot] = true
-        }
-        .onChange(of: c3Link.lastHost) { _, host in
-            guard !host.isEmpty else { return }
-            studio.applyBoardHello(boardId: c3Link.boardId, slot: c3Link.lastSlot, wifi: c3Link.wifiMac, host: host)
         }
         .task {
             guard !didLaunchBoards else { return }
@@ -193,10 +188,10 @@ struct StudioControlScreen: View {
     private func bottomStageHeight(_ total: CGFloat) -> CGFloat {
         switch sideTab {
         case .fixedCam:
-            return liveReady.isEmpty ? 64 : min(220, max(140, total * 0.24))
+            // UI3: 장면(미리보기) 축소 → 컨트롤 공간 확보
+            return liveReady.isEmpty ? 48 : min(150, max(100, total * 0.16))
         case .ptz, .ronin:
-            // 옆배치 축소판 — 한 화면에 맞춤
-            return min(240, max(180, total * 0.28))
+            return min(260, max(190, total * 0.30))
         case .light:
             return min(220, max(160, total * 0.26))
         }
@@ -234,40 +229,35 @@ struct StudioControlScreen: View {
         }
     }
 
-    /// 로닌·조명 탭으로 오면 해당 보드 소켓을 붙입니다. (한 소켓이라 탭마다 바꿔 붙음)
+    /// 로닌·조명 탭: 해당 역할 보드를 **모두** 붙입니다(동시 연결).
     private func ensureC3ForTab(_ tab: StudioSideTab) {
         switch tab {
         case .ronin:
-            if case .c3(let id) = pick,
-               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .ronin }) {
-                studio.reconnectC3(id)
-            } else if let first = studio.profile.c3Boards.first(where: { $0.duty == .ronin }) {
-                studio.reconnectC3(first.id)
+            for board in studio.profile.c3Boards where board.duty == .ronin && board.link.shoots {
+                studio.reconnectC3(board.id)
             }
         case .light:
-            if case .c3(let id) = pick,
-               studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
-                studio.reconnectC3(id)
-            } else if let first = studio.profile.c3Boards.first(where: { $0.duty == .light }) {
-                studio.reconnectC3(first.id)
+            for board in studio.profile.c3Boards where board.duty == .light && board.link.shoots {
+                studio.reconnectC3(board.id)
             }
         default:
             break
         }
     }
 
+    private func c3(_ board: C3BoardRecord) -> C3JobSocket { c3Bag.socket(for: board.id) }
+    private func c3(_ id: UUID) -> C3JobSocket { c3Bag.socket(for: id) }
+
     private func c3OnlineText(for board: C3BoardRecord) -> (label: String, online: Bool?) {
-        if c3Link.boardId == board.id {
-            switch c3Link.state {
-            case .online: return ("온라인", true)
-            case .connecting: return ("연결 중", nil)
-            case .offline: return ("오프라인", false)
+        switch c3Bag.state(for: board.id) {
+        case .online: return ("온라인", true)
+        case .connecting: return ("연결 중", nil)
+        case .offline:
+            if board.link == .lan, let slot = board.boardSlot, studio.boardLanAlive[slot.rawValue] == false {
+                return ("망 무응답 \(board.socketHost)", false)
             }
+            return ("오프라인", false)
         }
-        if board.link == .lan, let slot = board.boardSlot, studio.boardLanAlive[slot.rawValue] == false {
-            return ("망 무응답 \(board.socketHost)", false)
-        }
-        return ("대기(다른 보드 연결)", nil)
     }
 
     private var transport: some View {
@@ -779,6 +769,7 @@ struct StudioControlScreen: View {
                 get: { ptzIris[camera.id] ?? 0.5 },
                 set: { ptzIris[camera.id] = $0 }
             ),
+            showFocus: false,
             scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
             selectedScene: ptzSelectedScene[camera.id],
             twoStep: $ptzTwoStep,
@@ -937,9 +928,9 @@ struct StudioControlScreen: View {
                     Task { await studio.scanUlanziLights(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle())
-                if c3Link.savedLights.count > 1 {
+                if c3(board).savedLights.count > 1 {
                     Button("묶음") {
-                        let first = c3Link.savedLights[0]
+                        let first = c3(board).savedLights[0]
                         let key = lightKey(board.id, first.index)
                         Task {
                             await studio.setAllLights(
@@ -953,23 +944,23 @@ struct StudioControlScreen: View {
                     .buttonStyle(DeskButtonStyle())
                 }
             }
-            if !c3Link.gimbals.isEmpty {
+            if !c3(board).gimbals.isEmpty {
                 HStack(spacing: 6) {
-                    ForEach(c3Link.gimbals) { light in
+                    ForEach(c3(board).gimbals) { light in
                         Button("붙이기 · \(light.name)") {
                             Task { await studio.pairUlanziLight(board.id, name: light.name, id: light.id) }
                         }
-                        .buttonStyle(DeskButtonStyle(selected: c3Link.savedLights.contains(where: { $0.name == light.name })))
+                        .buttonStyle(DeskButtonStyle(selected: c3(board).savedLights.contains(where: { $0.name == light.name })))
                     }
                 }
             }
-            if c3Link.savedLights.isEmpty {
+            if c3(board).savedLights.isEmpty {
                 Text("저장된 울란지가 없습니다. 스캔 후 붙이거나 보드가 예전에 저장한 2대를 기다리세요.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
                 HStack(alignment: .top, spacing: 10) {
-                    ForEach(c3Link.savedLights) { light in
+                    ForEach(c3(board).savedLights) { light in
                         lightUnitPane(board.id, light)
                     }
                 }
@@ -1034,8 +1025,8 @@ struct StudioControlScreen: View {
         var rows: [(id: String, name: String, boardId: UUID, index: Int)] = []
         for board in studio.profile.c3Boards where board.duty == .light {
             let lights: [SavedLight]
-            if c3Link.boardId == board.id, !c3Link.savedLights.isEmpty {
-                lights = c3Link.savedLights
+            if c3Bag.state(for: board.id) == .online, !c3(board).savedLights.isEmpty {
+                lights = c3(board).savedLights
             } else {
                 lights = []
             }
@@ -1061,7 +1052,7 @@ struct StudioControlScreen: View {
             livePitch: pitch,
             tool: floorTool,
             camerasOnline: link.state == .online,
-            liveC3: c3Link.state == .online ? c3Link.boardId : nil,
+            liveC3: studio.profile.c3Boards.first(where: { c3Bag.state(for: $0.id) == .online })?.id,
             onTool: { floorTool = $0 },
             onMoveCamera: { id, x, y in cameraMeters[id] = CGPoint(x: x, y: y) },
             onMoveGimbal: { id, x, y in studio.moveStage(deviceId: id, x: x, y: y) },
@@ -1137,19 +1128,22 @@ struct StudioControlScreen: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("설정 · 프리셋")
+                // UI3: 오른쪽 = 이동형 프리셋만(최대 20). 설정·장면 중복 제거.
+                Text("이동형 프리셋")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 switch sideTab {
                 case .ptz:
                     if case .ptz(let id) = pick,
                        let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
-                        ptzInspector(camera)
+                        travelPresetBank(camera: camera)
                     } else {
-                        Text("왼쪽 PTZ 목록에서 카메라를 고르세요.")
+                        Text("왼쪽 PTZ를 고르면 경로 프리셋이 열립니다.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                case .ronin:
+                    roninTravelPresetBank
                 case .fixedCam:
                     switch pick {
                     case .olimex:
@@ -1160,15 +1154,6 @@ struct StudioControlScreen: View {
                         }
                     default:
                         olimexInspector
-                    }
-                case .ronin:
-                    if case .c3(let id) = pick,
-                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
-                        c3Inspector(board)
-                    } else {
-                        Text("왼쪽 로닌 목록에서 보드를 고르세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 case .light:
                     if case .c3(let id) = pick,
@@ -1187,6 +1172,113 @@ struct StudioControlScreen: View {
         }
         .background(panel)
         .overlay(alignment: .leading) { Rectangle().fill(line).frame(width: 1) }
+    }
+
+    /// 뮤직뱅크형 PTZ 이동 경로(최대 20).
+    private func travelPresetBank(camera: PtzRecord) -> some View {
+        let paths = Array(camera.movePaths.prefix(Studio.maxTravelPresets))
+        let scenes = Array(PtzScene.ten(camera.scenes).prefix(9))
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("\(camera.name) · \(paths.count)/\(Studio.maxTravelPresets)")
+                .font(.headline)
+            Text("정지 장면을 순서대로 넣어 카메라 워킹을 만듭니다. Recall=재생, Stop=중단.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("경로 추가") {
+                _ = studio.addPtzMovePath(camera.id)
+            }
+            .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            .disabled(camera.movePaths.count >= Studio.maxTravelPresets)
+            ForEach(paths) { path in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(path.name).font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Button("Recall") {
+                            ptzSequenceTask?.cancel()
+                            ptzSequenceTask = Task { await studio.recallPtzMovePath(camera.id, path: path) }
+                        }
+                        .buttonStyle(DeskButtonStyle(selected: true))
+                        Button("Stop") {
+                            ptzSequenceTask?.cancel()
+                            halt(camera)
+                        }
+                        .buttonStyle(DeskButtonStyle())
+                        Button("삭제") { studio.deletePtzMovePath(camera.id, pathId: path.id) }
+                            .buttonStyle(DeskButtonStyle())
+                    }
+                    Text(path.steps.isEmpty ? "빈 경로" : path.steps.map { "\($0.sceneNumber)" }.joined(separator: " → "))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        ForEach(scenes.filter(\.saved).prefix(6)) { scene in
+                            Button("+\(scene.number)") {
+                                studio.appendPtzMoveStep(camera.id, sceneNumber: scene.number, pathId: path.id)
+                            }
+                            .buttonStyle(DeskButtonStyle())
+                        }
+                        Button("비우기") { studio.clearPtzMovePath(camera.id, pathId: path.id) }
+                            .buttonStyle(DeskButtonStyle())
+                    }
+                }
+                .padding(8)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
+            Text("장면 저장·기본 시선은 아래 조종판 Recall/저장에서 합니다.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var roninTravelPresetBank: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("로닌 워킹 · \(roninMovePath.steps.count)칸")
+                .font(.headline)
+            Text(roninMovePath.steps.isEmpty
+                  ? "아래 조종판에서 장면 번호를 경로에 넣으세요."
+                  : roninMovePath.steps.map { "\($0.sceneNumber)" }.joined(separator: " → "))
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Recall") {
+                    guard let board = selectedRoninBoard else { return }
+                    ptzSequenceTask?.cancel()
+                    ptzSequenceTask = Task {
+                        for step in roninMovePath.steps {
+                            if Task.isCancelled { break }
+                            let scene = roninScenes.first { $0.number == step.sceneNumber }
+                            guard let scene, scene.saved else { continue }
+                            await studio.nudgeRonin(yaw: scene.pan, pitch: scene.tilt, quiet: true, boardId: board.id)
+                            try? await Task.sleep(nanoseconds: UInt64(max(0.3, step.dwellSeconds) * 1_000_000_000))
+                        }
+                    }
+                }
+                .buttonStyle(DeskButtonStyle(selected: true))
+                Button("Stop") { ptzSequenceTask?.cancel() }
+                    .buttonStyle(DeskButtonStyle())
+                Button("비우기") {
+                    roninMovePath.steps = []
+                    studio.note("로닌 이동 경로를 비웠습니다.")
+                }
+                .buttonStyle(DeskButtonStyle())
+            }
+            if let board = selectedRoninBoard {
+                Text(c3OnlineText(for: board).label)
+                    .font(.caption.weight(.semibold))
+                Button("지금 연결 · \(board.listTitle)") { studio.reconnectC3(board.id) }
+                    .buttonStyle(DeskButtonStyle(expand: true))
+                Button("로닌 보드 전부 연결") { studio.reconnectAllC3() }
+                    .buttonStyle(DeskButtonStyle(selected: true, expand: true))
+            }
+        }
+    }
+
+    private var selectedRoninBoard: C3BoardRecord? {
+        if case .c3(let id) = pick,
+           let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .ronin }) {
+            return board
+        }
+        return studio.profile.c3Boards.first(where: { $0.duty == .ronin })
     }
 
     private var olimexInspector: some View {
@@ -1264,11 +1356,11 @@ struct StudioControlScreen: View {
                     Text(lane.title).tag(lane)
                 }
             }
-            Button(c3Link.boardId == board.id && c3Link.state == .connecting ? "연결 중" : "지금 연결") {
+            Button(c3Bag.state(for: board.id) == .connecting ? "연결 중" : "지금 연결") {
                 studio.reconnectC3(board.id)
             }
-            .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
-            .disabled(c3Link.state == .connecting || !board.link.shoots)
+            .buttonStyle(DeskButtonStyle(selected: c3Bag.state(for: board.id) == .online, expand: true))
+            .disabled(c3Bag.state(for: board.id) == .connecting || !board.link.shoots)
             Button("망 다시 확인 (.152/.154)") {
                 studio.recheckC3Lan()
             }
@@ -1281,23 +1373,23 @@ struct StudioControlScreen: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(board.gimbalName.isEmpty
-                     ? (c3Link.pairedName.isEmpty ? "아직 붙인 로닌 이름이 없습니다." : "붙음 \(c3Link.pairedName)")
-                     : "붙일 이름 \(board.gimbalName)\(c3Link.pairedName.isEmpty ? "" : " · 지금 \(c3Link.pairedName)")")
+                     ? (c3(board).pairedName.isEmpty ? "아직 붙인 로닌 이름이 없습니다." : "붙음 \(c3(board).pairedName)")
+                     : "붙일 이름 \(board.gimbalName)\(c3(board).pairedName.isEmpty ? "" : " · 지금 \(c3(board).pairedName)")")
                     .font(.caption.weight(.semibold))
                 Button("로닌 블루투스 스캔") {
                     Task { await studio.scanRoninGimbals(board.id) }
                 }
                 .buttonStyle(DeskButtonStyle(expand: true))
-                if c3Link.gimbals.isEmpty {
+                if c3(board).gimbals.isEmpty {
                     Text("스캔하면 RS·SC 등 로닌 이름이 나옵니다. 오프라인이면 붙인 뒤 바로 스캔합니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(c3Link.gimbals) { gimbal in
+                    ForEach(c3(board).gimbals) { gimbal in
                         Button("붙이기 · \(gimbal.name)") {
                             Task { await studio.pairRoninGimbal(name: gimbal.name, id: gimbal.id, boardId: board.id) }
                         }
-                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3Link.pairedName == gimbal.name, expand: true))
+                        .buttonStyle(DeskButtonStyle(selected: board.gimbalName == gimbal.name || c3(board).pairedName == gimbal.name, expand: true))
                     }
                 }
                 if !board.gimbalName.isEmpty {
@@ -1383,16 +1475,16 @@ struct StudioControlScreen: View {
                     Text(lane.title).tag(lane)
                 }
             }
-            Button(c3Link.boardId == board.id && c3Link.state == .connecting ? "연결 중" : "지금 연결") {
+            Button(c3Bag.state(for: board.id) == .connecting ? "연결 중" : "지금 연결") {
                 studio.reconnectC3(board.id)
             }
-            .buttonStyle(DeskButtonStyle(selected: c3Link.boardId == board.id && c3Link.state == .online, expand: true))
-            .disabled(c3Link.state == .connecting || !board.link.shoots)
+            .buttonStyle(DeskButtonStyle(selected: c3Bag.state(for: board.id) == .online, expand: true))
+            .disabled(c3Bag.state(for: board.id) == .connecting || !board.link.shoots)
             Text("울란지 VL120BI·VL200BI 입니다. 밝기·색온도·켜기/끄기는 아래 칸에서 조작합니다. ack true 일 때만 성공입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if !c3Link.savedLights.isEmpty {
-                Text("저장 \(c3Link.savedLights.count)대 · \(c3Link.savedLights.map(\.name).joined(separator: ", "))")
+            if !c3(board).savedLights.isEmpty {
+                Text("저장 \(c3(board).savedLights.count)대 · \(c3(board).savedLights.map(\.name).joined(separator: ", "))")
                     .font(.caption.weight(.semibold))
             }
         }
