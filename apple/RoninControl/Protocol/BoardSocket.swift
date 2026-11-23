@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// 기판마다 고르는 연결입니다. 기본은 같은 와이파이 망입니다. USB는 펌웨어와 점검이고 촬영 경로가 아닙니다.
@@ -948,4 +949,51 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             }
         }
     }
+}
+
+/// OLED·RMSID·S3 를 **동시에** 붙입니다. 예전 단일 소켓은 하나 고르면 다른 보드를 끊었습니다.
+@MainActor
+final class C3SocketBag: ObservableObject {
+    private var map: [UUID: C3JobSocket] = [:]
+    private var watches: [UUID: AnyCancellable] = [:]
+    /// 자식 소켓이 바뀔 때마다 올라갑니다. 화면 onReceive 용.
+    @Published private(set) var pulse: UInt64 = 0
+
+    func socket(for id: UUID) -> C3JobSocket {
+        if let live = map[id] { return live }
+        let next = C3JobSocket()
+        map[id] = next
+        watches[id] = next.objectWillChange.sink { [weak self] _ in
+            self?.pulse &+= 1
+            self?.objectWillChange.send()
+        }
+        return next
+    }
+
+    func state(for id: UUID) -> BoardLinkState {
+        map[id]?.state ?? .offline
+    }
+
+    func detail(for id: UUID) -> String {
+        map[id]?.detail ?? "대기"
+    }
+
+    func connectAll(_ boards: [C3BoardRecord]) {
+        for board in boards where board.link.shoots {
+            socket(for: board.id).connect(board)
+        }
+    }
+
+    func disconnect(_ id: UUID) {
+        map[id]?.disconnect()
+    }
+
+    func disconnectAll() {
+        for socket in map.values {
+            socket.disconnect()
+        }
+    }
+
+    /// hello·OTA 반영용 — 살아 있는 소켓만.
+    var allSockets: [C3JobSocket] { Array(map.values) }
 }
