@@ -94,7 +94,7 @@ struct StudioControlScreen: View {
                                 .frame(height: bottomStageHeight(geo.size.height))
                         }
                         // 이동형 프리셋이 반드시 보이도록 최소 폭 확보
-                        inspector.frame(width: max(168, min(200, geo.size.width * 0.36)))
+                        inspector.frame(width: max(200, min(240, geo.size.width * 0.38)))
                     }
                 } else {
                     HStack(spacing: 0) {
@@ -106,7 +106,7 @@ struct StudioControlScreen: View {
                             bottomStage
                                 .frame(height: bottomStageHeight(geo.size.height))
                         }
-                        inspector.frame(width: max(220, min(280, geo.size.width * 0.22)))
+                        inspector.frame(width: max(260, min(340, geo.size.width * 0.28)))
                     }
                 }
             }
@@ -191,8 +191,8 @@ struct StudioControlScreen: View {
         case .fixedCam:
             return liveReady.isEmpty ? 48 : min(120, max(90, total * 0.14))
         case .ptz, .ronin:
-            // 프리셋은 오른쪽, 조종부는 아래를 키움
-            return min(320, max(220, total * 0.36))
+            // 프리셋은 오른쪽, 조종부는 화면 거의 절반
+            return min(380, max(260, total * 0.42))
         case .light:
             return min(240, max(180, total * 0.28))
         }
@@ -771,6 +771,9 @@ struct StudioControlScreen: View {
                 set: { ptzIris[camera.id] = $0 }
             ),
             showFocus: false,
+            showSceneGrid: false,
+            showMovePaths: false,
+            padSize: 168,
             scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
             selectedScene: ptzSelectedScene[camera.id],
             twoStep: $ptzTwoStep,
@@ -845,6 +848,9 @@ struct StudioControlScreen: View {
             showFocus: false,
             showIris: false,
             showZoom: board.boardSlot == .oled,
+            showSceneGrid: false,
+            showMovePaths: false,
+            padSize: 168,
             scenes: roninScenes,
             selectedScene: roninSelectedScene,
             twoStep: $roninTwoStep,
@@ -1129,42 +1135,46 @@ struct StudioControlScreen: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                // UI3: 오른쪽 = 이동형 프리셋만(최대 20). 설정·장면 중복 제거.
+                // 오른쪽 패널 = 이동형 프리셋만(탭과 무관하게 항상 표시).
                 Text("이동형 프리셋")
+                    .font(.title3.weight(.bold))
+                Text("최대 \(Studio.maxTravelPresets)개 · 뮤직뱅크형 워킹")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                switch sideTab {
-                case .ptz:
-                    if case .ptz(let id) = pick,
-                       let camera = studio.profile.ptzCameras.first(where: { $0.id == id }) {
-                        travelPresetBank(camera: camera)
-                    } else {
-                        Text("왼쪽 PTZ를 고르면 경로 프리셋이 열립니다.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                // PTZ 경로 + 로닌 경로를 항상 같이 보여 체감 변화 확보
+                if let camera = studio.profile.ptzCameras.first(where: { camera in
+                    if case .ptz(let id) = pick { return camera.id == id }
+                    return false
+                }) ?? studio.profile.ptzCameras.first {
+                    travelPresetBank(camera: camera)
+                } else {
+                    Text("PTZ를 등록하면 여기 경로 칸이 생깁니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("경로 자리 안내") { studio.note("왼쪽에서 PTZ를 등록·고르면 이동형 프리셋을 넣습니다.") }
+                        .buttonStyle(DeskButtonStyle(expand: true))
+                }
+                Divider().overlay(line)
+                roninTravelPresetBank
+                Divider().overlay(line)
+                // 기기 온라인 분리 요약(무대와 같은 기준)
+                Text("무대 기기 상태")
+                    .font(.headline)
+                ForEach(studio.profile.c3Boards) { board in
+                    let st = c3OnlineText(for: board)
+                    HStack {
+                        Text(board.listTitle).font(.caption.weight(.semibold))
+                        Spacer()
+                        Text(st.label)
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(st.online == true ? Color(red: 0.55, green: 0.85, blue: 0.55) : Color.white.opacity(0.55))
                     }
-                case .ronin:
-                    roninTravelPresetBank
-                case .fixedCam:
-                    switch pick {
-                    case .olimex:
-                        olimexInspector
-                    case .camera(let id):
-                        if let camera = link.cameras.first(where: { $0.id == id }) {
-                            cameraInspector(camera)
-                        }
-                    default:
-                        olimexInspector
-                    }
-                case .light:
-                    if case .c3(let id) = pick,
-                       let board = studio.profile.c3Boards.first(where: { $0.id == id && $0.duty == .light }) {
-                        lightInspector(board)
-                    } else {
-                        Text("왼쪽 조명 목록에서 보드를 고르세요.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                }
+                HStack {
+                    Text("올리멕스·캠")
+                    Spacer()
+                    Text(link.state == .online ? "온라인 \(link.cameras.count)대" : "오프라인")
+                        .font(.caption.weight(.bold))
                 }
                 LogList()
             }
@@ -1172,7 +1182,7 @@ struct StudioControlScreen: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(panel)
-        .overlay(alignment: .leading) { Rectangle().fill(line).frame(width: 1) }
+        .overlay(alignment: .leading) { Rectangle().fill(Color.orange.opacity(0.9)).frame(width: 3) }
     }
 
     /// 뮤직뱅크형 PTZ 이동 경로(최대 20).
@@ -1236,10 +1246,26 @@ struct StudioControlScreen: View {
             Text("로닌 워킹 · \(roninMovePath.steps.count)칸")
                 .font(.headline)
             Text(roninMovePath.steps.isEmpty
-                  ? "아래 조종판에서 장면 번호를 경로에 넣으세요."
+                  ? "장면 번호(+N)를 눌러 워킹 경로를 만드세요."
                   : roninMovePath.steps.map { "\($0.sceneNumber)" }.joined(separator: " → "))
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
+            HStack {
+                ForEach(roninScenes.prefix(6)) { scene in
+                    Button("+\(scene.number)") {
+                        if let idx = roninScenes.firstIndex(where: { $0.number == scene.number }) {
+                            roninScenes[idx].pan = yaw
+                            roninScenes[idx].tilt = pitch
+                            roninScenes[idx].zoom = roninZoomSlider
+                            roninScenes[idx].saved = true
+                            roninScenes[idx].name = "로닌 \(scene.number)"
+                        }
+                        roninMovePath.steps.append(PtzMoveStep(sceneNumber: scene.number, dwellSeconds: 2))
+                        studio.note("로닌 경로에 장면 \(scene.number) 을 넣었습니다.")
+                    }
+                    .buttonStyle(DeskButtonStyle())
+                }
+            }
             HStack {
                 Button("Recall") {
                     guard let board = selectedRoninBoard else { return }
@@ -2048,9 +2074,9 @@ private struct FloorPlan: View {
                 context.stroke(Path(room), with: .color(.white.opacity(0.35)), lineWidth: 1.5)
                 let stageDraw = tool == .stage ? sized(stageMark) : stageMark
                 let fohDraw = tool == .foh ? sized(fohMark) : fohMark
-                paintZone(context: context, size: size, mark: stageDraw, title: "무대", fill: Color(red: 0.45, green: 0.62, blue: 0.78).opacity(0.28), stroke: Color(red: 0.62, green: 0.78, blue: 0.9))
-                paintZone(context: context, size: size, mark: fohDraw, title: "FOH", fill: Color(red: 0.54, green: 0.42, blue: 0.20).opacity(0.28), stroke: Color(red: 0.93, green: 0.78, blue: 0.42))
-                context.draw(Text("객석").font(.caption2).foregroundStyle(.white.opacity(0.7)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
+                paintZone(context: context, size: size, mark: stageDraw, title: "무대", fill: Color(red: 0.35, green: 0.55, blue: 0.72).opacity(0.42), stroke: Color(red: 0.45, green: 0.85, blue: 1.0))
+                paintZone(context: context, size: size, mark: fohDraw, title: "FOH", fill: Color(red: 0.62, green: 0.38, blue: 0.12).opacity(0.42), stroke: Color(red: 1.0, green: 0.78, blue: 0.28))
+                context.draw(Text("객석 · 무대/FOH 분리").font(.caption.weight(.bold)).foregroundStyle(.white.opacity(0.85)), at: CGPoint(x: size.width / 2, y: 14), anchor: .center)
                 for (ri, gimbal) in roninBoards.enumerated() {
                     let spot = studio.stageSpot(for: gimbal.id)
                     let chosen = selected == gimbal.id.uuidString
@@ -2252,10 +2278,22 @@ private struct FloorPlan: View {
     private func paintZone(context: GraphicsContext, size: CGSize, mark: FloorMark, title: String, fill: Color, stroke: Color) {
         let box = rect(x0: mark.x, y0: mark.y, x1: mark.x + mark.w, y1: mark.y + mark.d, size: size)
         context.fill(Path(box), with: .color(fill))
-        context.stroke(Path(box), with: .color(stroke), lineWidth: 2)
-        context.draw(Text(title).font(.caption.weight(.bold)).foregroundStyle(.white), at: CGPoint(x: box.midX, y: box.midY), anchor: .center)
+        // 무대·FOH 경계를 굵게 그려 분리 체감
+        context.stroke(Path(box), with: .color(stroke), lineWidth: 4)
+        var hatch = Path()
+        let step: CGFloat = 10
+        var x = box.minX
+        while x < box.maxX {
+            hatch.move(to: CGPoint(x: x, y: box.minY))
+            hatch.addLine(to: CGPoint(x: min(x + step, box.maxX), y: box.maxY))
+            x += step
+        }
+        context.stroke(hatch, with: .color(stroke.opacity(0.35)), lineWidth: 1)
+        context.draw(Text(title).font(.title3.weight(.bold)).foregroundStyle(.white), at: CGPoint(x: box.midX, y: box.midY - 6), anchor: .center)
         if title == "FOH" {
-            context.draw(Text("객석 앞").font(.caption2).foregroundStyle(.white.opacity(0.8)), at: CGPoint(x: box.midX, y: box.midY + 14), anchor: .center)
+            context.draw(Text("객석 앞 · 분리").font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9)), at: CGPoint(x: box.midX, y: box.midY + 16), anchor: .center)
+        } else if title == "무대" {
+            context.draw(Text("공연 구역 · 분리").font(.caption.weight(.semibold)).foregroundStyle(.white.opacity(0.9)), at: CGPoint(x: box.midX, y: box.midY + 16), anchor: .center)
         }
     }
 

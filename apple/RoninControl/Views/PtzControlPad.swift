@@ -10,6 +10,10 @@ struct PtzControlPad: View {
     var showFocus: Bool = true
     var showIris: Bool = true
     var showZoom: Bool = true
+    /// false 이면 장면 그리드·이동경로를 숨기고 D-pad·슬라이더만(프리셋은 오른쪽 패널).
+    var showSceneGrid: Bool = true
+    var showMovePaths: Bool = true
+    var padSize: CGFloat = 118
     var scenes: [PtzScene]
     var selectedScene: Int?
     var twoStep: Binding<Bool>
@@ -35,16 +39,16 @@ struct PtzControlPad: View {
     private let ink = Color.white.opacity(0.92)
 
     var body: some View {
-        // 조작부·프리셋을 옆으로 두고 한 화면에 맞춤(세로 스크롤 없음).
+        // 조종부 크게. 장면/이동 프리셋은 오른쪽 패널로 보냄(showSceneGrid/showMovePaths).
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.subheadline.weight(.semibold))
+                .font(.title3.weight(.semibold))
                 .foregroundStyle(ink)
-            HStack(alignment: .top, spacing: 10) {
-                HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 14) {
+                HStack(alignment: .center, spacing: 14) {
                     eightWayPad
-                        .frame(width: 118, height: 118)
-                    HStack(alignment: .bottom, spacing: 8) {
+                        .frame(width: padSize, height: padSize)
+                    HStack(alignment: .bottom, spacing: 10) {
                         verticalSlider(
                             top: "Fast",
                             bottom: "Slow",
@@ -67,23 +71,23 @@ struct PtzControlPad: View {
                         if showFocus {
                             focusHoldColumn
                         }
+                        if showIris {
+                            irisColumn
+                        }
                     }
                 }
-                .padding(8)
-                .background(pad, in: RoundedRectangle(cornerRadius: 10))
-
-                HStack(alignment: .top, spacing: 8) {
-                    if showIris {
-                        irisColumn
-                    }
-                    presetBlock
-                }
-                .padding(8)
+                .padding(10)
                 .background(pad, in: RoundedRectangle(cornerRadius: 10))
                 .frame(maxWidth: .infinity, alignment: .leading)
+
+                if showSceneGrid {
+                    presetBlock
+                        .padding(8)
+                        .background(pad, in: RoundedRectangle(cornerRadius: 10))
+                }
             }
 
-            if !movePaths.isEmpty || onAddPathStep != nil {
+            if showMovePaths, !movePaths.isEmpty || onAddPathStep != nil {
                 movePathBlock
                     .padding(8)
                     .background(pad, in: RoundedRectangle(cornerRadius: 10))
@@ -139,12 +143,13 @@ struct PtzControlPad: View {
     }
 
     private func verticalSlider(top: String, bottom: String, label: String, value: Binding<Double>, range: ClosedRange<Double>) -> some View {
-        VStack(spacing: 4) {
+        let track = max(84, padSize * 0.72)
+        return VStack(spacing: 4) {
             Text(top).font(.caption2).foregroundStyle(.secondary)
             Slider(value: value, in: range)
                 .rotationEffect(.degrees(-90))
-                .frame(width: 84, height: 24)
-                .frame(width: 28, height: 84)
+                .frame(width: track, height: 24)
+                .frame(width: 28, height: track)
                 .tint(accent)
             Text(bottom).font(.caption2).foregroundStyle(.secondary)
             Text(label).font(.caption2.weight(.semibold)).foregroundStyle(ink)
