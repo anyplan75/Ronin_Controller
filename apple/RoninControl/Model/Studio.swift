@@ -852,6 +852,18 @@ final class Studio: ObservableObject {
         }
     }
 
+
+    /// 울란지 대마다 무대 자리를 따로 둡니다(보드 id와 다른 안정 UUID).
+    static func lightUnitSpotId(boardId: UUID, index: Int) -> UUID {
+        var bytes = boardId.uuid
+        // 인덱스·보드를 섞어 안정적인 고유 id를 만듭니다.
+        bytes.0 = bytes.0 &+ UInt8(truncatingIfNeeded: index &+ 1)
+        bytes.1 ^= UInt8(truncatingIfNeeded: index &* 31)
+        bytes.2 ^= 0x4C // 'L'
+        bytes.3 = UInt8(truncatingIfNeeded: index)
+        return UUID(uuid: bytes)
+    }
+
     func stageSpot(for deviceId: UUID) -> StageSpot {
         if let found = profile.stageSpots.first(where: { $0.deviceId == deviceId }) {
             return found
@@ -1244,12 +1256,13 @@ final class Studio: ObservableObject {
             note("액션 카메라는 올리멕스 기판에 있습니다. 먼저 등록하세요.")
             return false
         }
+        note("\(camera.name) \(start ? "녹화" : "정지") 보내는 중…")
         if boardSocket.state != .online {
             // 고프로 조작 불가의 흔한 원인: 올리멕스 소켓이 죽은 채 UI만 남아 있음 → 한 번 다시 붙임.
             reconnectOlimex(quiet: true)
-            let deadline = Date().addingTimeInterval(4)
+            let deadline = Date().addingTimeInterval(2.5)
             while Date() < deadline, boardSocket.state != .online {
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                try? await Task.sleep(nanoseconds: 80_000_000)
             }
         }
         guard boardSocket.state == .online else {
@@ -1264,7 +1277,7 @@ final class Studio: ObservableObject {
             "ble": camera.ble.isEmpty ? BoardSocket.ble(for: camera.kind) : camera.ble,
             "start": start,
             "tally": start,
-        ], matching: camera.name, timeout: 18)
+        ], matching: camera.name, timeout: 10)
         if !result.sent {
             noteOffline("올리멕스가 오프라인입니다. \(camera.name) 녹화를 보내지 않았습니다.")
             return false

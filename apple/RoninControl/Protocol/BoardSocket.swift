@@ -626,7 +626,13 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             detail = "연결됨 \(board.socketHost)"
             return
         }
-        if boardId == board.id, state == .connecting, task != nil { return }
+        // 「연결 중」에 고정되면 다시 눌러도 무시되던 문제 → 강제 재오픈.
+        if boardId == board.id, state == .connecting {
+            reconnectWork?.cancel()
+            offlineWork?.cancel()
+            open(board, clearLists: false)
+            return
+        }
         open(board, clearLists: boardId != board.id)
     }
 
@@ -665,9 +671,18 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         let task = session.webSocketTask(with: url)
         self.task = task
         task.resume()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
             guard let self, self.generation == token, self.state == .connecting else { return }
-            self.softDrop("\(host):\(board.link.c3Port) 이 열리지 않았습니다. C3 는 2.4GHz만 붙습니다.")
+            // 처음 붙기 실패는 「연결 중」 루프에 가두지 않고 오프라인으로 닫습니다.
+            self.wantConnected = false
+            self.reconnectWork?.cancel()
+            self.offlineWork?.cancel()
+            self.task?.cancel(with: .goingAway, reason: nil)
+            self.task = nil
+            self.session?.invalidateAndCancel()
+            self.session = nil
+            self.state = .offline
+            self.detail = "\(host):\(board.link.c3Port) 이 열리지 않았습니다. 「지금 연결」로 다시 시도하세요."
         }
     }
 
@@ -871,7 +886,7 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
         }
         state = .connecting
         detail = "다시 붙는 중… \(board.socketHost)"
-        // 짧은 끊김은 UI 오프라인으로 안 보입니다. 4초 넘기면 그때 오프라인.
+        // 짧은 끊김은 잠시만 「연결 중」. 1.5초 넘기면 오프라인 표시(고정 방지).
         offlineWork?.cancel()
         let markOffline = DispatchWorkItem { [weak self] in
             guard let self, self.wantConnected, self.state != .online else { return }
@@ -879,14 +894,14 @@ final class C3JobSocket: NSObject, ObservableObject, URLSessionWebSocketDelegate
             self.detail = text
         }
         offlineWork = markOffline
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: markOffline)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: markOffline)
         scheduleReconnect(board)
     }
 
     private func scheduleReconnect(_ board: C3BoardRecord) {
         reconnectWork?.cancel()
-        let delay = min(reconnectDelay, 8)
-        reconnectDelay = min(reconnectDelay * 1.6, 8)
+        let delay = min(reconnectDelay, 5)
+        reconnectDelay = min(reconnectDelay * 1.6, 5)
         let token = generation
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.wantConnected, self.generation == token else { return }

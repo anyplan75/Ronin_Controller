@@ -191,8 +191,8 @@ struct StudioControlScreen: View {
         case .fixedCam:
             return liveReady.isEmpty ? 48 : min(120, max(90, total * 0.14))
         case .ptz, .ronin:
-            // 프리셋은 오른쪽, 조종부는 화면 거의 절반
-            return min(380, max(260, total * 0.42))
+            // PTZ·로닌 동일 높이. 옆=장면 프리셋, 오른쪽=이동형만.
+            return min(320, max(240, total * 0.36))
         case .light:
             return min(240, max(180, total * 0.28))
         }
@@ -281,7 +281,7 @@ struct StudioControlScreen: View {
                     studio.reconnectOlimex()
                 }
                 .buttonStyle(DeskButtonStyle(selected: link.state == .online || link.state == .connecting))
-                .disabled(link.state == .connecting || !studio.profile.olimexRegistered || !link.lane.shoots)
+                .disabled(!studio.profile.olimexRegistered || !link.lane.shoots)
                 Button("모두 녹화") {
                     markGroupRecordPending(group: "all", start: true)
                     Task { await studio.fieldRecord(group: "all", start: true) }
@@ -771,9 +771,11 @@ struct StudioControlScreen: View {
                 set: { ptzIris[camera.id] = $0 }
             ),
             showFocus: false,
-            showSceneGrid: false,
+            showIris: true,
+            showZoom: true,
+            showSceneGrid: true,
             showMovePaths: false,
-            padSize: 168,
+            padSize: 160,
             scenes: Array(PtzScene.ten(camera.scenes).prefix(9)),
             selectedScene: ptzSelectedScene[camera.id],
             twoStep: $ptzTwoStep,
@@ -846,11 +848,11 @@ struct StudioControlScreen: View {
             focus: $roninFocus,
             iris: $roninIris,
             showFocus: false,
-            showIris: false,
-            showZoom: board.boardSlot == .oled,
-            showSceneGrid: false,
+            showIris: true,
+            showZoom: true,
+            showSceneGrid: true,
             showMovePaths: false,
-            padSize: 168,
+            padSize: 160,
             scenes: roninScenes,
             selectedScene: roninSelectedScene,
             twoStep: $roninTwoStep,
@@ -1135,10 +1137,10 @@ struct StudioControlScreen: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                // 오른쪽 패널 = 이동형 프리셋만(탭과 무관하게 항상 표시).
+                // 오른쪽 = 이동형 프리셋만. 장면(고정) 프리셋은 아래 조종부 옆.
                 Text("이동형 프리셋")
                     .font(.title3.weight(.bold))
-                Text("최대 \(Studio.maxTravelPresets)개 · 뮤직뱅크형 워킹")
+                Text("최대 \(Studio.maxTravelPresets)개 · 오른쪽 전용")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 // PTZ 경로 + 로닌 경로를 항상 같이 보여 체감 변화 확보
@@ -1235,7 +1237,7 @@ struct StudioControlScreen: View {
                 .padding(8)
                 .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             }
-            Text("장면 저장·기본 시선은 아래 조종판 Recall/저장에서 합니다.")
+            Text("고정(장면) 프리셋은 아래 조종부 옆에 있습니다.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -1387,7 +1389,7 @@ struct StudioControlScreen: View {
                 studio.reconnectC3(board.id)
             }
             .buttonStyle(DeskButtonStyle(selected: c3Bag.state(for: board.id) == .online, expand: true))
-            .disabled(c3Bag.state(for: board.id) == .connecting || !board.link.shoots)
+            .disabled(!board.link.shoots)
             Button("망 다시 확인 (.152/.154)") {
                 studio.recheckC3Lan()
             }
@@ -1506,7 +1508,7 @@ struct StudioControlScreen: View {
                 studio.reconnectC3(board.id)
             }
             .buttonStyle(DeskButtonStyle(selected: c3Bag.state(for: board.id) == .online, expand: true))
-            .disabled(c3Bag.state(for: board.id) == .connecting || !board.link.shoots)
+            .disabled(!board.link.shoots)
             Text("울란지 VL120BI·VL200BI 입니다. 밝기·색온도·켜기/끄기는 아래 칸에서 조작합니다. ack true 일 때만 성공입니다.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -2100,26 +2102,29 @@ private struct FloorPlan: View {
                 let lightRows = lightUnits.isEmpty
                     ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
                     : lightUnits
-                let lightsByBoard = Dictionary(grouping: lightRows, by: \.boardId)
-                for (boardId, units) in lightsByBoard {
-                    let spot = studio.stageSpot(for: boardId)
-                    let count = max(units.count, 1)
-                    for (i, unit) in units.enumerated() {
-                        let spread = count <= 1 ? 0.0 : (Double(i) - Double(count - 1) / 2.0) * 1.4
-                        paint(
-                            context: context,
-                            size: size,
-                            x: spot.x + spread,
-                            y: spot.y,
-                            aim: 0,
-                            pitch: 0,
-                            title: unit.name,
-                            mark: "lightbulb.fill",
-                            chosen: selected == boardId.uuidString,
-                            useLens: false,
-                            online: onlineC3.contains(boardId)
-                        )
-                    }
+                for unit in lightRows {
+                    let spotId = Studio.lightUnitSpotId(boardId: unit.boardId, index: unit.index)
+                    let live: StageSpot = {
+                        if let found = studio.profile.stageSpots.first(where: { $0.deviceId == spotId }) {
+                            return found
+                        }
+                        let base = studio.stageSpot(for: unit.boardId)
+                        let spread = Double(unit.index) * 1.5 - 0.75
+                        return StageSpot(deviceId: spotId, x: base.x + spread, y: base.y, z: base.z, aimYaw: 0)
+                    }()
+                    paint(
+                        context: context,
+                        size: size,
+                        x: live.x,
+                        y: live.y,
+                        aim: 0,
+                        pitch: 0,
+                        title: unit.name,
+                        mark: "lightbulb.fill",
+                        chosen: selected == unit.id || selected == spotId.uuidString,
+                        useLens: false,
+                        online: onlineC3.contains(unit.boardId)
+                    )
                 }
                 for camera in ptz {
                     let spot = studio.stageSpot(for: camera.id)
@@ -2199,8 +2204,11 @@ private struct FloorPlan: View {
                             return
                         }
                         if let id = UUID(uuidString: drag),
-                           roninBoards.contains(where: { $0.id == id })
-                            || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
+                           roninBoards.contains(where: { $0.id == id }) {
+                            onMoveGimbal(id, room.x, room.y)
+                        } else if let id = UUID(uuidString: drag),
+                                  lightUnits.contains(where: { Studio.lightUnitSpotId(boardId: $0.boardId, index: $0.index) == id })
+                                    || studio.profile.c3Boards.contains(where: { $0.id == id && $0.duty == .light }) {
                             onMoveGimbal(id, room.x, room.y)
                         } else if let id = UUID(uuidString: drag), ptz.contains(where: { $0.id == id }) {
                             onMovePtz(id, room.x, room.y)
@@ -2214,7 +2222,13 @@ private struct FloorPlan: View {
                         dragAim = false
                     }
             )
-            .onAppear { fillSizes(tool) }
+            .onAppear {
+                fillSizes(tool)
+                seedLightSpots()
+            }
+            .onChange(of: lightUnits.count) { _, _ in
+                seedLightSpots()
+            }
             .onChange(of: tool) { _, new in
                 draft = nil
                 fillSizes(new)
@@ -2392,6 +2406,19 @@ private struct FloorPlan: View {
         return "camera.fill"
     }
 
+    private func seedLightSpots() {
+        let rows = lightUnits.isEmpty
+            ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
+            : lightUnits
+        for unit in rows {
+            let spotId = Studio.lightUnitSpotId(boardId: unit.boardId, index: unit.index)
+            if studio.profile.stageSpots.contains(where: { $0.deviceId == spotId }) { continue }
+            let base = studio.stageSpot(for: unit.boardId)
+            let spread = Double(unit.index) * 1.5 - 0.75
+            studio.moveStage(deviceId: spotId, x: base.x + spread, y: base.y)
+        }
+    }
+
     private func canAim(_ id: String) -> Bool {
         guard let uuid = UUID(uuidString: id) else { return false }
         if roninBoards.contains(where: { $0.id == uuid }) { return true }
@@ -2420,10 +2447,18 @@ private struct FloorPlan: View {
             let at = plan(x: spot.x, y: spot.y, size: size)
             if hypot(at.x - point.x, at.y - point.y) < 28 { return camera.id.uuidString }
         }
-        for board in studio.profile.c3Boards where board.duty == .light {
-            let spot = studio.stageSpot(for: board.id)
+        let rows = lightUnits.isEmpty
+            ? studio.profile.c3Boards.filter { $0.duty == .light }.map { (id: $0.id.uuidString, name: $0.name, boardId: $0.id, index: 0) }
+            : lightUnits
+        for unit in rows {
+            let spotId = Studio.lightUnitSpotId(boardId: unit.boardId, index: unit.index)
+            let spot: StageSpot = {
+                if let found = studio.profile.stageSpots.first(where: { $0.deviceId == spotId }) { return found }
+                let base = studio.stageSpot(for: unit.boardId)
+                return StageSpot(deviceId: spotId, x: base.x + Double(unit.index) * 1.5 - 0.75, y: base.y, z: base.z, aimYaw: 0)
+            }()
             let at = plan(x: spot.x, y: spot.y, size: size)
-            if hypot(at.x - point.x, at.y - point.y) < 28 { return board.id.uuidString }
+            if hypot(at.x - point.x, at.y - point.y) < 28 { return spotId.uuidString }
         }
         return nil
     }
